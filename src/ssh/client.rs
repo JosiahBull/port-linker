@@ -39,10 +39,7 @@ impl SshClient {
             .and_then(|c| c.host_name.clone())
             .unwrap_or_else(|| parsed_host.host.clone());
 
-        let port = ssh_config
-            .as_ref()
-            .and_then(|c| c.port)
-            .unwrap_or(ssh_port);
+        let port = ssh_config.as_ref().and_then(|c| c.port).unwrap_or(ssh_port);
 
         let user = parsed_host
             .user
@@ -161,11 +158,10 @@ impl SshClient {
     }
 
     pub async fn exec(&self, command: &str) -> Result<String> {
-        let mut channel = self
-            .handle
-            .channel_open_session()
-            .await
-            .map_err(|e| PortLinkerError::SshChannel(format!("Failed to open channel: {}", e)))?;
+        let mut channel =
+            self.handle.channel_open_session().await.map_err(|e| {
+                PortLinkerError::SshChannel(format!("Failed to open channel: {}", e))
+            })?;
 
         channel
             .exec(true, command)
@@ -223,7 +219,9 @@ fn load_ssh_config(host: &str) -> Option<ssh2_config::HostParams> {
 
     let config_content = std::fs::read_to_string(&config_path).ok()?;
     let mut reader = std::io::Cursor::new(config_content);
-    let config = SshConfig::default().parse(&mut reader, ParseRule::STRICT).ok()?;
+    let config = SshConfig::default()
+        .parse(&mut reader, ParseRule::STRICT)
+        .ok()?;
 
     Some(config.query(host))
 }
@@ -291,7 +289,9 @@ async fn try_agent_auth(handle: &mut Handle<ClientHandler>, user: &str) -> Resul
             .await
             .map_err(|e| PortLinkerError::SshAuth(format!("Failed to connect to agent: {}", e)))?;
 
-        let (_, auth_result) = handle.authenticate_future(user, identity, agent_for_auth).await;
+        let (_, auth_result) = handle
+            .authenticate_future(user, identity, agent_for_auth)
+            .await;
         match auth_result {
             Ok(true) => return Ok(true),
             _ => continue,

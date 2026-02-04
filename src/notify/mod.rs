@@ -20,21 +20,12 @@ impl PortInfo {
 
 #[derive(Debug, Clone)]
 pub enum NotificationEvent {
-    PortsForwarded {
-        ports: Vec<PortInfo>,
-    },
-    PortsRemoved {
-        ports: Vec<PortInfo>,
-    },
+    PortsForwarded { ports: Vec<PortInfo> },
+    PortsRemoved { ports: Vec<PortInfo> },
     ConnectionLost,
     ConnectionRestored,
-    ProcessKilled {
-        port: u16,
-        process_name: String,
-    },
-    ConflictDetected {
-        port: u16,
-    },
+    ProcessKilled { port: u16, process_name: String },
+    ConflictDetected { port: u16 },
 }
 
 impl NotificationEvent {
@@ -89,12 +80,8 @@ impl NotificationEvent {
                     )
                 }
             }
-            NotificationEvent::ConnectionLost => {
-                "SSH connection lost. Reconnecting...".to_string()
-            }
-            NotificationEvent::ConnectionRestored => {
-                "SSH connection restored.".to_string()
-            }
+            NotificationEvent::ConnectionLost => "SSH connection lost. Reconnecting...".to_string(),
+            NotificationEvent::ConnectionRestored => "SSH connection restored.".to_string(),
             NotificationEvent::ProcessKilled { port, process_name } => {
                 format!("Killed {} on port {}", process_name, port)
             }
@@ -152,7 +139,8 @@ impl Notifier {
         if ports.is_empty() {
             return;
         }
-        self.notify(NotificationEvent::PortsForwarded { ports }).await;
+        self.notify(NotificationEvent::PortsForwarded { ports })
+            .await;
     }
 
     /// Notify about multiple ports being removed (batched)

@@ -24,8 +24,8 @@ async fn main() {
     let cli = Cli::parse();
 
     // Initialize logging
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(&cli.log_level));
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&cli.log_level));
 
     tracing_subscriber::fmt()
         .with_env_filter(filter)
@@ -48,12 +48,7 @@ async fn run(cli: Cli) -> error::Result<()> {
     );
 
     // Connect to SSH
-    let client = SshClient::connect(
-        &parsed_host,
-        cli.ssh_port,
-        cli.identity_file.clone(),
-    )
-    .await?;
+    let client = SshClient::connect(&parsed_host, cli.ssh_port, cli.identity_file.clone()).await?;
 
     // Load port mapping
     let port_mapping = Arc::new(PortMapping::load_default());

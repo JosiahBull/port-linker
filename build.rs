@@ -34,8 +34,8 @@ fn render_png(tree: &resvg::usvg::Tree, size: u32, output_path: &Path) {
     let scaled_width = (tree_size.width() * scale).ceil() as u32;
     let scaled_height = (tree_size.height() * scale).ceil() as u32;
 
-    let mut pixmap =
-        resvg::tiny_skia::Pixmap::new(scaled_width, scaled_height).expect("Failed to create pixmap");
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(scaled_width, scaled_height)
+        .expect("Failed to create pixmap");
 
     // Fill with transparent background
     pixmap.fill(resvg::tiny_skia::Color::TRANSPARENT);
@@ -44,7 +44,5 @@ fn render_png(tree: &resvg::usvg::Tree, size: u32, output_path: &Path) {
 
     resvg::render(tree, transform, &mut pixmap.as_mut());
 
-    pixmap
-        .save_png(output_path)
-        .expect("Failed to save PNG");
+    pixmap.save_png(output_path).expect("Failed to save PNG");
 }

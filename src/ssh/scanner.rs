@@ -25,10 +25,7 @@ impl Scanner {
                     .exec("netstat -tlnp 2>/dev/null")
                     .await
                     .map_err(|e| {
-                        PortLinkerError::PortScan(format!(
-                            "Both ss and netstat failed: {}",
-                            e
-                        ))
+                        PortLinkerError::PortScan(format!("Both ss and netstat failed: {}", e))
                     })?
             }
         };

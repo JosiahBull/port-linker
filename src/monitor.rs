@@ -34,7 +34,10 @@ impl Monitor {
         let mut reconnect_delay = Duration::from_secs(1);
         let max_reconnect_delay = Duration::from_secs(60);
 
-        info!("Starting port monitoring (interval: {:?})", self.scan_interval);
+        info!(
+            "Starting port monitoring (interval: {:?})",
+            self.scan_interval
+        );
 
         loop {
             tokio::select! {

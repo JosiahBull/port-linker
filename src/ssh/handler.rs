@@ -27,7 +27,10 @@ impl Default for ClientHandler {
 impl Handler for ClientHandler {
     type Error = russh::Error;
 
-    async fn check_server_key(&mut self, server_public_key: &PublicKey) -> Result<bool, Self::Error> {
+    async fn check_server_key(
+        &mut self,
+        server_public_key: &PublicKey,
+    ) -> Result<bool, Self::Error> {
         let mut key = self.server_public_key.lock().await;
         *key = Some(server_public_key.clone());
         // In production, you'd verify against known_hosts
