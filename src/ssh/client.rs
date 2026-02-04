@@ -267,6 +267,7 @@ fn get_default_identity_files() -> Vec<PathBuf> {
     ]
 }
 
+#[cfg(unix)]
 async fn try_agent_auth(handle: &mut Handle<ClientHandler>, user: &str) -> Result<bool> {
     let agent_sock = std::env::var("SSH_AUTH_SOCK").ok();
 
@@ -298,6 +299,12 @@ async fn try_agent_auth(handle: &mut Handle<ClientHandler>, user: &str) -> Resul
         }
     }
 
+    Ok(false)
+}
+
+#[cfg(windows)]
+async fn try_agent_auth(_handle: &mut Handle<ClientHandler>, _user: &str) -> Result<bool> {
+    // SSH agent authentication via Unix socket is not supported on Windows
     Ok(false)
 }
 

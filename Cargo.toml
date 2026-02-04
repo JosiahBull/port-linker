@@ -12,7 +12,6 @@ sysinfo = "0.38"
 notify-rust = "4"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-anyhow = "1"
 thiserror = "2"
 dialoguer = "0.12"
 dirs = "6"

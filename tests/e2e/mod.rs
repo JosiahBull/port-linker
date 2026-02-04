@@ -9,6 +9,10 @@
 //! - Forward those ports to localhost
 //! - Handle dynamic port changes
 //! - Handle connection drops and reconnection
+//!
+//! Note: These tests only run on Unix systems as they require Docker and Unix-specific APIs.
+
+#![cfg(unix)]
 
 use ntest::timeout;
 
@@ -42,6 +46,7 @@ impl TestLock {
         let file = OpenOptions::new()
             .write(true)
             .create(true)
+            .truncate(false)
             .mode(0o600)
             .open(&lock_path)
             .expect("Failed to open lock file");

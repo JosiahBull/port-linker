@@ -111,8 +111,7 @@ impl Scanner {
 
         // Handle IPv4 format address:port
         // But also handle :::port (IPv6 any)
-        if addr.starts_with(":::") {
-            let port_str = &addr[3..];
+        if let Some(port_str) = addr.strip_prefix(":::") {
             let port = port_str.parse().ok()?;
             return Some(("::".to_string(), port));
         }
@@ -146,10 +145,8 @@ impl Scanner {
         for part in line.split_whitespace().rev() {
             if part.contains('/') {
                 let parts: Vec<&str> = part.split('/').collect();
-                if parts.len() == 2 {
-                    if parts[0].parse::<u32>().is_ok() {
-                        return Some(parts[1].to_string());
-                    }
+                if parts.len() == 2 && parts[0].parse::<u32>().is_ok() {
+                    return Some(parts[1].to_string());
                 }
             }
         }
