@@ -13,6 +13,7 @@ RUN apk add --no-cache \
 
 # Setup SSH
 RUN ssh-keygen -A && \
+    sed -i 's/AllowTcpForwarding no/AllowTcpForwarding yes/' /etc/ssh/sshd_config && \
     echo "PermitRootLogin yes" >> /etc/ssh/sshd_config && \
     echo "PasswordAuthentication yes" >> /etc/ssh/sshd_config && \
     echo "PermitEmptyPasswords no" >> /etc/ssh/sshd_config && \

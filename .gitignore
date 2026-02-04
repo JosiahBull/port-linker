@@ -1,1 +1,5 @@
 /target
+
+# Test SSH keys
+tests/docker/test_key
+tests/docker/test_key.pub

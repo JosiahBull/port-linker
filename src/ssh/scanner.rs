@@ -69,13 +69,17 @@ impl Scanner {
 
         // Find local address column
         // ss format: Netid State Recv-Q Send-Q Local Address:Port Peer Address:Port Process
+        //   e.g.: tcp    LISTEN  0       128     0.0.0.0:22            0.0.0.0:*
+        //         parts[1] = "LISTEN" (a state, not a number)
         // netstat format: Proto Recv-Q Send-Q Local Address Foreign Address State PID/Program
-        let local_addr_idx = if line.contains("LISTEN") || line.contains("UNCONN") {
-            // ss format - local address is typically column 4 (0-indexed)
-            4
-        } else {
-            // netstat format - local address is typically column 3
+        //   e.g.: tcp        0      0 0.0.0.0:8080            0.0.0.0:*               LISTEN
+        //         parts[1] = "0" (a number)
+        let local_addr_idx = if parts[1].parse::<u32>().is_ok() {
+            // netstat format - parts[1] is Recv-Q (a number), local address is column 3
             3
+        } else {
+            // ss format - parts[1] is State (LISTEN/UNCONN), local address is column 4
+            4
         };
 
         if parts.len() <= local_addr_idx {

@@ -42,7 +42,7 @@ fn binary_path() -> PathBuf {
 /// Check if the Docker test environment is running
 fn is_test_env_running() -> bool {
     TcpStream::connect_timeout(
-        &format!("{}:{}", SSH_HOST, SSH_PORT).parse().unwrap(),
+        &format!("127.0.0.1:{}", SSH_PORT).parse().unwrap(),
         Duration::from_secs(1),
     )
     .is_ok()
@@ -66,6 +66,17 @@ fn start_port_linker(extra_args: &[&str]) -> std::io::Result<Child> {
         .stderr(Stdio::piped());
 
     cmd.spawn()
+}
+
+/// Stop port-linker and wait for cleanup
+fn stop_port_linker(mut child: Child, ports: &[u16]) {
+    child.kill().ok();
+    let _ = child.wait();
+
+    // Wait for ports to be released
+    for &port in ports {
+        wait_for_port_closed(port, Duration::from_secs(5));
+    }
 }
 
 /// Wait for a local port to become available
@@ -169,14 +180,13 @@ fn test_ssh_key_exists() {
 fn test_connects_and_discovers_ports() {
     require_test_env!();
 
-    let mut child =
-        start_port_linker(&["--scan-interval", "1"]).expect("Failed to start port-linker");
+    let child = start_port_linker(&["--scan-interval", "1"]).expect("Failed to start port-linker");
 
     // Wait for ports to be forwarded
     let port_8080_ready = wait_for_port(8080, Duration::from_secs(15));
 
-    // Stop port-linker
-    child.kill().ok();
+    // Stop port-linker and wait for cleanup
+    stop_port_linker(child, &[8080]);
 
     assert!(
         port_8080_ready,
@@ -189,7 +199,7 @@ fn test_connects_and_discovers_ports() {
 fn test_forwards_http_traffic() {
     require_test_env!();
 
-    let mut child = start_port_linker(&["--scan-interval", "1", "-p", "8080"])
+    let child = start_port_linker(&["--scan-interval", "1", "-p", "8080"])
         .expect("Failed to start port-linker");
 
     // Wait for port 8080 to be forwarded
@@ -201,9 +211,14 @@ fn test_forwards_http_traffic() {
     // Make HTTP request through forwarded port
     let response = send_and_receive(8080, b"GET / HTTP/1.0\r\n\r\n");
 
-    child.kill().ok();
+    // Stop port-linker and wait for cleanup
+    stop_port_linker(child, &[8080]);
 
-    assert!(response.is_ok(), "Failed to connect through forwarded port");
+    assert!(
+        response.is_ok(),
+        "Failed to connect through forwarded port: {:?}",
+        response.err()
+    );
     let response_data = response.unwrap();
     assert!(
         !response_data.is_empty(),
@@ -217,7 +232,7 @@ fn test_port_whitelist() {
     require_test_env!();
 
     // Only forward port 8080
-    let mut child = start_port_linker(&["--scan-interval", "1", "-p", "8080"])
+    let child = start_port_linker(&["--scan-interval", "1", "-p", "8080"])
         .expect("Failed to start port-linker");
 
     // Wait for port 8080 to be forwarded
@@ -232,7 +247,8 @@ fn test_port_whitelist() {
     // Port 5432 should NOT be forwarded (not in whitelist)
     let port_5432_open = is_port_open(5432);
 
-    child.kill().ok();
+    // Stop port-linker and wait for cleanup
+    stop_port_linker(child, &[8080]);
 
     assert!(
         !port_5432_open,
@@ -246,7 +262,7 @@ fn test_port_exclusion() {
     require_test_env!();
 
     // Exclude port 8080
-    let mut child = start_port_linker(&[
+    let child = start_port_linker(&[
         "--scan-interval",
         "1",
         "-x",
@@ -264,7 +280,8 @@ fn test_port_exclusion() {
     // Port 8080 should NOT be forwarded (excluded)
     let port_8080_open = is_port_open(8080);
 
-    child.kill().ok();
+    // Stop port-linker and wait for cleanup
+    stop_port_linker(child, &[3000, 5432]);
 
     assert!(port_5432_ready, "Port 5432 was not forwarded");
     assert!(
@@ -314,7 +331,7 @@ fn test_clean_shutdown() {
 fn test_multiple_ports() {
     require_test_env!();
 
-    let mut child = start_port_linker(&[
+    let child = start_port_linker(&[
         "--scan-interval",
         "1",
         "-p",
@@ -327,7 +344,8 @@ fn test_multiple_ports() {
     let port_8080_ready = wait_for_port(8080, Duration::from_secs(15));
     let port_5432_ready = wait_for_port(5432, Duration::from_secs(5));
 
-    child.kill().ok();
+    // Stop port-linker and wait for cleanup
+    stop_port_linker(child, &[8080, 5432]);
 
     assert!(port_8080_ready, "Port 8080 was not forwarded");
     assert!(port_5432_ready, "Port 5432 was not forwarded");
@@ -339,13 +357,14 @@ fn test_localhost_bound_port() {
     require_test_env!();
 
     // Port 3000 is bound to 127.0.0.1 on the remote
-    let mut child = start_port_linker(&["--scan-interval", "1", "-p", "3000"])
+    let child = start_port_linker(&["--scan-interval", "1", "-p", "3000"])
         .expect("Failed to start port-linker");
 
     // Wait for port to be forwarded
     let port_ready = wait_for_port(3000, Duration::from_secs(15));
 
-    child.kill().ok();
+    // Stop port-linker and wait for cleanup
+    stop_port_linker(child, &[3000]);
 
     assert!(
         port_ready,
