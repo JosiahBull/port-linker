@@ -13,7 +13,6 @@
 #[allow(deprecated)]
 use assert_cmd::cargo::cargo_bin;
 use assert_cmd::prelude::*;
-use predicates::prelude::*;
 use std::process::Command;
 
 /// Get the path to the port-linker binary
@@ -395,19 +394,22 @@ fn test_invalid_ssh_key() {
 
 #[test]
 fn test_help_output() {
-    Command::new(bin_path())
+    let output = Command::new(bin_path())
         .arg("--help")
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("SSH"))
-        .stdout(predicate::str::contains("port"));
+        .output()
+        .expect("Failed to run port-linker --help");
+
+    assert!(output.status.success());
+    insta::assert_snapshot!(String::from_utf8_lossy(&output.stdout));
 }
 
 #[test]
 fn test_version_output() {
-    Command::new(bin_path())
+    let output = Command::new(bin_path())
         .arg("--version")
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("port-linker"));
+        .output()
+        .expect("Failed to run port-linker --version");
+
+    assert!(output.status.success());
+    insta::assert_snapshot!(String::from_utf8_lossy(&output.stdout));
 }

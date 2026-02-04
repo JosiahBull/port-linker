@@ -1,0 +1,6 @@
+---
+source: tests/e2e/mod.rs
+assertion_line: 415
+expression: "String::from_utf8_lossy(&output.stdout)"
+---
+port-linker 0.1.0
