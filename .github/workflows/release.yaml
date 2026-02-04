@@ -34,10 +34,18 @@ jobs:
             os: ubuntu-latest
             artifact_name: port-linker
             asset_name: port-linker-linux-x86_64
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            artifact_name: port-linker
+            asset_name: port-linker-linux-x86_64-musl
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
             artifact_name: port-linker
             asset_name: port-linker-linux-aarch64
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            artifact_name: port-linker
+            asset_name: port-linker-linux-aarch64-musl
           - target: x86_64-apple-darwin
             os: macos-latest
             artifact_name: port-linker
@@ -65,6 +73,23 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu
 
+      - name: Install musl tools (Linux x86_64 musl)
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+
+      - name: Install musl cross tools (Linux aarch64 musl)
+        if: matrix.target == 'aarch64-unknown-linux-musl'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools gcc-aarch64-linux-gnu musl-dev
+          # Download and install aarch64 musl cross compiler
+          curl -LO https://musl.cc/aarch64-linux-musl-cross.tgz
+          tar -xzf aarch64-linux-musl-cross.tgz
+          sudo mv aarch64-linux-musl-cross /opt/
+          echo "/opt/aarch64-linux-musl-cross/bin" >> $GITHUB_PATH
+
       - name: Install UPX (Ubuntu)
         if: matrix.os == 'ubuntu-latest'
         run: sudo apt-get update && sudo apt-get install -y upx
@@ -73,6 +98,8 @@ jobs:
         run: cargo build --release --target ${{ matrix.target }}
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: aarch64-linux-musl-gcc
+          CC_aarch64_unknown_linux_musl: aarch64-linux-musl-gcc
 
       - name: Compress binary with UPX (Linux x86_64)
         if: matrix.target == 'x86_64-unknown-linux-gnu'
@@ -97,6 +124,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      id-token: write  # Required for cosign keyless signing
     steps:
       - uses: actions/checkout@v4
 
@@ -104,6 +132,9 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: artifacts
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
 
       - name: Determine version
         id: version
@@ -138,7 +169,24 @@ jobs:
         run: |
           cd release
           sha256sum ./*.tar.gz > checksums-sha256.txt
+          md5sum ./*.tar.gz > checksums-md5.txt
+          echo "SHA256:"
           cat checksums-sha256.txt
+          echo ""
+          echo "MD5:"
+          cat checksums-md5.txt
+
+      - name: Sign artifacts with cosign
+        run: |
+          cd release
+          # Sign each tar.gz file
+          for file in *.tar.gz; do
+            cosign sign-blob --yes --output-signature "${file}.sig" --output-certificate "${file}.pem" "$file"
+          done
+          # Also sign the checksums files
+          cosign sign-blob --yes --output-signature "checksums-sha256.txt.sig" --output-certificate "checksums-sha256.txt.pem" "checksums-sha256.txt"
+          cosign sign-blob --yes --output-signature "checksums-md5.txt.sig" --output-certificate "checksums-md5.txt.pem" "checksums-md5.txt"
+          ls -la
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -149,16 +197,29 @@ jobs:
           generate_release_notes: true
           files: |
             release/*.tar.gz
+            release/*.sig
+            release/*.pem
             release/checksums-sha256.txt
+            release/checksums-md5.txt
           body: |
             ## Installation
+
+            ### Using cargo-binstall (Recommended)
+
+            ```bash
+            cargo binstall port-linker
+            ```
+
+            ### Manual download
 
             Download the appropriate binary for your platform:
 
             | Platform | Architecture | File |
             |----------|--------------|------|
             | Linux | x86_64 | `port-linker-linux-x86_64.tar.gz` |
+            | Linux | x86_64 (musl) | `port-linker-linux-x86_64-musl.tar.gz` |
             | Linux | aarch64 | `port-linker-linux-aarch64.tar.gz` |
+            | Linux | aarch64 (musl) | `port-linker-linux-aarch64-musl.tar.gz` |
             | macOS | x86_64 (Intel) | `port-linker-macos-x86_64.tar.gz` |
             | macOS | aarch64 (Apple Silicon) | `port-linker-macos-aarch64.tar.gz` |
 
@@ -181,5 +242,40 @@ jobs:
             ### Verify checksums
 
             ```bash
+            # SHA256 (recommended)
             sha256sum -c checksums-sha256.txt
+
+            # MD5
+            md5sum -c checksums-md5.txt
+            ```
+
+            ### Verify signatures
+
+            All release artifacts are signed using [cosign](https://github.com/sigstore/cosign) with keyless signing.
+
+            ```bash
+            # Install cosign: https://docs.sigstore.dev/cosign/system_config/installation/
+
+            # Verify a specific artifact
+            cosign verify-blob \
+              --signature port-linker-linux-x86_64.tar.gz.sig \
+              --certificate port-linker-linux-x86_64.tar.gz.pem \
+              --certificate-identity-regexp "https://github.com/${{ github.repository }}/" \
+              --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+              port-linker-linux-x86_64.tar.gz
+
+            # Verify checksums files
+            cosign verify-blob \
+              --signature checksums-sha256.txt.sig \
+              --certificate checksums-sha256.txt.pem \
+              --certificate-identity-regexp "https://github.com/${{ github.repository }}/" \
+              --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+              checksums-sha256.txt
+
+            cosign verify-blob \
+              --signature checksums-md5.txt.sig \
+              --certificate checksums-md5.txt.pem \
+              --certificate-identity-regexp "https://github.com/${{ github.repository }}/" \
+              --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+              checksums-md5.txt
             ```

@@ -2,6 +2,9 @@
 name = "port-linker"
 version = "0.1.0"
 edition = "2021"
+description = "A CLI tool that connects to remote systems via SSH and automatically forwards discovered ports to localhost"
+repository = "https://github.com/JosiahParry/port-linker"
+license = "MIT"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
@@ -26,6 +29,28 @@ assert_cmd = "2"
 insta = "1"
 libc = "0.2"
 ntest = "0.9"
+
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/port-linker-{ target }{ archive-suffix }"
+pkg-fmt = "tgz"
+
+[package.metadata.binstall.overrides.x86_64-unknown-linux-gnu]
+pkg-url = "{ repo }/releases/download/v{ version }/port-linker-linux-x86_64.tar.gz"
+
+[package.metadata.binstall.overrides.x86_64-unknown-linux-musl]
+pkg-url = "{ repo }/releases/download/v{ version }/port-linker-linux-x86_64-musl.tar.gz"
+
+[package.metadata.binstall.overrides.aarch64-unknown-linux-gnu]
+pkg-url = "{ repo }/releases/download/v{ version }/port-linker-linux-aarch64.tar.gz"
+
+[package.metadata.binstall.overrides.aarch64-unknown-linux-musl]
+pkg-url = "{ repo }/releases/download/v{ version }/port-linker-linux-aarch64-musl.tar.gz"
+
+[package.metadata.binstall.overrides.x86_64-apple-darwin]
+pkg-url = "{ repo }/releases/download/v{ version }/port-linker-macos-x86_64.tar.gz"
+
+[package.metadata.binstall.overrides.aarch64-apple-darwin]
+pkg-url = "{ repo }/releases/download/v{ version }/port-linker-macos-aarch64.tar.gz"
 
 [profile.release]
 lto = true
