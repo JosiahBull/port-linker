@@ -20,7 +20,7 @@ pub const DEFAULT_EXCLUDED_PORTS: &[u16] = &[
     about = "Connect to remote systems via SSH and forward discovered ports to localhost"
 )]
 pub struct Cli {
-    /// Remote host in format [user@]host
+    /// Remote host in format `[user@]host`
     #[arg(value_name = "HOST", default_value = "josiah@avocado")]
     pub host: String,
 
