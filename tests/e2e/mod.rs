@@ -10,6 +10,8 @@
 //! - Handle dynamic port changes
 //! - Handle connection drops and reconnection
 
+use ntest::timeout;
+
 #[allow(deprecated)]
 use assert_cmd::cargo::cargo_bin;
 use assert_cmd::prelude::*;
@@ -51,6 +53,14 @@ impl TestLock {
         }
 
         TestLock { _file: file }
+    }
+}
+
+impl Drop for TestLock {
+    fn drop(&mut self) {
+        unsafe {
+            libc::flock(self._file.as_raw_fd(), libc::LOCK_UN);
+        }
     }
 }
 
@@ -222,6 +232,7 @@ macro_rules! require_test_env {
 }
 
 #[test]
+#[timeout(60000)]
 fn test_connects_and_discovers_ports() {
     let _lock = TestLock::acquire();
     require_test_env!();
@@ -241,6 +252,7 @@ fn test_connects_and_discovers_ports() {
 }
 
 #[test]
+#[timeout(60000)]
 fn test_forwards_http_traffic() {
     let _lock = TestLock::acquire();
     require_test_env!();
@@ -273,6 +285,7 @@ fn test_forwards_http_traffic() {
 }
 
 #[test]
+#[timeout(60000)]
 fn test_port_whitelist() {
     let _lock = TestLock::acquire();
     require_test_env!();
@@ -303,6 +316,7 @@ fn test_port_whitelist() {
 }
 
 #[test]
+#[timeout(60000)]
 fn test_port_exclusion() {
     let _lock = TestLock::acquire();
     require_test_env!();
@@ -337,6 +351,7 @@ fn test_port_exclusion() {
 }
 
 #[test]
+#[timeout(60000)]
 fn test_clean_shutdown() {
     let _lock = TestLock::acquire();
     require_test_env!();
@@ -373,6 +388,7 @@ fn test_clean_shutdown() {
 }
 
 #[test]
+#[timeout(60000)]
 fn test_multiple_ports() {
     let _lock = TestLock::acquire();
     require_test_env!();
@@ -398,6 +414,7 @@ fn test_multiple_ports() {
 }
 
 #[test]
+#[timeout(60000)]
 fn test_localhost_bound_port() {
     let _lock = TestLock::acquire();
     require_test_env!();
@@ -419,6 +436,7 @@ fn test_localhost_bound_port() {
 }
 
 #[test]
+#[timeout(60000)]
 fn test_new_service_detected() {
     let _lock = TestLock::acquire();
     require_test_env!();
@@ -450,6 +468,7 @@ fn test_new_service_detected() {
 }
 
 #[test]
+#[timeout(60000)]
 fn test_service_removal_detected() {
     let _lock = TestLock::acquire();
     require_test_env!();
@@ -486,6 +505,7 @@ fn test_service_removal_detected() {
 }
 
 #[test]
+#[timeout(30000)]
 fn test_invalid_ssh_host() {
     // This should fail quickly with connection error
     Command::new(bin_path())
@@ -498,6 +518,7 @@ fn test_invalid_ssh_host() {
 }
 
 #[test]
+#[timeout(30000)]
 fn test_invalid_ssh_key() {
     require_test_env!();
 
@@ -514,6 +535,7 @@ fn test_invalid_ssh_key() {
 }
 
 #[test]
+#[timeout(10000)]
 fn test_help_output() {
     let output = Command::new(bin_path())
         .arg("--help")
@@ -525,6 +547,7 @@ fn test_help_output() {
 }
 
 #[test]
+#[timeout(10000)]
 fn test_version_output() {
     let output = Command::new(bin_path())
         .arg("--version")

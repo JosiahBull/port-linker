@@ -28,6 +28,7 @@ resvg = "0.44"
 assert_cmd = "2"
 insta = "1"
 libc = "0.2"
+ntest = "0.9"
 
 [[test]]
 name = "e2e"
