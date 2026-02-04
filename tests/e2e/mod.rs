@@ -75,7 +75,11 @@ fn stop_port_linker(mut child: Child, ports: &[u16]) {
 
     // Wait for ports to be released
     for &port in ports {
-        wait_for_port_closed(port, Duration::from_secs(5));
+        assert!(
+            wait_for_port_closed(port, Duration::from_secs(5)),
+            "Port {} did not close within timeout after stopping port-linker",
+            port
+        );
     }
 }
 
