@@ -8,7 +8,7 @@ Connect to remote systems via SSH and forward discovered ports to localhost
 Usage: port-linker [OPTIONS] [HOST]
 
 Arguments:
-  [HOST]  Remote host in format [user@]host [default: josiah@avocado]
+  [HOST]  Remote host in format `[user@]host` [default: josiah@avocado]
 
 Options:
   -p, --ports <PORTS>                  Only forward specific ports (comma-separated)
