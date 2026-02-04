@@ -153,7 +153,7 @@ jobs:
               "echo 'SSH connection successful'"
 
       - name: Run E2E tests
-        run: cargo test --test e2e -- --ignored --test-threads=1
+        run: cargo test --test e2e -- --test-threads=1
 
       - name: Show Docker logs on failure
         if: failure()

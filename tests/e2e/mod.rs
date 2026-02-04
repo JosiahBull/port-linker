@@ -165,7 +165,6 @@ fn test_binary_exists() {
 }
 
 #[test]
-#[ignore] // Requires Docker environment setup
 fn test_ssh_key_exists() {
     let path = test_key_path();
     assert!(
@@ -176,7 +175,6 @@ fn test_ssh_key_exists() {
 }
 
 #[test]
-#[ignore] // Requires Docker environment
 fn test_connects_and_discovers_ports() {
     require_test_env!();
 
@@ -195,7 +193,6 @@ fn test_connects_and_discovers_ports() {
 }
 
 #[test]
-#[ignore] // Requires Docker environment
 fn test_forwards_http_traffic() {
     require_test_env!();
 
@@ -227,7 +224,6 @@ fn test_forwards_http_traffic() {
 }
 
 #[test]
-#[ignore] // Requires Docker environment
 fn test_port_whitelist() {
     require_test_env!();
 
@@ -257,7 +253,6 @@ fn test_port_whitelist() {
 }
 
 #[test]
-#[ignore] // Requires Docker environment
 fn test_port_exclusion() {
     require_test_env!();
 
@@ -291,7 +286,6 @@ fn test_port_exclusion() {
 }
 
 #[test]
-#[ignore] // Requires Docker environment
 fn test_clean_shutdown() {
     require_test_env!();
 
@@ -327,7 +321,6 @@ fn test_clean_shutdown() {
 }
 
 #[test]
-#[ignore] // Requires Docker environment
 fn test_multiple_ports() {
     require_test_env!();
 
@@ -352,7 +345,6 @@ fn test_multiple_ports() {
 }
 
 #[test]
-#[ignore] // Requires Docker environment
 fn test_localhost_bound_port() {
     require_test_env!();
 
@@ -373,7 +365,6 @@ fn test_localhost_bound_port() {
 }
 
 #[test]
-#[ignore] // Requires Docker environment
 fn test_invalid_ssh_host() {
     // This should fail quickly with connection error
     let key_path = test_key_path();
@@ -393,7 +384,6 @@ fn test_invalid_ssh_host() {
 }
 
 #[test]
-#[ignore] // Requires Docker environment
 fn test_invalid_ssh_key() {
     require_test_env!();
 
