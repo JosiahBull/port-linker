@@ -34,26 +34,32 @@ jobs:
             os: ubuntu-latest
             artifact_name: port-linker
             asset_name: port-linker-linux-x86_64
+            command: cargo
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
             artifact_name: port-linker
             asset_name: port-linker-linux-x86_64-musl
+            command: cross
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
             artifact_name: port-linker
             asset_name: port-linker-linux-aarch64
+            command: cross
           - target: aarch64-unknown-linux-musl
             os: ubuntu-latest
             artifact_name: port-linker
             asset_name: port-linker-linux-aarch64-musl
+            command: cross
           - target: x86_64-apple-darwin
             os: macos-latest
             artifact_name: port-linker
             asset_name: port-linker-macos-x86_64
+            command: cargo
           - target: aarch64-apple-darwin
             os: macos-latest
             artifact_name: port-linker
             asset_name: port-linker-macos-aarch64
+            command: cargo
 
     steps:
       - uses: actions/checkout@v4
@@ -67,39 +73,18 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      - name: Install cross-compilation tools (Linux aarch64)
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
-
-      - name: Install musl tools (Linux x86_64 musl)
-        if: matrix.target == 'x86_64-unknown-linux-musl'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y musl-tools
-
-      - name: Install musl cross tools (Linux aarch64 musl)
-        if: matrix.target == 'aarch64-unknown-linux-musl'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y musl-tools gcc-aarch64-linux-gnu musl-dev
-          # Download and install aarch64 musl cross compiler
-          curl -LO https://musl.cc/aarch64-linux-musl-cross.tgz
-          tar -xzf aarch64-linux-musl-cross.tgz
-          sudo mv aarch64-linux-musl-cross /opt/
-          echo "/opt/aarch64-linux-musl-cross/bin" >> $GITHUB_PATH
+      - name: Install cross
+        if: matrix.command == 'cross'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
 
       - name: Install UPX (Ubuntu)
         if: matrix.os == 'ubuntu-latest'
         run: sudo apt-get update && sudo apt-get install -y upx
 
       - name: Build release binary
-        run: cargo build --release --target ${{ matrix.target }}
-        env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: aarch64-linux-musl-gcc
-          CC_aarch64_unknown_linux_musl: aarch64-linux-musl-gcc
+        run: ${{ matrix.command }} build --release --target ${{ matrix.target }}
 
       - name: Compress binary with UPX (Linux x86_64)
         if: matrix.target == 'x86_64-unknown-linux-gnu'
@@ -124,7 +109,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      id-token: write  # Required for cosign keyless signing
+      id-token: write # Required for cosign keyless signing
     steps:
       - uses: actions/checkout@v4
 
