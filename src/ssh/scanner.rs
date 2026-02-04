@@ -2,25 +2,9 @@ use crate::error::{PortLinkerError, Result};
 use crate::ssh::SshClient;
 use tracing::debug;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum PortProtocol {
-    Tcp,
-    Udp,
-}
-
-impl std::fmt::Display for PortProtocol {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            PortProtocol::Tcp => write!(f, "TCP"),
-            PortProtocol::Udp => write!(f, "UDP"),
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RemotePort {
     pub port: u16,
-    pub protocol: PortProtocol,
     pub bind_address: String,
     pub process_name: Option<String>,
 }
@@ -29,8 +13,8 @@ pub struct Scanner;
 
 impl Scanner {
     pub async fn scan_ports(client: &SshClient) -> Result<Vec<RemotePort>> {
-        // Try ss first, then netstat
-        let output = match client.exec("ss -tulnp 2>/dev/null").await {
+        // Try ss first, then netstat (TCP only)
+        let output = match client.exec("ss -tlnp 2>/dev/null").await {
             Ok(out) if !out.is_empty() && out.contains("State") => {
                 debug!("Using ss for port scanning");
                 out
@@ -38,7 +22,7 @@ impl Scanner {
             _ => {
                 debug!("Falling back to netstat for port scanning");
                 client
-                    .exec("netstat -tulnp 2>/dev/null")
+                    .exec("netstat -tlnp 2>/dev/null")
                     .await
                     .map_err(|e| {
                         PortLinkerError::PortScan(format!(
@@ -65,9 +49,9 @@ impl Scanner {
             }
         }
 
-        // Deduplicate by (port, protocol)
-        ports.sort_by_key(|p| (p.port, p.protocol as u8));
-        ports.dedup_by_key(|p| (p.port, p.protocol as u8));
+        // Deduplicate by port
+        ports.sort_by_key(|p| p.port);
+        ports.dedup_by_key(|p| p.port);
 
         debug!("Found {} forwardable ports", ports.len());
         Ok(ports)
@@ -80,15 +64,11 @@ impl Scanner {
             return None;
         }
 
-        // Determine protocol
+        // Only process TCP lines
         let proto_str = parts[0].to_lowercase();
-        let protocol = if proto_str.starts_with("tcp") {
-            PortProtocol::Tcp
-        } else if proto_str.starts_with("udp") {
-            PortProtocol::Udp
-        } else {
+        if !proto_str.starts_with("tcp") {
             return None;
-        };
+        }
 
         // Find local address column
         // ss format: Netid State Recv-Q Send-Q Local Address:Port Peer Address:Port Process
@@ -113,7 +93,6 @@ impl Scanner {
 
         Some(RemotePort {
             port,
-            protocol,
             bind_address,
             process_name,
         })
@@ -194,14 +173,12 @@ mod tests {
         let output = r#"Netid  State   Recv-Q  Send-Q  Local Address:Port   Peer Address:Port Process
 tcp    LISTEN  0       128     0.0.0.0:22            0.0.0.0:*         users:(("sshd",pid=1234,fd=3))
 tcp    LISTEN  0       128     127.0.0.1:3000        0.0.0.0:*         users:(("node",pid=5678,fd=5))
-tcp    LISTEN  0       128     [::]:80               [::]:*            users:(("nginx",pid=9012,fd=6))
-udp    UNCONN  0       0       0.0.0.0:53            0.0.0.0:*         users:(("dnsmasq",pid=3456,fd=4))"#;
+tcp    LISTEN  0       128     [::]:80               [::]:*            users:(("nginx",pid=9012,fd=6))"#;
 
         let ports = Scanner::parse_output(output).unwrap();
-        assert_eq!(ports.len(), 4);
+        assert_eq!(ports.len(), 3);
 
         let port_22 = ports.iter().find(|p| p.port == 22).unwrap();
-        assert_eq!(port_22.protocol, PortProtocol::Tcp);
         assert_eq!(port_22.bind_address, "0.0.0.0");
         assert_eq!(port_22.process_name, Some("sshd".to_string()));
 

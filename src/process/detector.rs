@@ -29,7 +29,6 @@ pub fn find_process_on_port(port: u16) -> Option<ProcessInfo> {
 }
 
 fn find_with_lsof(port: u16) -> Option<ProcessInfo> {
-    // Try without state filter first (works for both TCP and UDP)
     let output = Command::new("lsof")
         .args(["-i", &format!(":{}", port), "-n", "-P"])
         .output()
@@ -83,20 +82,6 @@ fn find_with_netstat_macos(port: u16) -> Option<ProcessInfo> {
         if line.contains(&port_str) && line.contains("LISTEN") {
             debug!("Port {} confirmed in use via netstat, but PID unavailable without root", port);
             // We know it's in use but can't get PID without sudo
-            return None;
-        }
-    }
-
-    // Also check UDP
-    let output = Command::new("netstat")
-        .args(["-an", "-p", "udp"])
-        .output()
-        .ok()?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    for line in stdout.lines() {
-        if line.contains(&port_str) {
-            debug!("Port {} (UDP) confirmed in use via netstat, but PID unavailable without root", port);
             return None;
         }
     }

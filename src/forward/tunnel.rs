@@ -1,12 +1,12 @@
 use crate::error::{PortLinkerError, Result};
 use crate::ssh::handler::ClientHandler;
-use crate::ssh::{PortProtocol, RemotePort};
+use crate::ssh::RemotePort;
 use russh::client::Handle;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, UdpSocket};
+use tokio::net::TcpListener;
 use tokio::sync::oneshot;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 
 #[derive(Debug)]
 pub struct TunnelHandle {
@@ -40,18 +40,11 @@ impl ActiveTunnel {
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
-        match remote_port.protocol {
-            PortProtocol::Tcp => {
-                Self::start_tcp_tunnel(ssh_handle, &remote_port, local_port, shutdown_rx).await?;
-            }
-            PortProtocol::Udp => {
-                Self::start_udp_tunnel(ssh_handle, &remote_port, local_port, shutdown_rx).await?;
-            }
-        }
+        Self::start_tcp_tunnel(ssh_handle, &remote_port, local_port, shutdown_rx).await?;
 
         info!(
-            "Forwarding {} localhost:{} -> remote:{}",
-            remote_port.protocol, local_port, remote_port.port
+            "Forwarding localhost:{} -> remote:{}",
+            local_port, remote_port.port
         );
 
         Ok(TunnelHandle {
@@ -184,64 +177,6 @@ impl ActiveTunnel {
                 }
             }
         }
-
-        Ok(())
-    }
-
-    async fn start_udp_tunnel(
-        _ssh_handle: Arc<Handle<ClientHandler>>,
-        _remote_port: &RemotePort,
-        local_port: u16,
-        mut shutdown_rx: oneshot::Receiver<()>,
-    ) -> Result<()> {
-        // UDP tunneling over SSH requires a helper on the remote side
-        // We'll use socat if available
-        let local_socket = UdpSocket::bind(format!("127.0.0.1:{}", local_port))
-            .await
-            .map_err(|e| {
-                if e.kind() == std::io::ErrorKind::AddrInUse {
-                    PortLinkerError::PortInUse(local_port)
-                } else {
-                    PortLinkerError::PortForward {
-                        port: local_port,
-                        message: format!("Failed to bind UDP: {}", e),
-                    }
-                }
-            })?;
-
-        tokio::spawn(async move {
-            let mut buf = vec![0u8; 65535];
-
-            warn!(
-                "UDP forwarding for port {} - requires socat on remote",
-                local_port
-            );
-
-            loop {
-                tokio::select! {
-                    result = local_socket.recv_from(&mut buf) => {
-                        match result {
-                            Ok((len, src)) => {
-                                debug!(
-                                    "UDP packet from {} ({} bytes) for port {}",
-                                    src, len, local_port
-                                );
-                                // For UDP, we need to establish a TCP tunnel and relay
-                                // This is complex - for now just log
-                                // Full implementation would spawn socat on remote
-                            }
-                            Err(e) => {
-                                error!("UDP receive error: {}", e);
-                            }
-                        }
-                    }
-                    _ = &mut shutdown_rx => {
-                        debug!("Shutting down UDP tunnel for port {}", local_port);
-                        break;
-                    }
-                }
-            }
-        });
 
         Ok(())
     }
