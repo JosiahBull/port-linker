@@ -4,12 +4,10 @@ use dialoguer::Confirm;
 use sysinfo::{Pid, ProcessRefreshKind, RefreshKind, System};
 use tracing::{info, warn};
 
-pub fn prompt_kill(proc_info: &ProcessInfo) -> Result<bool> {
+pub fn prompt_kill(proc_info: &ProcessInfo, port: u16) -> Result<bool> {
     let message = format!(
         "Port {} is in use by {} (PID {}). Kill it?",
-        0, // We don't have port here, but we can get it from context
-        proc_info.name,
-        proc_info.pid
+        port, proc_info.name, proc_info.pid
     );
 
     let result = Confirm::new()
@@ -59,7 +57,10 @@ pub fn kill_process(proc_info: &ProcessInfo) -> Result<()> {
         Ok(())
     } else {
         // Process might have already exited
-        warn!("Process {} not found (may have already exited)", proc_info.pid);
+        warn!(
+            "Process {} not found (may have already exited)",
+            proc_info.pid
+        );
         Ok(())
     }
 }

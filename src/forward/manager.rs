@@ -151,7 +151,7 @@ impl ForwardManager {
             let should_kill = if self.auto_kill {
                 true
             } else {
-                process::killer::prompt_kill(&proc_info)?
+                process::killer::prompt_kill(&proc_info, port)?
             };
 
             if should_kill {

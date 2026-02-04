@@ -13,8 +13,7 @@ pub fn find_process_on_port(port: u16) -> Option<ProcessInfo> {
     // Use lsof on macOS/Linux to find process using the port
     #[cfg(target_os = "macos")]
     {
-        find_with_lsof(port)
-            .or_else(|| find_with_netstat_macos(port))
+        find_with_lsof(port).or_else(|| find_with_netstat_macos(port))
     }
 
     #[cfg(target_os = "linux")]
@@ -24,7 +23,7 @@ pub fn find_process_on_port(port: u16) -> Option<ProcessInfo> {
 
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
-        find_with_sysinfo(port)
+        compile_error!("Unsupported OS")
     }
 }
 
@@ -80,7 +79,10 @@ fn find_with_netstat_macos(port: u16) -> Option<ProcessInfo> {
 
     for line in stdout.lines() {
         if line.contains(&port_str) && line.contains("LISTEN") {
-            debug!("Port {} confirmed in use via netstat, but PID unavailable without root", port);
+            debug!(
+                "Port {} confirmed in use via netstat, but PID unavailable without root",
+                port
+            );
             // We know it's in use but can't get PID without sudo
             return None;
         }
@@ -96,7 +98,9 @@ fn get_process_command(pid: u32) -> Option<String> {
         .ok()?;
 
     if cmd_output.status.success() {
-        let cmd = String::from_utf8_lossy(&cmd_output.stdout).trim().to_string();
+        let cmd = String::from_utf8_lossy(&cmd_output.stdout)
+            .trim()
+            .to_string();
         if !cmd.is_empty() {
             return Some(cmd);
         }
@@ -138,12 +142,5 @@ fn find_with_ss(port: u16) -> Option<ProcessInfo> {
         }
     }
 
-    None
-}
-
-#[allow(dead_code)]
-fn find_with_sysinfo(_port: u16) -> Option<ProcessInfo> {
-    // This is a fallback that doesn't directly find by port
-    // Placeholder for other platforms
     None
 }
