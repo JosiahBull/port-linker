@@ -23,7 +23,7 @@ pub fn kill_process(proc_info: &ProcessInfo) -> Result<()> {
     info!("Killing process {} (PID {})", proc_info.name, proc_info.pid);
 
     let mut sys = System::new_with_specifics(
-        RefreshKind::new().with_processes(ProcessRefreshKind::everything()),
+        RefreshKind::nothing().with_processes(ProcessRefreshKind::everything()),
     );
     sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
 

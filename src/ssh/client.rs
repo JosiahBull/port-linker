@@ -3,8 +3,8 @@ use crate::error::{PortLinkerError, Result};
 use crate::ssh::handler::ClientHandler;
 use dialoguer::Password;
 use russh::client::{self, Handle};
-use russh::keys::key::KeyPair;
-use russh_keys::load_secret_key;
+use russh::keys::key::PrivateKeyWithHashAlg;
+use russh::keys::{load_secret_key, PrivateKey};
 use ssh2_config::{ParseRule, SshConfig};
 use std::net::ToSocketAddrs;
 use std::path::PathBuf;
@@ -45,7 +45,7 @@ impl SshClient {
             .user
             .clone()
             .or_else(|| ssh_config.as_ref().and_then(|c| c.user.clone()))
-            .unwrap_or_else(|| whoami::username());
+            .unwrap_or_else(|| whoami::username().unwrap_or_else(|_| "root".to_string()));
 
         let identity_files = get_identity_files(identity_file, &ssh_config);
 
@@ -126,12 +126,12 @@ impl SshClient {
             .interact()
             .map_err(|e| PortLinkerError::SshAuth(format!("Password input failed: {}", e)))?;
 
-        let authenticated = handle
+        let auth_result = handle
             .authenticate_password(&config.user, &password)
             .await
             .map_err(|e| PortLinkerError::SshAuth(e.to_string()))?;
 
-        if authenticated {
+        if auth_result.success() {
             info!("Authenticated via password");
             Ok(handle)
         } else {
@@ -274,7 +274,7 @@ async fn try_agent_auth(handle: &mut Handle<ClientHandler>, user: &str) -> Resul
         return Ok(false);
     }
 
-    let mut agent = russh_keys::agent::client::AgentClient::connect_env()
+    let mut agent = russh::keys::agent::client::AgentClient::connect_env()
         .await
         .map_err(|e| PortLinkerError::SshAuth(format!("Failed to connect to agent: {}", e)))?;
 
@@ -285,15 +285,15 @@ async fn try_agent_auth(handle: &mut Handle<ClientHandler>, user: &str) -> Resul
 
     for identity in identities {
         // Create a fresh agent connection for each auth attempt since AgentClient doesn't implement Clone
-        let agent_for_auth = russh_keys::agent::client::AgentClient::connect_env()
+        let mut agent_for_auth = russh::keys::agent::client::AgentClient::connect_env()
             .await
             .map_err(|e| PortLinkerError::SshAuth(format!("Failed to connect to agent: {}", e)))?;
 
-        let (_, auth_result) = handle
-            .authenticate_future(user, identity, agent_for_auth)
+        let auth_result = handle
+            .authenticate_publickey_with(user, identity, None, &mut agent_for_auth)
             .await;
         match auth_result {
-            Ok(true) => return Ok(true),
+            Ok(result) if result.success() => return Ok(true),
             _ => continue,
         }
     }
@@ -307,16 +307,17 @@ async fn try_key_auth(
     key_path: &PathBuf,
 ) -> Result<bool> {
     let key = load_key_with_passphrase(key_path)?;
+    let key_with_alg = PrivateKeyWithHashAlg::new(Arc::new(key), None);
 
-    let authenticated = handle
-        .authenticate_publickey(user, Arc::new(key))
+    let auth_result = handle
+        .authenticate_publickey(user, key_with_alg)
         .await
         .map_err(|e| PortLinkerError::SshAuth(e.to_string()))?;
 
-    Ok(authenticated)
+    Ok(auth_result.success())
 }
 
-fn load_key_with_passphrase(path: &PathBuf) -> Result<KeyPair> {
+fn load_key_with_passphrase(path: &PathBuf) -> Result<PrivateKey> {
     // First try without passphrase
     match load_secret_key(path, None) {
         Ok(key) => return Ok(key),

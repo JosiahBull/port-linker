@@ -1,6 +1,5 @@
-use async_trait::async_trait;
 use russh::client::Handler;
-use russh::keys::key::PublicKey;
+use russh::keys::PublicKey;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -23,18 +22,21 @@ impl Default for ClientHandler {
     }
 }
 
-#[async_trait]
 impl Handler for ClientHandler {
     type Error = russh::Error;
 
-    async fn check_server_key(
+    fn check_server_key(
         &mut self,
         server_public_key: &PublicKey,
-    ) -> Result<bool, Self::Error> {
-        let mut key = self.server_public_key.lock().await;
-        *key = Some(server_public_key.clone());
-        // In production, you'd verify against known_hosts
-        // For now, accept all keys (like ssh -o StrictHostKeyChecking=no)
-        Ok(true)
+    ) -> impl std::future::Future<Output = Result<bool, Self::Error>> + Send {
+        let key = self.server_public_key.clone();
+        let server_public_key = server_public_key.clone();
+        async move {
+            let mut lock = key.lock().await;
+            *lock = Some(server_public_key);
+            // In production, you'd verify against known_hosts
+            // For now, accept all keys (like ssh -o StrictHostKeyChecking=no)
+            Ok(true)
+        }
     }
 }
