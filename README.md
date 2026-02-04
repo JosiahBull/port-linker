@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo.svg" alt="port-linker logo" width="128" height="128">
+</p>
+
 # port-linker
 
 A CLI tool that connects to remote systems via SSH and automatically forwards discovered ports to localhost.
