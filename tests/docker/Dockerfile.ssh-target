@@ -1,0 +1,39 @@
+# SSH target container for integration testing
+# This container runs sshd and various test services
+
+FROM alpine:3.19
+
+# Install openssh server and utilities
+RUN apk add --no-cache \
+    openssh \
+    python3 \
+    netcat-openbsd \
+    bash \
+    curl
+
+# Setup SSH
+RUN ssh-keygen -A && \
+    echo "PermitRootLogin yes" >> /etc/ssh/sshd_config && \
+    echo "PasswordAuthentication yes" >> /etc/ssh/sshd_config && \
+    echo "PermitEmptyPasswords no" >> /etc/ssh/sshd_config && \
+    echo "PubkeyAuthentication yes" >> /etc/ssh/sshd_config && \
+    mkdir -p /root/.ssh && \
+    chmod 700 /root/.ssh
+
+# Create test user
+RUN adduser -D -s /bin/bash testuser && \
+    echo "testuser:testpass" | chpasswd && \
+    mkdir -p /home/testuser/.ssh && \
+    chmod 700 /home/testuser/.ssh && \
+    chown -R testuser:testuser /home/testuser/.ssh
+
+# Copy authorized keys (will be mounted or added at runtime)
+COPY --chmod=600 test_key.pub /home/testuser/.ssh/authorized_keys
+RUN chown testuser:testuser /home/testuser/.ssh/authorized_keys
+
+# Script to start test services
+COPY --chmod=755 start-services.sh /usr/local/bin/start-services.sh
+
+EXPOSE 22 8080 3000 5432 9000
+
+CMD ["/usr/local/bin/start-services.sh"]

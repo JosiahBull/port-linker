@@ -1,4 +1,0 @@
-Netid  State   Recv-Q  Send-Q  Local Address:Port   Peer Address:Port Process
-tcp    LISTEN  0       128     192.168.1.5:9000     0.0.0.0:*         users:(("app",pid=1111,fd=7))
-tcp    LISTEN  0       128     10.0.0.1:8080        0.0.0.0:*         users:(("web",pid=2222,fd=8))
-tcp    LISTEN  0       128     127.0.0.1:3000       0.0.0.0:*         users:(("node",pid=3333,fd=9))

@@ -1,4 +1,0 @@
-Proto Recv-Q Send-Q Local Address           Foreign Address         State       PID/Program name
-tcp        0      0 0.0.0.0:22              0.0.0.0:*               LISTEN      1234/sshd
-tcp        0      0 127.0.0.1:3000          0.0.0.0:*               LISTEN      5678/node
-tcp6       0      0 :::80                   :::*                    LISTEN      9012/nginx

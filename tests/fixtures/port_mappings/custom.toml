@@ -1,6 +1,0 @@
-# Custom port descriptions
-[ports]
-8080 = "Development Server"
-3000 = "React Dev"
-5432 = "PostgreSQL"
-6379 = "Redis"

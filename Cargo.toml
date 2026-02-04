@@ -26,10 +26,8 @@ resvg = "0.44"
 
 [dev-dependencies]
 notify-rust = "4"
-tokio-test = "0.4"
-tempfile = "3"
-assert_matches = "1.5"
+libc = "0.2"
 
 [[test]]
-name = "integration"
-path = "tests/integration/mod.rs"
+name = "e2e"
+path = "tests/e2e/mod.rs"

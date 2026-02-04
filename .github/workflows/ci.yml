@@ -73,8 +73,8 @@ jobs:
       - name: Run clippy
         run: cargo clippy --all-targets -- -D warnings
 
-  test:
-    name: Test
+  test-unit:
+    name: Unit Tests
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -98,10 +98,72 @@ jobs:
             ${{ runner.os }}-cargo-test-
 
       - name: Run unit tests
-        run: cargo test --lib
+        run: cargo test --bins
 
-      - name: Run integration tests
-        run: cargo test --test integration
+  test-e2e:
+    name: E2E Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-action@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-e2e-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-e2e-
+
+      - name: Build port-linker
+        run: cargo build
+
+      - name: Generate test SSH keys
+        working-directory: tests/docker
+        run: |
+          ssh-keygen -t ed25519 -f test_key -N "" -C "port-linker-test"
+
+      - name: Build and start Docker environment
+        working-directory: tests/docker
+        run: |
+          docker-compose build
+          docker-compose up -d
+          sleep 5
+
+      - name: Wait for SSH to be ready
+        run: |
+          for i in {1..30}; do
+            if nc -z localhost 2222; then
+              echo "SSH is ready"
+              break
+            fi
+            echo "Waiting for SSH..."
+            sleep 2
+          done
+
+      - name: Test SSH connection
+        run: |
+          ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+              -i tests/docker/test_key -p 2222 testuser@localhost \
+              "echo 'SSH connection successful'"
+
+      - name: Run E2E tests
+        run: cargo test --test e2e -- --ignored --test-threads=1
+
+      - name: Show Docker logs on failure
+        if: failure()
+        working-directory: tests/docker
+        run: docker-compose logs
+
+      - name: Stop Docker environment
+        if: always()
+        working-directory: tests/docker
+        run: docker-compose down
 
   build:
     name: Build
@@ -136,32 +198,3 @@ jobs:
           name: port-linker-${{ matrix.os }}
           path: target/release/port-linker
           if-no-files-found: error
-
-  # Optional: Run with real SSH (for scheduled/manual runs)
-  integration-ssh:
-    name: Integration (SSH)
-    runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-action@stable
-
-      - name: Setup SSH server
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y openssh-server
-          sudo systemctl start ssh
-          ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519 -N ""
-          cat ~/.ssh/id_ed25519.pub >> ~/.ssh/authorized_keys
-          chmod 600 ~/.ssh/authorized_keys
-
-      - name: Test SSH connection
-        run: |
-          ssh -o StrictHostKeyChecking=no localhost echo "SSH works"
-
-      - name: Run integration tests with SSH
-        env:
-          TEST_SSH_HOST: localhost
-        run: cargo test --test integration -- --ignored
