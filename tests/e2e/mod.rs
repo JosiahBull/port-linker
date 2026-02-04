@@ -13,18 +13,46 @@
 #[allow(deprecated)]
 use assert_cmd::cargo::cargo_bin;
 use assert_cmd::prelude::*;
-use std::process::Command;
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Write};
+use std::net::TcpStream;
+use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::io::AsRawFd;
+use std::path::PathBuf;
+use std::process::{Child, Command, Stdio};
+use std::time::Duration;
 
 /// Get the path to the port-linker binary
 #[allow(deprecated)]
 fn bin_path() -> std::path::PathBuf {
     cargo_bin("port-linker")
 }
-use std::io::{Read, Write};
-use std::net::TcpStream;
-use std::path::PathBuf;
-use std::process::{Child, Stdio};
-use std::time::Duration;
+
+/// Guard that holds a file lock for serializing tests that use shared ports.
+/// Tests that forward ports must hold this lock to prevent parallel execution.
+struct TestLock {
+    _file: File,
+}
+
+impl TestLock {
+    fn acquire() -> Self {
+        let lock_path = std::env::temp_dir().join("port-linker-e2e-test.lock");
+        let file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .mode(0o600)
+            .open(&lock_path)
+            .expect("Failed to open lock file");
+
+        unsafe {
+            if libc::flock(file.as_raw_fd(), libc::LOCK_EX) != 0 {
+                panic!("Failed to acquire test lock");
+            }
+        }
+
+        TestLock { _file: file }
+    }
+}
 
 /// Test configuration - matches docker-compose setup
 const SSH_HOST: &str = "localhost";
@@ -195,6 +223,7 @@ macro_rules! require_test_env {
 
 #[test]
 fn test_connects_and_discovers_ports() {
+    let _lock = TestLock::acquire();
     require_test_env!();
 
     let child = start_port_linker(&["--scan-interval", "1"]).expect("Failed to start port-linker");
@@ -213,6 +242,7 @@ fn test_connects_and_discovers_ports() {
 
 #[test]
 fn test_forwards_http_traffic() {
+    let _lock = TestLock::acquire();
     require_test_env!();
 
     let child = start_port_linker(&["--scan-interval", "1", "-p", "8080"])
@@ -244,6 +274,7 @@ fn test_forwards_http_traffic() {
 
 #[test]
 fn test_port_whitelist() {
+    let _lock = TestLock::acquire();
     require_test_env!();
 
     // Only forward port 8080
@@ -273,6 +304,7 @@ fn test_port_whitelist() {
 
 #[test]
 fn test_port_exclusion() {
+    let _lock = TestLock::acquire();
     require_test_env!();
 
     // Exclude port 8080
@@ -306,6 +338,7 @@ fn test_port_exclusion() {
 
 #[test]
 fn test_clean_shutdown() {
+    let _lock = TestLock::acquire();
     require_test_env!();
 
     let mut child = start_port_linker(&["--scan-interval", "1", "-p", "8080"])
@@ -341,6 +374,7 @@ fn test_clean_shutdown() {
 
 #[test]
 fn test_multiple_ports() {
+    let _lock = TestLock::acquire();
     require_test_env!();
 
     let child = start_port_linker(&[
@@ -365,6 +399,7 @@ fn test_multiple_ports() {
 
 #[test]
 fn test_localhost_bound_port() {
+    let _lock = TestLock::acquire();
     require_test_env!();
 
     // Port 3000 is bound to 127.0.0.1 on the remote
@@ -385,6 +420,7 @@ fn test_localhost_bound_port() {
 
 #[test]
 fn test_new_service_detected() {
+    let _lock = TestLock::acquire();
     require_test_env!();
 
     // Start port-linker monitoring all ports except defaults
@@ -415,6 +451,7 @@ fn test_new_service_detected() {
 
 #[test]
 fn test_service_removal_detected() {
+    let _lock = TestLock::acquire();
     require_test_env!();
 
     // Start a temporary service on port 9001
