@@ -137,7 +137,7 @@ jobs:
       - name: Generate checksums
         run: |
           cd release
-          sha256sum *.tar.gz > checksums-sha256.txt
+          sha256sum ./*.tar.gz > checksums-sha256.txt
           cat checksums-sha256.txt
 
       - name: Create GitHub Release
