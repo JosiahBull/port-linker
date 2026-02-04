@@ -126,6 +126,40 @@ fn is_port_open(port: u16) -> bool {
     .is_ok()
 }
 
+/// Run a command on the remote host via SSH
+fn ssh_exec(command: &str) -> std::io::Result<std::process::Output> {
+    std::process::Command::new("ssh")
+        .arg("-o")
+        .arg("StrictHostKeyChecking=no")
+        .arg("-o")
+        .arg("UserKnownHostsFile=/dev/null")
+        .arg("-i")
+        .arg(test_key_path())
+        .arg("-p")
+        .arg(SSH_PORT.to_string())
+        .arg(format!("{}@{}", SSH_USER, SSH_HOST))
+        .arg(command)
+        .output()
+}
+
+/// Start a service on the remote host (returns the PID)
+fn start_remote_service(port: u16) -> Option<u32> {
+    // Start a simple netcat listener in the background
+    let output = ssh_exec(&format!(
+        "nohup sh -c 'while true; do echo \"test response\" | nc -l -p {} 2>/dev/null; done' > /dev/null 2>&1 & echo $!",
+        port
+    ))
+    .ok()?;
+
+    let pid_str = String::from_utf8_lossy(&output.stdout);
+    pid_str.trim().parse().ok()
+}
+
+/// Stop a service on the remote host by PID
+fn stop_remote_service(pid: u32) {
+    let _ = ssh_exec(&format!("kill {} 2>/dev/null", pid));
+}
+
 /// Send data through a forwarded port and get response
 fn send_and_receive(port: u16, data: &[u8]) -> std::io::Result<Vec<u8>> {
     let mut stream = TcpStream::connect(format!("127.0.0.1:{}", port))?;
@@ -361,6 +395,71 @@ fn test_localhost_bound_port() {
     assert!(
         port_ready,
         "Port 3000 (bound to 127.0.0.1 on remote) was not forwarded"
+    );
+}
+
+#[test]
+fn test_new_service_detected() {
+    require_test_env!();
+
+    // Start port-linker monitoring all ports except defaults
+    let child = start_port_linker(&["--scan-interval", "1", "--no-default-excludes"])
+        .expect("Failed to start port-linker");
+
+    // Wait for initial port 8080 to be forwarded
+    assert!(
+        wait_for_port(8080, Duration::from_secs(15)),
+        "Initial port 8080 was not forwarded"
+    );
+
+    // Start a new service on port 9000 on the remote
+    let service_pid = start_remote_service(9000).expect("Failed to start remote service");
+
+    // Wait for port-linker to detect and forward the new port
+    let new_port_ready = wait_for_port(9000, Duration::from_secs(10));
+
+    // Cleanup
+    stop_remote_service(service_pid);
+    stop_port_linker(child, &[8080, 5432, 3000]);
+
+    assert!(
+        new_port_ready,
+        "New service on port 9000 was not detected and forwarded"
+    );
+}
+
+#[test]
+fn test_service_removal_detected() {
+    require_test_env!();
+
+    // Start a temporary service on port 9001
+    let service_pid = start_remote_service(9001).expect("Failed to start remote service");
+
+    // Give the service a moment to start
+    std::thread::sleep(Duration::from_secs(1));
+
+    // Start port-linker
+    let child = start_port_linker(&["--scan-interval", "1", "-p", "9001"])
+        .expect("Failed to start port-linker");
+
+    // Wait for the service to be forwarded
+    assert!(
+        wait_for_port(9001, Duration::from_secs(15)),
+        "Port 9001 was not forwarded"
+    );
+
+    // Stop the remote service
+    stop_remote_service(service_pid);
+
+    // Wait for port-linker to detect the removal and close the forward
+    let port_closed = wait_for_port_closed(9001, Duration::from_secs(10));
+
+    // Cleanup
+    stop_port_linker(child, &[]);
+
+    assert!(
+        port_closed,
+        "Port 9001 forward was not closed after service stopped"
     );
 }
 
