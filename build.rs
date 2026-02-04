@@ -23,7 +23,7 @@ fn main() {
     for (size, filename) in sizes {
         let output_path = Path::new(&out_dir).join(filename);
         render_png(&tree, size, &output_path);
-        println!("cargo:warning=Generated {} ({}x{})", filename, size, size);
+        // println!("cargo:warning=Generated {} ({}x{})", filename, size, size);
     }
 }
 

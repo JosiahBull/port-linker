@@ -69,6 +69,7 @@ fn start_port_linker(extra_args: &[&str]) -> std::io::Result<Child> {
 }
 
 /// Stop port-linker and wait for cleanup
+#[track_caller]
 fn stop_port_linker(mut child: Child, ports: &[u16]) {
     child.kill().ok();
     let _ = child.wait();
@@ -187,25 +188,9 @@ macro_rules! require_test_env {
         if !is_test_env_running() {
             eprintln!("SKIPPED: Docker test environment not running");
             eprintln!("Run: ./tests/docker/setup-test-env.sh");
-            return;
+            panic!();
         }
     };
-}
-
-#[test]
-fn test_binary_exists() {
-    // Just verify the binary exists
-    let _ = bin_path();
-}
-
-#[test]
-fn test_ssh_key_exists() {
-    let path = test_key_path();
-    assert!(
-        path.exists(),
-        "Test SSH key not found at {:?}. Run `./tests/docker/setup-test-env.sh` first.",
-        path
-    );
 }
 
 #[test]
