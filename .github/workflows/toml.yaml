@@ -1,0 +1,55 @@
+name: dep-lint
+
+on:
+  push:
+    paths:
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - "Cargo.toml"
+      - "Cargo.lock"
+
+# see https://matklad.github.io/2021/09/04/fast-rust-builds.html
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+  CI: 1
+  RUST_BACKTRACE: short
+  RUSTUP_MAX_RETRIES: 10
+
+jobs:
+  cargo-lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    concurrency:
+      group: toml-${{ github.repository }}-${{ github.ref }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-all-crates: true
+          cache-bin: true
+          cache-targets: true
+
+      - name: Install tooling
+        run: |
+          cargo +nightly install --locked cargo-udeps
+
+      - name: Show Cargo and rustc version
+        run: |
+          cargo +nightly --version
+          rustc --version
+
+      - name: Check for unused dependencies
+        run:
+          cargo +nightly udeps --all-targets --all-features
+
+          # Use cargo tree, and fail if openssl is present
+      - name: Check openssl
+        run: cargo tree --edges no-dev --all-features | grep -v openssl-probe | grep openssl && exit 1 || exit 0

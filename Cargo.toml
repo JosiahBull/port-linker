@@ -28,6 +28,11 @@ insta = "1"
 libc = "0.2"
 ntest = "0.9"
 
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+
 [[test]]
 name = "e2e"
 path = "tests/e2e/mod.rs"

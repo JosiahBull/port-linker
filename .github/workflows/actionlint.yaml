@@ -1,0 +1,33 @@
+name: actionlint
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/*.yaml"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/*.yaml"
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  action-lint:
+    runs-on: ubuntu-latest
+
+    timeout-minutes: 5
+    concurrency:
+      group: actionlint-${{ github.repository }}-${{ github.ref }}
+      cancel-in-progress: true
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check workflow files
+        shell: bash
+        run: |
+          bash <(curl https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+          # shellcheck disable=SC2046
+          ./actionlint -color $(find .github/workflows examples/workflows -name '*.yml' -type f ! -name release.yml -print)
