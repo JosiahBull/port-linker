@@ -5,7 +5,7 @@ use dialoguer::Password;
 use russh::client::{self, Handle};
 use russh::keys::key::PrivateKeyWithHashAlg;
 use russh::keys::{load_secret_key, PrivateKey};
-use ssh2_config::{ParseRule, SshConfig};
+use ssh2_config_rs::{ParseRule, SshConfig};
 use std::net::ToSocketAddrs;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -210,7 +210,7 @@ impl SshClient {
     }
 }
 
-fn load_ssh_config(host: &str) -> Option<ssh2_config::HostParams> {
+fn load_ssh_config(host: &str) -> Option<ssh2_config_rs::HostParams> {
     let config_path = dirs::home_dir()?.join(".ssh").join("config");
 
     if !config_path.exists() {
@@ -228,7 +228,7 @@ fn load_ssh_config(host: &str) -> Option<ssh2_config::HostParams> {
 
 fn get_identity_files(
     explicit: Option<PathBuf>,
-    ssh_config: &Option<ssh2_config::HostParams>,
+    ssh_config: &Option<ssh2_config_rs::HostParams>,
 ) -> Vec<PathBuf> {
     let mut files = Vec::new();
 

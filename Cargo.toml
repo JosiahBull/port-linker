@@ -10,7 +10,6 @@ license = "MIT"
 tokio = { version = "1", features = ["full"] }
 clap = { version = "4", features = ["derive"] }
 russh = "0.57"
-ssh2-config = "0.7"
 sysinfo = "0.38"
 notify-rust = "4"
 tracing = "0.1"
@@ -20,6 +19,7 @@ dialoguer = "0.12"
 dirs = "6"
 shellexpand = "3"
 whoami = "2"
+ssh2-config-rs = "0.7.2"
 
 [build-dependencies]
 resvg = "0.46"
