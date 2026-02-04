@@ -1,0 +1,22 @@
+[package]
+name = "port-linker"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+clap = { version = "4", features = ["derive"] }
+russh = "0.46"
+russh-keys = "0.46"
+ssh2-config = "0.3"
+async-trait = "0.1"
+sysinfo = "0.32"
+notify-rust = "4"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
+thiserror = "1"
+dialoguer = "0.11"
+dirs = "5"
+shellexpand = "3"
+whoami = "1"

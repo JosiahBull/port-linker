@@ -1,0 +1,30 @@
+# Port Linker - Port Mapping Configuration
+#
+# Place this file at one of these locations:
+#   ~/.config/port-linker/ports.toml
+#   ~/.port-linker.toml
+#
+# Format: port = "description"
+# The description will be shown in notifications instead of just the port number.
+
+# Web servers
+3000 = "React Dev Server"
+5173 = "Vite Dev Server"
+8000 = "Django"
+8080 = "Web Server"
+8888 = "Jupyter Notebook"
+
+# Databases
+3306 = "MySQL"
+5432 = "PostgreSQL"
+6379 = "Redis"
+27017 = "MongoDB"
+
+# Backend services
+4000 = "GraphQL API"
+5000 = "Flask API"
+9000 = "PHP-FPM"
+
+# You can also use a [ports] section
+# [ports]
+# 3001 = "Another Service"
