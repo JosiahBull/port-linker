@@ -20,3 +20,9 @@ dialoguer = "0.11"
 dirs = "5"
 shellexpand = "3"
 whoami = "1"
+
+[build-dependencies]
+resvg = "0.44"
+
+[dev-dependencies]
+notify-rust = "4"

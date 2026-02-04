@@ -21,7 +21,7 @@ pub const DEFAULT_EXCLUDED_PORTS: &[u16] = &[
 )]
 pub struct Cli {
     /// Remote host in format [user@]host
-    #[arg(value_name = "HOST")]
+    #[arg(value_name = "HOST", default_value = "josiah@avocado")]
     pub host: String,
 
     /// Only forward specific ports (comma-separated)
