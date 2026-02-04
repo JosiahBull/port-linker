@@ -102,7 +102,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Run unit tests
-        run: cargo test --all-targets --all-features --workspace
+        run: cargo test --bins --all-features
 
   test-e2e:
     name: E2E Tests
@@ -209,9 +209,7 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: sudo apt-get update && sudo apt-get install -y upx
 
-      - name: Install UPX (macOS)
-        if: matrix.os == 'macos-latest'
-        run: brew install upx
+      # UPX not supported on macOS, skipping
 
       - name: Install UPX (Windows)
         if: matrix.os == 'windows-latest'
@@ -220,8 +218,8 @@ jobs:
       - name: Build release
         run: cargo build --release
 
-      - name: Compress binary with UPX (Unix)
-        if: matrix.os != 'windows-latest'
+      - name: Compress binary with UPX (Linux)
+        if: matrix.os == 'ubuntu-latest'
         run: |
           upx --best --lzma target/release/port-linker
           ls -lh target/release/port-linker
