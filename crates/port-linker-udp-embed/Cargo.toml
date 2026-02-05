@@ -3,7 +3,10 @@ name = "port-linker-udp-embed"
 version.workspace = true
 edition.workspace = true
 description = "Embedded udp-proxy binaries for port-linker"
+repository.workspace = true
+license.workspace = true
 
 [dependencies]
 
 [build-dependencies]
+port-linker-udp-build = { path = "../port-linker-udp-build" }

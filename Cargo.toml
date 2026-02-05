@@ -44,6 +44,7 @@ port-linker-proto = { path = "crates/port-linker-proto" }
 port-linker-ssh = { path = "crates/port-linker-ssh" }
 port-linker-notify = { path = "crates/port-linker-notify" }
 port-linker-forward = { path = "crates/port-linker-forward" }
+port-linker-udp-build = { path = "crates/port-linker-udp-build" }
 
 [profile.release]
 lto = true

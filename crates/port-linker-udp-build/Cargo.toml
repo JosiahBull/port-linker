@@ -1,0 +1,9 @@
+[package]
+name = "port-linker-udp-build"
+version.workspace = true
+edition.workspace = true
+description = "Cross-compilation build infrastructure for port-linker"
+repository.workspace = true
+license.workspace = true
+
+[dependencies]

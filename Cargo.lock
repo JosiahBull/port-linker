@@ -3613,8 +3613,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "port-linker-udp-build"
+version = "0.1.0"
+
+[[package]]
 name = "port-linker-udp-embed"
 version = "0.1.0"
+dependencies = [
+ "port-linker-udp-build",
+]
 
 [[package]]
 name = "portable-atomic"
