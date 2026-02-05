@@ -1,11 +1,11 @@
-use crate::error::{PortLinkerError, Result};
-use crate::forward::tunnel::{ActiveTunnel, TunnelHandle};
-use crate::forward::udp::{start_udp_tunnel, TunnelStopReason, UdpProxyManager, UdpTunnelHandle};
-use crate::notify::{NotificationEvent, Notifier, PortInfo};
-use crate::process;
-use crate::ssh::handler::ClientHandler;
-use crate::ssh::{RemotePort, SshClient};
+use crate::error::{ForwardError, Result};
+use crate::tcp::{TcpTunnel, TunnelHandle};
+use crate::udp::{start_udp_tunnel, TunnelStopReason, UdpProxyManager, UdpTunnelHandle};
+use port_linker_notify::{NotificationEvent, Notifier, PortInfo};
 use port_linker_proto::Protocol;
+use port_linker_ssh::{
+    find_process_on_port, kill_process, prompt_kill, ClientHandler, RemotePort, SshClient,
+};
 use russh::client::Handle;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -152,7 +152,7 @@ impl ForwardManager {
                         self.notifier.mapping(),
                     ));
                 }
-                Err(PortLinkerError::PortInUse(port)) => {
+                Err(ForwardError::PortInUse(port)) => {
                     if let Some(port_info) = self
                         .handle_port_conflict(port, &remote_port, Protocol::Tcp)
                         .await?
@@ -272,7 +272,7 @@ impl ForwardManager {
                     ));
                     self.udp_tunnels.insert(remote_port.port, handle);
                 }
-                Err(PortLinkerError::PortInUse(port)) => {
+                Err(ForwardError::PortInUse(port)) => {
                     if let Some(port_info) = self
                         .handle_port_conflict(port, &remote_port, Protocol::Udp)
                         .await?
@@ -298,7 +298,7 @@ impl ForwardManager {
         let port = remote_port.port;
 
         let handle =
-            ActiveTunnel::start(self.ssh_handle.clone(), remote_port.clone(), None).await?;
+            TcpTunnel::start(self.ssh_handle.clone(), remote_port.clone(), None).await?;
 
         self.tcp_tunnels.insert(port, handle);
         Ok(())
@@ -315,15 +315,21 @@ impl ForwardManager {
             .notify_event(NotificationEvent::ConflictDetected { port })
             .await;
 
-        if let Some(proc_info) = process::detector::find_process_on_port(port) {
+        if let Some(proc_info) = find_process_on_port(port) {
             let should_kill = if self.auto_kill {
                 true
             } else {
-                process::killer::prompt_kill(&proc_info, port)?
+                prompt_kill(&proc_info, port).map_err(|e| ForwardError::PortForward {
+                    port,
+                    message: format!("Failed to prompt for process kill: {}", e),
+                })?
             };
 
             if should_kill {
-                process::killer::kill_process(&proc_info)?;
+                kill_process(&proc_info).map_err(|e| ForwardError::PortForward {
+                    port,
+                    message: format!("Failed to kill process: {}", e),
+                })?;
 
                 self.notifier
                     .notify_event(NotificationEvent::ProcessKilled {

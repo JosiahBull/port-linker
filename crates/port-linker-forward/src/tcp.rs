@@ -1,6 +1,5 @@
-use crate::error::{PortLinkerError, Result};
-use crate::ssh::handler::ClientHandler;
-use crate::ssh::RemotePort;
+use crate::error::{ForwardError, Result};
+use port_linker_ssh::{ClientHandler, RemotePort};
 use russh::client::Handle;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -23,14 +22,14 @@ impl TunnelHandle {
     }
 }
 
-pub struct ActiveTunnel {
+pub struct TcpTunnel {
     #[allow(dead_code)]
     pub remote_port: RemotePort,
     #[allow(dead_code)]
     pub local_port: u16,
 }
 
-impl ActiveTunnel {
+impl TcpTunnel {
     pub async fn start(
         ssh_handle: Arc<Handle<ClientHandler>>,
         remote_port: RemotePort,
@@ -64,9 +63,9 @@ impl ActiveTunnel {
             .await
             .map_err(|e| {
                 if e.kind() == std::io::ErrorKind::AddrInUse {
-                    PortLinkerError::PortInUse(local_port)
+                    ForwardError::PortInUse(local_port)
                 } else {
-                    PortLinkerError::PortForward {
+                    ForwardError::PortForward {
                         port: local_port,
                         message: format!("Failed to bind: {}", e),
                     }
@@ -128,7 +127,7 @@ impl ActiveTunnel {
         let mut channel = ssh_handle
             .channel_open_direct_tcpip(connect_host, remote_port as u32, "127.0.0.1", 0)
             .await
-            .map_err(|e| PortLinkerError::PortForward {
+            .map_err(|e| ForwardError::PortForward {
                 port: remote_port,
                 message: format!("Failed to open channel: {}", e),
             })?;

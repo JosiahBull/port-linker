@@ -1,0 +1,17 @@
+[package]
+name = "port-linker-forward"
+version.workspace = true
+edition.workspace = true
+description = "TCP and UDP tunnel management for port-linker"
+repository.workspace = true
+license.workspace = true
+
+[dependencies]
+port-linker-proto.workspace = true
+port-linker-ssh = { path = "../port-linker-ssh" }
+port-linker-notify = { path = "../port-linker-notify" }
+port-linker-udp-embed = { path = "../port-linker-udp-embed" }
+russh.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+thiserror.workspace = true

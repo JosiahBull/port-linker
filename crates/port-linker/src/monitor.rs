@@ -1,7 +1,7 @@
 use crate::error::Result;
-use crate::forward::ForwardManager;
-use crate::notify::{NotificationEvent, Notifier};
-use crate::ssh::{Scanner, SshClient};
+use port_linker_forward::ForwardManager;
+use port_linker_notify::{NotificationEvent, Notifier};
+use port_linker_ssh::{Scanner, SshClient};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::interval;

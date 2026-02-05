@@ -1,5 +1,5 @@
-use crate::error::{PortLinkerError, Result};
-use crate::notify::NotificationEvent;
+use crate::error::{NotifyError, Result};
+use crate::NotificationEvent;
 use port_linker_assets::LOGO_128;
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -106,11 +106,11 @@ fn show_notification_macos(event: &NotificationEvent, with_sound: bool) -> Resul
         .arg("-e")
         .arg(&script)
         .output()
-        .map_err(|e| PortLinkerError::Notification(format!("Failed to run osascript: {}", e)))?;
+        .map_err(|e| NotifyError::Notification(format!("Failed to run osascript: {}", e)))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(PortLinkerError::Notification(format!(
+        return Err(NotifyError::Notification(format!(
             "osascript failed: {}",
             stderr
         )));
@@ -152,7 +152,7 @@ fn show_notification_linux(event: &NotificationEvent, with_sound: bool) -> Resul
 
     notification
         .show()
-        .map_err(|e| PortLinkerError::Notification(e.to_string()))?;
+        .map_err(|e| NotifyError::Notification(e.to_string()))?;
 
     Ok(())
 }

@@ -1,5 +1,5 @@
-use crate::error::{PortLinkerError, Result};
-use crate::ssh::SshClient;
+use crate::client::SshClient;
+use crate::error::{Result, SshError};
 use port_linker_proto::Protocol;
 use tracing::{debug, info, trace};
 
@@ -30,7 +30,7 @@ impl Scanner {
                     .exec("netstat -tlnp 2>/dev/null")
                     .await
                     .map_err(|e| {
-                        PortLinkerError::PortScan(format!("Both ss and netstat failed: {}", e))
+                        SshError::PortScan(format!("Both ss and netstat failed: {}", e))
                     })?
             }
         };

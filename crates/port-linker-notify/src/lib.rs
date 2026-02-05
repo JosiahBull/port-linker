@@ -1,6 +1,16 @@
-pub mod desktop;
+//! Desktop notifications and port mapping for port-linker.
+//!
+//! This crate provides:
+//! - Desktop notifications for port forwarding events
+//! - Port mapping configuration for human-readable port descriptions
 
-use crate::mapping::PortMapping;
+pub mod desktop;
+pub mod error;
+pub mod mapping;
+
+pub use error::{NotifyError, Result};
+pub use mapping::PortMapping;
+
 use port_linker_proto::Protocol;
 use std::sync::Arc;
 use tracing::{info, warn};

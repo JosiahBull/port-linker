@@ -1,4 +1,4 @@
-use crate::error::{PortLinkerError, Result};
+use crate::error::{Result, SshError};
 use crate::process::detector::ProcessInfo;
 use dialoguer::Confirm;
 use sysinfo::{Pid, ProcessRefreshKind, RefreshKind, System};
@@ -14,7 +14,7 @@ pub fn prompt_kill(proc_info: &ProcessInfo, port: u16) -> Result<bool> {
         .with_prompt(&message)
         .default(false)
         .interact()
-        .map_err(|e| PortLinkerError::ProcessKill(format!("User prompt failed: {}", e)))?;
+        .map_err(|e| SshError::ProcessKill(format!("User prompt failed: {}", e)))?;
 
     Ok(result)
 }

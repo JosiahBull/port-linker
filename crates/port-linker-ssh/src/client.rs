@@ -1,6 +1,5 @@
-use crate::cli::ParsedHost;
-use crate::error::{PortLinkerError, Result};
-use crate::ssh::handler::ClientHandler;
+use crate::error::{Result, SshError};
+use crate::handler::ClientHandler;
 use dialoguer::Password;
 use russh::client::{self, Handle};
 use russh::keys::key::PrivateKeyWithHashAlg;
@@ -24,6 +23,30 @@ pub struct SshClientConfig {
     pub port: u16,
     pub user: String,
     pub identity_file: Option<PathBuf>,
+}
+
+/// Parsed host information from user@host format.
+#[derive(Debug, Clone)]
+pub struct ParsedHost {
+    pub user: Option<String>,
+    pub host: String,
+}
+
+impl ParsedHost {
+    /// Parse a host string in the format `[user@]host`.
+    pub fn parse(host_str: &str) -> Self {
+        if let Some((user, host)) = host_str.split_once('@') {
+            ParsedHost {
+                user: Some(user.to_string()),
+                host: host.to_string(),
+            }
+        } else {
+            ParsedHost {
+                user: None,
+                host: host_str.to_string(),
+            }
+        }
+    }
 }
 
 impl SshClient {
@@ -71,11 +94,9 @@ impl SshClient {
     ) -> Result<Handle<ClientHandler>> {
         let addr = format!("{}:{}", config.host, config.port)
             .to_socket_addrs()
-            .map_err(|e| PortLinkerError::SshConnection(format!("Failed to resolve host: {}", e)))?
+            .map_err(|e| SshError::Connection(format!("Failed to resolve host: {}", e)))?
             .next()
-            .ok_or_else(|| {
-                PortLinkerError::SshConnection("Could not resolve host address".to_string())
-            })?;
+            .ok_or_else(|| SshError::Connection("Could not resolve host address".to_string()))?;
 
         let russh_config = Arc::new(client::Config {
             inactivity_timeout: Some(Duration::from_secs(30)),
@@ -88,11 +109,11 @@ impl SshClient {
 
         let stream = TcpStream::connect(addr)
             .await
-            .map_err(|e| PortLinkerError::SshConnection(format!("TCP connection failed: {}", e)))?;
+            .map_err(|e| SshError::Connection(format!("TCP connection failed: {}", e)))?;
 
         let mut handle = client::connect_stream(russh_config, stream, handler)
             .await
-            .map_err(|e| PortLinkerError::SshConnection(e.to_string()))?;
+            .map_err(|e| SshError::Connection(e.to_string()))?;
 
         // Try SSH agent first
         if let Ok(authenticated) = try_agent_auth(&mut handle, &config.user).await {
@@ -126,20 +147,18 @@ impl SshClient {
         let password: String = Password::new()
             .with_prompt(format!("Password for {}@{}", config.user, config.host))
             .interact()
-            .map_err(|e| PortLinkerError::SshAuth(format!("Password input failed: {}", e)))?;
+            .map_err(|e| SshError::Auth(format!("Password input failed: {}", e)))?;
 
         let auth_result = handle
             .authenticate_password(&config.user, &password)
             .await
-            .map_err(|e| PortLinkerError::SshAuth(e.to_string()))?;
+            .map_err(|e| SshError::Auth(e.to_string()))?;
 
         if auth_result.success() {
             info!("Authenticated via password");
             Ok(handle)
         } else {
-            Err(PortLinkerError::SshAuth(
-                "Password authentication failed".to_string(),
-            ))
+            Err(SshError::Auth("Password authentication failed".to_string()))
         }
     }
 
@@ -161,15 +180,14 @@ impl SshClient {
 
     #[instrument(name = "ssh_exec", skip(self, command), fields(cmd_preview = %command.chars().take(50).collect::<String>()))]
     pub async fn exec(&self, command: &str) -> Result<String> {
-        let mut channel =
-            self.handle.channel_open_session().await.map_err(|e| {
-                PortLinkerError::SshChannel(format!("Failed to open channel: {}", e))
-            })?;
+        let mut channel = self.handle.channel_open_session().await.map_err(|e| {
+            SshError::Channel(format!("Failed to open channel: {}", e))
+        })?;
 
         channel
             .exec(true, command)
             .await
-            .map_err(|e| PortLinkerError::SshChannel(format!("Failed to exec command: {}", e)))?;
+            .map_err(|e| SshError::Channel(format!("Failed to exec command: {}", e)))?;
 
         let mut output = Vec::new();
 
@@ -189,7 +207,7 @@ impl SshClient {
         }
 
         String::from_utf8(output)
-            .map_err(|e| PortLinkerError::SshChannel(format!("Invalid UTF-8 in output: {}", e)))
+            .map_err(|e| SshError::Channel(format!("Invalid UTF-8 in output: {}", e)))
     }
 
     #[allow(dead_code)]
@@ -201,10 +219,7 @@ impl SshClient {
         self.handle
             .channel_open_direct_tcpip(remote_host, remote_port as u32, "127.0.0.1", 0)
             .await
-            .map_err(|e| PortLinkerError::PortForward {
-                port: remote_port,
-                message: format!("Failed to open direct-tcpip channel: {}", e),
-            })
+            .map_err(|e| SshError::Channel(format!("Failed to open direct-tcpip channel: {}", e)))
     }
 
     pub async fn is_connected(&self) -> bool {
@@ -226,11 +241,11 @@ impl SshClient {
                 &base64::engine::general_purpose::STANDARD,
             );
             encoder.write_all(data).map_err(|e| {
-                PortLinkerError::SshChannel(format!("Failed to encode data: {}", e))
+                SshError::Channel(format!("Failed to encode data: {}", e))
             })?;
         }
         let encoded_str = String::from_utf8(encoded).map_err(|e| {
-            PortLinkerError::SshChannel(format!("Invalid UTF-8 in encoded data: {}", e))
+            SshError::Channel(format!("Invalid UTF-8 in encoded data: {}", e))
         })?;
 
         // Write in chunks to avoid shell command line limits
@@ -265,15 +280,14 @@ impl SshClient {
     /// This is used for long-running processes like the UDP proxy where we need
     /// to send and receive data over the channel's stdin/stdout.
     pub async fn exec_channel(&self, command: &str) -> Result<russh::Channel<russh::client::Msg>> {
-        let channel =
-            self.handle.channel_open_session().await.map_err(|e| {
-                PortLinkerError::SshChannel(format!("Failed to open channel: {}", e))
-            })?;
+        let channel = self.handle.channel_open_session().await.map_err(|e| {
+            SshError::Channel(format!("Failed to open channel: {}", e))
+        })?;
 
         channel
             .exec(true, command)
             .await
-            .map_err(|e| PortLinkerError::SshChannel(format!("Failed to exec command: {}", e)))?;
+            .map_err(|e| SshError::Channel(format!("Failed to exec command: {}", e)))?;
 
         Ok(channel)
     }
@@ -346,18 +360,18 @@ async fn try_agent_auth(handle: &mut Handle<ClientHandler>, user: &str) -> Resul
 
     let mut agent = russh::keys::agent::client::AgentClient::connect_env()
         .await
-        .map_err(|e| PortLinkerError::SshAuth(format!("Failed to connect to agent: {}", e)))?;
+        .map_err(|e| SshError::Auth(format!("Failed to connect to agent: {}", e)))?;
 
     let identities = agent
         .request_identities()
         .await
-        .map_err(|e| PortLinkerError::SshAuth(format!("Failed to get agent identities: {}", e)))?;
+        .map_err(|e| SshError::Auth(format!("Failed to get agent identities: {}", e)))?;
 
     for identity in identities {
         // Create a fresh agent connection for each auth attempt since AgentClient doesn't implement Clone
         let mut agent_for_auth = russh::keys::agent::client::AgentClient::connect_env()
             .await
-            .map_err(|e| PortLinkerError::SshAuth(format!("Failed to connect to agent: {}", e)))?;
+            .map_err(|e| SshError::Auth(format!("Failed to connect to agent: {}", e)))?;
 
         let auth_result = handle
             .authenticate_publickey_with(user, identity, None, &mut agent_for_auth)
@@ -388,7 +402,7 @@ async fn try_key_auth(
     let auth_result = handle
         .authenticate_publickey(user, key_with_alg)
         .await
-        .map_err(|e| PortLinkerError::SshAuth(e.to_string()))?;
+        .map_err(|e| SshError::Auth(e.to_string()))?;
 
     Ok(auth_result.success())
 }
@@ -403,7 +417,7 @@ fn load_key_with_passphrase(path: &PathBuf) -> Result<PrivateKey> {
                 && !e.to_string().contains("passphrase")
                 && !e.to_string().contains("decrypt")
             {
-                return Err(PortLinkerError::SshKey(format!(
+                return Err(SshError::Key(format!(
                     "Failed to load key {:?}: {}",
                     path, e
                 )));
@@ -416,8 +430,8 @@ fn load_key_with_passphrase(path: &PathBuf) -> Result<PrivateKey> {
         .with_prompt(format!("Passphrase for {:?}", path))
         .allow_empty_password(true)
         .interact()
-        .map_err(|e| PortLinkerError::SshKey(format!("Passphrase input failed: {}", e)))?;
+        .map_err(|e| SshError::Key(format!("Passphrase input failed: {}", e)))?;
 
     load_secret_key(path, Some(&passphrase))
-        .map_err(|e| PortLinkerError::SshKey(format!("Failed to load key {:?}: {}", path, e)))
+        .map_err(|e| SshError::Key(format!("Failed to load key {:?}: {}", path, e)))
 }

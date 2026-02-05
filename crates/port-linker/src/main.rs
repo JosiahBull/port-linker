@@ -1,19 +1,13 @@
 mod cli;
 mod error;
-mod forward;
-mod mapping;
 mod monitor;
-mod notify;
-mod process;
-mod ssh;
 
 use clap::Parser;
 use cli::{Cli, LogFormat};
-use forward::ForwardManager;
-use mapping::PortMapping;
 use monitor::Monitor;
-use notify::Notifier;
-use ssh::SshClient;
+use port_linker_forward::ForwardManager;
+use port_linker_notify::{Notifier, PortMapping};
+use port_linker_ssh::SshClient;
 use std::io::Write;
 use std::sync::Arc;
 use std::time::Duration;
@@ -137,7 +131,7 @@ fn init_logging(cli: &Cli) {
 
 #[instrument(name = "run", skip(cli), fields(host = %cli.host, protocol = ?cli.protocol))]
 async fn run(cli: Cli) -> error::Result<()> {
-    let parsed_host = cli.parse_host();
+    let parsed_host = port_linker_ssh::ParsedHost::parse(&cli.host);
 
     info!(
         "port-linker v{} - Connecting to {}",

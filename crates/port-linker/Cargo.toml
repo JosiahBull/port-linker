@@ -7,23 +7,24 @@ repository.workspace = true
 license.workspace = true
 
 [dependencies]
+# Library crates
+port-linker-ssh = { path = "../port-linker-ssh" }
+port-linker-forward = { path = "../port-linker-forward" }
+port-linker-notify = { path = "../port-linker-notify" }
+port-linker-proto.workspace = true
+
+# Async runtime
 tokio.workspace = true
+
+# CLI
 clap.workspace = true
-russh.workspace = true
-sysinfo.workspace = true
-notify-rust.workspace = true
+
+# Logging
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+# Error handling
 thiserror.workspace = true
-dialoguer.workspace = true
-dirs.workspace = true
-shellexpand.workspace = true
-whoami.workspace = true
-ssh2-config-rs.workspace = true
-port-linker-proto.workspace = true
-port-linker-assets = { path = "../port-linker-assets" }
-port-linker-udp-embed = { path = "../port-linker-udp-embed" }
-base64 = "0.22"
 
 [dev-dependencies]
 assert_cmd = "2"

@@ -124,27 +124,7 @@ pub struct Cli {
     pub protocol: ProtocolFilter,
 }
 
-#[derive(Debug, Clone)]
-pub struct ParsedHost {
-    pub user: Option<String>,
-    pub host: String,
-}
-
 impl Cli {
-    pub fn parse_host(&self) -> ParsedHost {
-        if let Some((user, host)) = self.host.split_once('@') {
-            ParsedHost {
-                user: Some(user.to_string()),
-                host: host.to_string(),
-            }
-        } else {
-            ParsedHost {
-                user: None,
-                host: self.host.clone(),
-            }
-        }
-    }
-
     /// Get the set of ports to exclude from forwarding
     pub fn excluded_ports(&self) -> HashSet<u16> {
         let mut excluded = HashSet::new();

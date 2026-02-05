@@ -7,9 +7,9 @@
 //! 4. Binds a local UDP socket
 //! 5. Forwards UDP packets through the SSH channel to the remote proxy
 
-use crate::error::{PortLinkerError, Result};
-use crate::ssh::SshClient;
+use crate::error::{ForwardError, Result};
 use port_linker_proto::{Message, UdpPacket};
+use port_linker_ssh::SshClient;
 use port_linker_udp_embed::get_binary_for_system;
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -135,7 +135,7 @@ impl UdpProxyManager {
 
         // Get the appropriate binary for this remote system
         let binary = get_binary_for_system(&os, &arch).ok_or_else(|| {
-            PortLinkerError::UnsupportedPlatform {
+            ForwardError::UnsupportedPlatform {
                 os: os.clone(),
                 arch: arch.clone(),
             }
@@ -199,9 +199,9 @@ pub async fn start_udp_tunnel(
         .await
         .map_err(|e| {
             if e.kind() == std::io::ErrorKind::AddrInUse {
-                PortLinkerError::PortInUse(local_port)
+                ForwardError::PortInUse(local_port)
             } else {
-                PortLinkerError::PortForward {
+                ForwardError::PortForward {
                     port: local_port,
                     message: format!("Failed to bind UDP socket: {}", e),
                 }
