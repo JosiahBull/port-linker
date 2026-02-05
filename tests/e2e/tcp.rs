@@ -15,7 +15,7 @@ fn test_connects_and_discovers_ports() {
     require_test_env!();
 
     // Use -p 8080 to only forward port 8080, avoiding conflicts with parallel tests
-    let child = start_port_linker(&["--scan-interval", "1", "-p", "8080"])
+    let child = start_port_linker(&["--scan-interval-ms", "100", "-p", "8080"])
         .expect("Failed to start port-linker");
 
     // Wait for port 8080 to be forwarded
@@ -36,7 +36,7 @@ fn test_forwards_http_traffic() {
     let _lock = PortLock::acquire(&[DOCKER_TCP_PORT_HTTP]);
     require_test_env!();
 
-    let child = start_port_linker(&["--scan-interval", "1", "-p", "8080"])
+    let child = start_port_linker(&["--scan-interval-ms", "100", "-p", "8080"])
         .expect("Failed to start port-linker");
 
     // Wait for port 8080 to be forwarded
@@ -69,7 +69,7 @@ fn test_clean_shutdown() {
     let _lock = PortLock::acquire(&[DOCKER_TCP_PORT_HTTP]);
     require_test_env!();
 
-    let mut child = start_port_linker(&["--scan-interval", "1", "-p", "8080"])
+    let mut child = start_port_linker(&["--scan-interval-ms", "100", "-p", "8080"])
         .expect("Failed to start port-linker");
 
     // Wait for port to be forwarded
@@ -111,7 +111,7 @@ fn test_localhost_bound_port() {
     require_test_env!();
 
     // Port 3000 is bound to 127.0.0.1 on the remote
-    let child = start_port_linker(&["--scan-interval", "1", "-p", "3000"])
+    let child = start_port_linker(&["--scan-interval-ms", "100", "-p", "3000"])
         .expect("Failed to start port-linker");
 
     // Wait for port to be forwarded
@@ -138,7 +138,7 @@ fn test_port_whitelist() {
     require_test_env!();
 
     // Only forward port 8080
-    let child = start_port_linker(&["--scan-interval", "1", "-p", "8080"])
+    let child = start_port_linker(&["--scan-interval-ms", "100", "-p", "8080"])
         .expect("Failed to start port-linker");
 
     // Wait for port 8080 to be forwarded
@@ -147,10 +147,9 @@ fn test_port_whitelist() {
         "Port 8080 was not forwarded"
     );
 
-    // Give it a moment to forward other ports (if it incorrectly would)
-    std::thread::sleep(Duration::from_millis(200));
-
     // Port 5432 should NOT be forwarded (not in whitelist)
+    // Note: By the time port 8080 is forwarded, the scan that discovered it
+    // has completed, so any other ports would have been forwarded in the same scan.
     let port_5432_open = is_port_open(DOCKER_TCP_PORT_POSTGRES);
 
     // Stop port-linker and wait for cleanup
@@ -175,8 +174,8 @@ fn test_port_exclusion() {
 
     // Exclude port 8080
     let child = start_port_linker(&[
-        "--scan-interval",
-        "1",
+        "--scan-interval-ms",
+        "100",
         "-x",
         "8080",
         "--no-default-excludes",
@@ -186,10 +185,9 @@ fn test_port_exclusion() {
     // Wait for port 5432 to be forwarded (should be forwarded)
     let port_5432_ready = wait_for_port(DOCKER_TCP_PORT_POSTGRES, Duration::from_secs(3));
 
-    // Give time for 8080 to potentially be forwarded
-    std::thread::sleep(Duration::from_millis(200));
-
     // Port 8080 should NOT be forwarded (excluded)
+    // Note: By the time port 5432 is forwarded, the scan that discovered it
+    // has completed, so port 8080 would have been forwarded in the same scan if it wasn't excluded.
     let port_8080_open = is_port_open(DOCKER_TCP_PORT_HTTP);
 
     // Stop port-linker and wait for cleanup
@@ -209,8 +207,8 @@ fn test_multiple_ports() {
     require_test_env!();
 
     let child = start_port_linker(&[
-        "--scan-interval",
-        "1",
+        "--scan-interval-ms",
+        "100",
         "-p",
         "8080,5432",
         "--no-default-excludes",
@@ -247,7 +245,7 @@ fn test_new_service_detected() {
     require_test_env!();
 
     // Start port-linker monitoring all ports except defaults
-    let child = start_port_linker(&["--scan-interval", "1", "--no-default-excludes"])
+    let child = start_port_linker(&["--scan-interval-ms", "100", "--no-default-excludes"])
         .expect("Failed to start port-linker");
 
     // Wait for initial port 8080 to be forwarded
@@ -289,13 +287,11 @@ fn test_service_removal_detected() {
     require_test_env!();
 
     // Start a temporary service on our dynamic port
+    // (start_remote_service waits for the service to be listening)
     let service_pid = start_remote_service(dynamic_port).expect("Failed to start remote service");
 
-    // Give the service a moment to start
-    std::thread::sleep(Duration::from_millis(200));
-
     // Start port-linker watching only our dynamic port
-    let child = start_port_linker(&["--scan-interval", "1", "-p", &dynamic_port.to_string()])
+    let child = start_port_linker(&["--scan-interval-ms", "100", "-p", &dynamic_port.to_string()])
         .expect("Failed to start port-linker");
 
     // Wait for the service to be forwarded
@@ -305,11 +301,19 @@ fn test_service_removal_detected() {
         dynamic_port
     );
 
-    // Stop the remote service
+    // Stop the remote service (stop_remote_service waits for the process to die)
     stop_remote_service(service_pid);
 
+    // First, verify the remote port is actually closed
+    assert!(
+        wait_for_remote_port_closed(dynamic_port, Duration::from_secs(2)),
+        "Remote port {} did not close after service stopped",
+        dynamic_port
+    );
+
     // Wait for port-linker to detect the removal and close the forward
-    let port_closed = wait_for_port_closed(dynamic_port, Duration::from_secs(5));
+    // With 100ms scan interval, this should happen within a few scans
+    let port_closed = wait_for_port_closed(dynamic_port, Duration::from_secs(3));
 
     // Cleanup
     stop_port_linker(child, &[]);

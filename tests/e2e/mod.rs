@@ -44,7 +44,55 @@ use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::OnceLock;
 use std::time::Duration;
+
+// ============================================================================
+// SSH CONNECTION MULTIPLEXING
+// ============================================================================
+// Uses SSH ControlMaster to share a single connection across all test processes,
+// dramatically reducing connection overhead.
+
+/// Path to the SSH control socket (lazily initialized)
+static SSH_CONTROL_SOCKET: OnceLock<PathBuf> = OnceLock::new();
+
+/// Get or create the SSH control socket path
+fn get_ssh_control_socket() -> &'static PathBuf {
+    SSH_CONTROL_SOCKET.get_or_init(|| {
+        let socket_path = std::env::temp_dir().join(format!(
+            "port-linker-e2e-ssh-{}.sock",
+            std::process::id()
+        ));
+
+        // Start the master connection
+        let _ = std::process::Command::new("ssh")
+            .arg("-o")
+            .arg("StrictHostKeyChecking=no")
+            .arg("-o")
+            .arg("UserKnownHostsFile=/dev/null")
+            .arg("-o")
+            .arg("ControlMaster=yes")
+            .arg("-o")
+            .arg(format!("ControlPath={}", socket_path.display()))
+            .arg("-o")
+            .arg("ControlPersist=60")
+            .arg("-i")
+            .arg(test_key_path())
+            .arg("-p")
+            .arg(SSH_PORT.to_string())
+            .arg("-fN") // Background, no command
+            .arg(format!("{}@{}", SSH_USER, SSH_HOST))
+            .status();
+
+        // Wait for the control socket to be ready
+        let start = std::time::Instant::now();
+        while start.elapsed() < Duration::from_secs(5) && !socket_path.exists() {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        socket_path
+    })
+}
 
 /// Get the path to the port-linker binary
 #[allow(deprecated)]
@@ -106,7 +154,7 @@ impl PortLock {
                     );
                 }
 
-                std::thread::sleep(Duration::from_millis(100));
+                std::thread::sleep(Duration::from_millis(10));
             }
 
             files.push(file);
@@ -150,21 +198,21 @@ pub const DOCKER_TCP_PORT_POSTGRES: u16 = 5432;
 pub const DOCKER_UDP_PORT_ECHO_LOCALHOST: u16 = 9999;
 
 /// Get healthcheck wait time from environment variable or use default.
-/// Default is 2 seconds (fast). Set E2E_HEALTHCHECK_WAIT_SECS higher for thorough testing.
+/// Default is 1 second (fast). Set E2E_HEALTHCHECK_WAIT_SECS higher for thorough testing.
 pub fn get_healthcheck_wait_secs() -> u64 {
     std::env::var("E2E_HEALTHCHECK_WAIT_SECS")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(2)
+        .unwrap_or(1)
 }
 
 /// Get long healthcheck wait time (for traffic pause test).
-/// Default is 3 seconds (fast). Set E2E_HEALTHCHECK_LONG_WAIT_SECS higher for thorough testing.
+/// Default is 1.5 seconds (fast). Set E2E_HEALTHCHECK_LONG_WAIT_SECS higher for thorough testing.
 pub fn get_healthcheck_long_wait_secs() -> u64 {
     std::env::var("E2E_HEALTHCHECK_LONG_WAIT_SECS")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(3)
+        .unwrap_or(2)
 }
 
 /// Get the path to the test SSH key
@@ -190,11 +238,12 @@ pub fn is_test_env_running() -> bool {
     .is_ok()
 }
 
-/// Start port-linker as a background process
+/// Start port-linker as a background process and wait for it to be ready.
+/// Returns immediately after detecting the "Starting port monitoring" log message.
 pub fn start_port_linker(extra_args: &[&str]) -> std::io::Result<Child> {
     let key_path = test_key_path();
 
-    std::process::Command::new(bin_path())
+    let mut child = std::process::Command::new(bin_path())
         .arg(format!("{}@{}", SSH_USER, SSH_HOST))
         .arg("-P")
         .arg(SSH_PORT.to_string())
@@ -202,16 +251,70 @@ pub fn start_port_linker(extra_args: &[&str]) -> std::io::Result<Child> {
         .arg(&key_path)
         .arg("--no-notifications")
         .arg("--log-level")
-        .arg("debug")
+        .arg("info")
         // Auto-kill conflicting local processes to prevent hangs when
         // orphaned processes from previous test runs are still bound to ports
         .arg("--auto-kill")
         .args(extra_args)
-        // Use null for stdout/stderr to prevent buffer blocking.
-        // When piped, if the buffer fills up and isn't read, the process blocks.
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    // Wait for the "Starting port monitoring" message indicating readiness
+    let stderr = child.stderr.take().expect("stderr should be piped");
+    let ready_signal = b"Starting port monitoring";
+    let timeout = Duration::from_secs(5);
+
+    // Channel to signal when ready
+    let (tx, rx) = std::sync::mpsc::channel::<bool>();
+
+    // Spawn a thread to read stderr and detect readiness
+    std::thread::spawn(move || {
+        let mut stderr = stderr;
+        let mut buffer = Vec::with_capacity(4096);
+        let mut temp = [0u8; 256];
+        let mut found = false;
+
+        loop {
+            match stderr.read(&mut temp) {
+                Ok(0) => break, // EOF
+                Ok(n) => {
+                    buffer.extend_from_slice(&temp[..n]);
+                    if !found && buffer.windows(ready_signal.len()).any(|w| w == ready_signal) {
+                        found = true;
+                        let _ = tx.send(true);
+                    }
+                    // Keep buffer bounded
+                    if buffer.len() > 8192 {
+                        buffer.drain(..4096);
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        if !found {
+            let _ = tx.send(false);
+        }
+    });
+
+    // Wait for ready signal or timeout
+    match rx.recv_timeout(timeout) {
+        Ok(true) => Ok(child),
+        Ok(false) => {
+            child.kill().ok();
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "port-linker exited before becoming ready",
+            ))
+        }
+        Err(_) => {
+            child.kill().ok();
+            Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "Timeout waiting for port-linker to start",
+            ))
+        }
+    }
 }
 
 /// Maximum time to wait for port-linker process to exit after kill (seconds)
@@ -266,7 +369,7 @@ pub fn wait_for_port(port: u16, timeout: Duration) -> bool {
         {
             return true;
         }
-        std::thread::sleep(Duration::from_millis(50));
+        std::thread::sleep(Duration::from_millis(5));
     }
     false
 }
@@ -283,7 +386,7 @@ pub fn wait_for_port_closed(port: u16, timeout: Duration) -> bool {
         {
             return true;
         }
-        std::thread::sleep(Duration::from_millis(50));
+        std::thread::sleep(Duration::from_millis(5));
     }
     false
 }
@@ -298,19 +401,19 @@ pub fn is_port_open(port: u16) -> bool {
 }
 
 /// Run a command on the remote host via SSH
-/// Includes connection and keepalive timeouts to prevent indefinite hangs
+/// Uses ControlMaster connection multiplexing for faster execution
 pub fn ssh_exec(command: &str) -> std::io::Result<std::process::Output> {
+    let control_socket = get_ssh_control_socket();
+
     std::process::Command::new("ssh")
         .arg("-o")
         .arg("StrictHostKeyChecking=no")
         .arg("-o")
         .arg("UserKnownHostsFile=/dev/null")
         .arg("-o")
-        .arg("ConnectTimeout=10")
+        .arg(format!("ControlPath={}", control_socket.display()))
         .arg("-o")
-        .arg("ServerAliveInterval=5")
-        .arg("-o")
-        .arg("ServerAliveCountMax=2")
+        .arg("ConnectTimeout=5")
         .arg("-i")
         .arg(test_key_path())
         .arg("-p")
@@ -320,22 +423,70 @@ pub fn ssh_exec(command: &str) -> std::io::Result<std::process::Output> {
         .output()
 }
 
-/// Start a TCP service on the remote host (returns the PID)
+/// Start a TCP service on the remote host and wait for it to be listening.
+/// Returns the PID of the service.
 pub fn start_remote_service(port: u16) -> Option<u32> {
-    // Start a simple netcat listener in the background
+    // Start a socat TCP echo server (more reliable than nc in a loop)
     let output = ssh_exec(&format!(
-        "nohup sh -c 'while true; do echo \"test response\" | nc -l -p {} 2>/dev/null; done' > /dev/null 2>&1 & echo $!",
+        "nohup socat TCP-LISTEN:{},fork,reuseaddr EXEC:'/bin/cat' > /dev/null 2>&1 & echo $!",
         port
     ))
     .ok()?;
 
     let pid_str = String::from_utf8_lossy(&output.stdout);
-    pid_str.trim().parse().ok()
+    let pid: u32 = pid_str.trim().parse().ok()?;
+
+    // Wait for the service to be listening (deterministic)
+    wait_for_remote_port_listening(port, Duration::from_secs(5));
+
+    Some(pid)
 }
 
-/// Stop a service on the remote host by PID
+/// Wait for a port to be listening on the remote host
+fn wait_for_remote_port_listening(port: u16, timeout: Duration) -> bool {
+    let start = std::time::Instant::now();
+    while start.elapsed() < timeout {
+        // Check if port is listening using netstat
+        let output = ssh_exec(&format!(
+            "netstat -tln 2>/dev/null | grep -q ':{} ' && echo yes || echo no",
+            port
+        ));
+        if let Ok(o) = output {
+            if String::from_utf8_lossy(&o.stdout).trim() == "yes" {
+                return true;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    false
+}
+
+/// Wait for a port to NOT be listening on the remote host
+pub fn wait_for_remote_port_closed(port: u16, timeout: Duration) -> bool {
+    let start = std::time::Instant::now();
+    while start.elapsed() < timeout {
+        // Check if port is NOT listening using netstat
+        let output = ssh_exec(&format!(
+            "netstat -tln 2>/dev/null | grep -q ':{} ' && echo yes || echo no",
+            port
+        ));
+        if let Ok(o) = output {
+            if String::from_utf8_lossy(&o.stdout).trim() == "no" {
+                return true;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    false
+}
+
+/// Stop a service on the remote host by PID and wait for it to die.
 pub fn stop_remote_service(pid: u32) {
-    let _ = ssh_exec(&format!("kill {} 2>/dev/null", pid));
+    // Kill the specific PID and all its children (fork'd socat processes)
+    let _ = ssh_exec(&format!(
+        "kill {} 2>/dev/null; pkill -P {} 2>/dev/null; sleep 0.05; kill -9 {} 2>/dev/null; pkill -9 -P {} 2>/dev/null",
+        pid, pid, pid, pid
+    ));
 }
 
 /// Send data through a forwarded port and get response
@@ -398,12 +549,13 @@ pub fn wait_for_udp_port(port: u16, timeout: Duration) -> bool {
         if is_udp_port_responding(port) {
             return true;
         }
-        std::thread::sleep(Duration::from_millis(100));
+        std::thread::sleep(Duration::from_millis(10));
     }
     false
 }
 
-/// Start a UDP service on the remote host (returns the PID)
+/// Start a UDP service on the remote host and wait for it to be listening.
+/// Returns the PID of the service.
 pub fn start_remote_udp_service(port: u16) -> Option<u32> {
     // Start a socat UDP echo server in the background
     let output = ssh_exec(&format!(
@@ -413,7 +565,31 @@ pub fn start_remote_udp_service(port: u16) -> Option<u32> {
     .ok()?;
 
     let pid_str = String::from_utf8_lossy(&output.stdout);
-    pid_str.trim().parse().ok()
+    let pid: u32 = pid_str.trim().parse().ok()?;
+
+    // Wait for the service to be listening (deterministic)
+    wait_for_remote_udp_port_listening(port, Duration::from_secs(5));
+
+    Some(pid)
+}
+
+/// Wait for a UDP port to be listening on the remote host
+fn wait_for_remote_udp_port_listening(port: u16, timeout: Duration) -> bool {
+    let start = std::time::Instant::now();
+    while start.elapsed() < timeout {
+        // Check if UDP port is listening using netstat
+        let output = ssh_exec(&format!(
+            "netstat -uln 2>/dev/null | grep -q ':{} ' && echo yes || echo no",
+            port
+        ));
+        if let Ok(o) = output {
+            if String::from_utf8_lossy(&o.stdout).trim() == "yes" {
+                return true;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    false
 }
 
 // ============================================================================

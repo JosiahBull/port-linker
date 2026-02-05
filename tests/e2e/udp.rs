@@ -21,12 +21,12 @@ fn test_udp_discovers_ports() {
     let service_pid = start_remote_udp_service(dynamic_port).expect("Failed to start UDP service");
 
     // Give socat time to start
-    std::thread::sleep(Duration::from_millis(100));
+    // Service startup wait is now handled by start_remote_udp_service()
 
     // Start port-linker with UDP protocol
     let child = start_port_linker(&[
-        "--scan-interval",
-        "1",
+        "--scan-interval-ms",
+        "100",
         "--protocol",
         "udp",
         "-p",
@@ -58,12 +58,12 @@ fn test_udp_echo_traffic() {
 
     // Start our own UDP echo service
     let service_pid = start_remote_udp_service(dynamic_port).expect("Failed to start UDP service");
-    std::thread::sleep(Duration::from_millis(100));
+    // Service startup wait is now handled by start_remote_udp_service()
 
     // Start port-linker with UDP protocol
     let child = start_port_linker(&[
-        "--scan-interval",
-        "1",
+        "--scan-interval-ms",
+        "100",
         "--protocol",
         "udp",
         "-p",
@@ -111,12 +111,12 @@ fn test_udp_multiple_packets() {
 
     // Start our own UDP echo service
     let service_pid = start_remote_udp_service(dynamic_port).expect("Failed to start UDP service");
-    std::thread::sleep(Duration::from_millis(200));
+    // Service startup wait is now handled by start_remote_udp_service()
 
     // Start port-linker with UDP protocol
     let child = start_port_linker(&[
-        "--scan-interval",
-        "1",
+        "--scan-interval-ms",
+        "100",
         "--protocol",
         "udp",
         "-p",
@@ -159,7 +159,7 @@ fn test_udp_multiple_packets() {
                 }
                 Err(e) => {
                     eprintln!("Attempt failed: {}, retrying...", e);
-                    std::thread::sleep(Duration::from_millis(100));
+                    // Service startup wait is now handled by start_remote_udp_service()
                 }
             }
         }
@@ -189,8 +189,8 @@ fn test_udp_localhost_bound_port() {
 
     // Port 9999 is bound to 127.0.0.1 on the remote (pre-configured in Docker)
     let child = start_port_linker(&[
-        "--scan-interval",
-        "1",
+        "--scan-interval-ms",
+        "100",
         "--protocol",
         "udp",
         "-p",
@@ -225,12 +225,12 @@ fn test_udp_both_protocols() {
     // Start our own UDP echo service on dynamic port
     let service_pid =
         start_remote_udp_service(dynamic_udp_port).expect("Failed to start UDP service");
-    std::thread::sleep(Duration::from_millis(100));
+    // Service startup wait is now handled by start_remote_udp_service()
 
     // Start port-linker with both protocols
     let child = start_port_linker(&[
-        "--scan-interval",
-        "1",
+        "--scan-interval-ms",
+        "100",
         "--protocol",
         "both",
         "-p",
@@ -273,12 +273,12 @@ fn test_udp_new_service_detected() {
     // Start initial UDP service
     let initial_pid =
         start_remote_udp_service(initial_port).expect("Failed to start initial UDP service");
-    std::thread::sleep(Duration::from_millis(100));
+    // Service startup wait is now handled by start_remote_udp_service()
 
     // Start port-linker monitoring both ports
     let child = start_port_linker(&[
-        "--scan-interval",
-        "1",
+        "--scan-interval-ms",
+        "100",
         "--protocol",
         "udp",
         "-p",
@@ -299,7 +299,7 @@ fn test_udp_new_service_detected() {
         start_remote_udp_service(new_service_port).expect("Failed to start new UDP service");
 
     // Give socat time to start (and wait for next scan cycle)
-    std::thread::sleep(Duration::from_millis(200));
+    // Service startup wait is now handled by start_remote_udp_service()
 
     // Wait for port-linker to detect and forward the new port
     let new_port_ready = wait_for_udp_port(new_service_port, Duration::from_secs(5));
@@ -357,12 +357,12 @@ fn test_udp_proxy_restart_after_remote_kill() {
 
     // Start our own UDP echo service
     let service_pid = start_remote_udp_service(dynamic_port).expect("Failed to start UDP service");
-    std::thread::sleep(Duration::from_millis(100));
+    // Service startup wait is now handled by start_remote_udp_service()
 
     // Start port-linker with UDP protocol (fast scan interval for quick recovery)
     let child = start_port_linker(&[
-        "--scan-interval",
-        "1",
+        "--scan-interval-ms",
+        "100",
         "--protocol",
         "udp",
         "-p",
@@ -434,12 +434,12 @@ fn test_udp_healthcheck_keeps_proxy_alive() {
 
     // Start our own UDP echo service
     let service_pid = start_remote_udp_service(dynamic_port).expect("Failed to start UDP service");
-    std::thread::sleep(Duration::from_millis(100));
+    // Service startup wait is now handled by start_remote_udp_service()
 
     // Start port-linker with UDP protocol
     let child = start_port_linker(&[
-        "--scan-interval",
-        "1",
+        "--scan-interval-ms",
+        "100",
         "--protocol",
         "udp",
         "-p",
@@ -499,12 +499,12 @@ fn test_udp_tunnel_survives_traffic_pause() {
 
     // Start our own UDP echo service
     let service_pid = start_remote_udp_service(dynamic_port).expect("Failed to start UDP service");
-    std::thread::sleep(Duration::from_millis(100));
+    // Service startup wait is now handled by start_remote_udp_service()
 
     // Start port-linker with UDP protocol
     let child = start_port_linker(&[
-        "--scan-interval",
-        "1",
+        "--scan-interval-ms",
+        "100",
         "--protocol",
         "udp",
         "-p",

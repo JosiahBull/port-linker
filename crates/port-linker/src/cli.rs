@@ -64,9 +64,9 @@ pub struct Cli {
     #[arg(long = "log-level", default_value = "info")]
     pub log_level: String,
 
-    /// Port scan interval in seconds
-    #[arg(long = "scan-interval", default_value = "3")]
-    pub scan_interval: u64,
+    /// Port scan interval in milliseconds
+    #[arg(long = "scan-interval-ms", default_value = "3000")]
+    pub scan_interval_ms: u64,
 
     /// Path to SSH identity file
     #[arg(short = 'i', long = "identity")]
