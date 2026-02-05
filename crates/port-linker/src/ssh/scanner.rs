@@ -1,5 +1,6 @@
 use crate::error::{PortLinkerError, Result};
 use crate::ssh::SshClient;
+use port_linker_proto::Protocol;
 use tracing::debug;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -7,20 +8,22 @@ pub struct RemotePort {
     pub port: u16,
     pub bind_address: String,
     pub process_name: Option<String>,
+    pub protocol: Protocol,
 }
 
 pub struct Scanner;
 
 impl Scanner {
-    pub async fn scan_ports(client: &SshClient) -> Result<Vec<RemotePort>> {
-        // Try ss first, then netstat (TCP only)
+    /// Scan for TCP ports on the remote host.
+    pub async fn scan_tcp_ports(client: &SshClient) -> Result<Vec<RemotePort>> {
+        // Try ss first, then netstat
         let output = match client.exec("ss -tlnp 2>/dev/null").await {
             Ok(out) if !out.is_empty() && out.contains("State") => {
-                debug!("Using ss for port scanning");
+                debug!("Using ss for TCP port scanning");
                 out
             }
             _ => {
-                debug!("Falling back to netstat for port scanning");
+                debug!("Falling back to netstat for TCP port scanning");
                 client
                     .exec("netstat -tlnp 2>/dev/null")
                     .await
@@ -30,15 +33,59 @@ impl Scanner {
             }
         };
 
-        Self::parse_output(&output)
+        Self::parse_output(&output, Protocol::Tcp)
     }
 
-    fn parse_output(output: &str) -> Result<Vec<RemotePort>> {
+    /// Scan for UDP ports on the remote host.
+    pub async fn scan_udp_ports(client: &SshClient) -> Result<Vec<RemotePort>> {
+        // Try ss first, then netstat
+        let output = match client.exec("ss -ulnp 2>/dev/null").await {
+            Ok(out) if !out.is_empty() && (out.contains("State") || out.contains("UNCONN")) => {
+                debug!("Using ss for UDP port scanning");
+                out
+            }
+            _ => {
+                debug!("Falling back to netstat for UDP port scanning");
+                client
+                    .exec("netstat -ulnp 2>/dev/null")
+                    .await
+                    .unwrap_or_default() // UDP scan failure is non-fatal
+            }
+        };
+
+        Self::parse_output(&output, Protocol::Udp)
+    }
+
+    /// Scan for both TCP and UDP ports.
+    pub async fn scan_all_ports(client: &SshClient) -> Result<Vec<RemotePort>> {
+        let mut ports = Self::scan_tcp_ports(client).await?;
+
+        // UDP scan failure shouldn't fail the whole operation
+        if let Ok(udp_ports) = Self::scan_udp_ports(client).await {
+            ports.extend(udp_ports);
+        }
+
+        // Sort by (protocol, port) for consistent ordering
+        ports.sort_by_key(|p| (p.protocol == Protocol::Udp, p.port));
+
+        Ok(ports)
+    }
+
+    /// Legacy method for backward compatibility - scans TCP only.
+    pub async fn scan_ports(client: &SshClient) -> Result<Vec<RemotePort>> {
+        Self::scan_tcp_ports(client).await
+    }
+
+    fn parse_output(output: &str, protocol: Protocol) -> Result<Vec<RemotePort>> {
         let mut ports = Vec::new();
+        let expected_prefix = match protocol {
+            Protocol::Tcp => "tcp",
+            Protocol::Udp => "udp",
+        };
 
         for line in output.lines().skip(1) {
             // Skip header
-            if let Some(port) = Self::parse_line(line) {
+            if let Some(port) = Self::parse_line(line, protocol, expected_prefix) {
                 // Only include ports bound to localhost or all interfaces
                 if Self::is_forwardable_address(&port.bind_address) {
                     ports.push(port);
@@ -46,31 +93,36 @@ impl Scanner {
             }
         }
 
-        // Deduplicate by port
+        // Deduplicate by port (within the same protocol)
         ports.sort_by_key(|p| p.port);
         ports.dedup_by_key(|p| p.port);
 
-        debug!("Found {} forwardable ports", ports.len());
+        debug!(
+            "Found {} forwardable {} ports",
+            ports.len(),
+            expected_prefix.to_uppercase()
+        );
         Ok(ports)
     }
 
-    fn parse_line(line: &str) -> Option<RemotePort> {
+    fn parse_line(line: &str, protocol: Protocol, expected_prefix: &str) -> Option<RemotePort> {
         let parts: Vec<&str> = line.split_whitespace().collect();
 
         if parts.len() < 5 {
             return None;
         }
 
-        // Only process TCP lines
+        // Check protocol matches
         let proto_str = parts[0].to_lowercase();
-        if !proto_str.starts_with("tcp") {
+        if !proto_str.starts_with(expected_prefix) {
             return None;
         }
 
         // Find local address column
         // ss format: Netid State Recv-Q Send-Q Local Address:Port Peer Address:Port Process
         //   e.g.: tcp    LISTEN  0       128     0.0.0.0:22            0.0.0.0:*
-        //         parts[1] = "LISTEN" (a state, not a number)
+        //   e.g.: udp    UNCONN  0       0       0.0.0.0:53            0.0.0.0:*
+        //         parts[1] = "LISTEN"/"UNCONN" (a state, not a number)
         // netstat format: Proto Recv-Q Send-Q Local Address Foreign Address State PID/Program
         //   e.g.: tcp        0      0 0.0.0.0:8080            0.0.0.0:*               LISTEN
         //         parts[1] = "0" (a number)
@@ -96,6 +148,7 @@ impl Scanner {
             port,
             bind_address,
             process_name,
+            protocol,
         })
     }
 
@@ -167,22 +220,38 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_ss_output() {
+    fn test_parse_ss_tcp_output() {
         let output = r#"Netid  State   Recv-Q  Send-Q  Local Address:Port   Peer Address:Port Process
 tcp    LISTEN  0       128     0.0.0.0:22            0.0.0.0:*         users:(("sshd",pid=1234,fd=3))
 tcp    LISTEN  0       128     127.0.0.1:3000        0.0.0.0:*         users:(("node",pid=5678,fd=5))
 tcp    LISTEN  0       128     [::]:80               [::]:*            users:(("nginx",pid=9012,fd=6))"#;
 
-        let ports = Scanner::parse_output(output).unwrap();
+        let ports = Scanner::parse_output(output, Protocol::Tcp).unwrap();
         assert_eq!(ports.len(), 3);
 
         let port_22 = ports.iter().find(|p| p.port == 22).unwrap();
         assert_eq!(port_22.bind_address, "0.0.0.0");
         assert_eq!(port_22.process_name, Some("sshd".to_string()));
+        assert_eq!(port_22.protocol, Protocol::Tcp);
 
         let port_3000 = ports.iter().find(|p| p.port == 3000).unwrap();
         assert_eq!(port_3000.bind_address, "127.0.0.1");
         assert_eq!(port_3000.process_name, Some("node".to_string()));
+    }
+
+    #[test]
+    fn test_parse_ss_udp_output() {
+        let output = r#"Netid  State   Recv-Q  Send-Q  Local Address:Port   Peer Address:Port Process
+udp    UNCONN  0       0       0.0.0.0:53            0.0.0.0:*         users:(("dnsmasq",pid=1234,fd=5))
+udp    UNCONN  0       0       127.0.0.1:323         0.0.0.0:*         users:(("chronyd",pid=5678,fd=6))"#;
+
+        let ports = Scanner::parse_output(output, Protocol::Udp).unwrap();
+        assert_eq!(ports.len(), 2);
+
+        let port_53 = ports.iter().find(|p| p.port == 53).unwrap();
+        assert_eq!(port_53.bind_address, "0.0.0.0");
+        assert_eq!(port_53.process_name, Some("dnsmasq".to_string()));
+        assert_eq!(port_53.protocol, Protocol::Udp);
     }
 
     #[test]

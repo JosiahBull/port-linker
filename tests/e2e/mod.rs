@@ -10,22 +10,40 @@
 //! - Handle dynamic port changes
 //! - Handle connection drops and reconnection
 //!
+//! ## Port Isolation Strategy
+//!
+//! Tests are organized to allow maximum parallelism while avoiding port conflicts:
+//!
+//! 1. **No-port tests**: Tests like `test_help_output` don't use ports and run freely in parallel.
+//!
+//! 2. **Dynamic port tests**: Tests that create their own remote services use unique port ranges
+//!    allocated per-test, allowing them to run in parallel.
+//!
+//! 3. **Fixed port tests**: Tests that use the Docker container's pre-configured services
+//!    (8080, 3000, 5432 for TCP; 5353, 9999 for UDP) use per-port locks to serialize only
+//!    tests that would conflict.
+//!
 //! Note: These tests only run on Unix systems as they require Docker and Unix-specific APIs.
 
 #![cfg(unix)]
 
+mod tcp;
+mod udp;
+
 use ntest::timeout;
+use wait_timeout::ChildExt;
 
 #[allow(deprecated)]
 use assert_cmd::cargo::cargo_bin;
 use assert_cmd::prelude::*;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::net::{TcpStream, UdpSocket};
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
 
 /// Get the path to the port-linker binary
@@ -34,57 +52,137 @@ fn bin_path() -> std::path::PathBuf {
     cargo_bin("port-linker")
 }
 
-/// Guard that holds a file lock for serializing tests that use shared ports.
-/// Tests that forward ports must hold this lock to prevent parallel execution.
-struct TestLock {
-    _file: File,
+// ============================================================================
+// PORT ISOLATION INFRASTRUCTURE
+// ============================================================================
+
+/// Maximum time to wait for a port lock before giving up (2 minutes)
+const PORT_LOCK_TIMEOUT_SECS: u64 = 120;
+
+/// Base port for dynamically allocated test ports
+const DYNAMIC_PORT_BASE: u16 = 10000;
+
+/// Counter for allocating unique dynamic ports across tests
+static DYNAMIC_PORT_COUNTER: AtomicU16 = AtomicU16::new(0);
+
+/// Guard that holds a file lock for a specific port.
+/// Multiple tests using different ports can run in parallel.
+pub struct PortLock {
+    _files: Vec<File>,
 }
 
-impl TestLock {
-    fn acquire() -> Self {
-        let lock_path = std::env::temp_dir().join("port-linker-e2e-test.lock");
-        let file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .open(&lock_path)
-            .expect("Failed to open lock file");
+impl PortLock {
+    /// Acquire locks for the specified ports. Tests using different ports can run in parallel.
+    pub fn acquire(ports: &[u16]) -> Self {
+        let mut files = Vec::new();
 
-        unsafe {
-            if libc::flock(file.as_raw_fd(), libc::LOCK_EX) != 0 {
-                panic!("Failed to acquire test lock");
+        for &port in ports {
+            let lock_path =
+                std::env::temp_dir().join(format!("port-linker-e2e-port-{}.lock", port));
+            let file = OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .mode(0o600)
+                .open(&lock_path)
+                .expect("Failed to open port lock file");
+
+            // Use non-blocking lock with timeout
+            let start = std::time::Instant::now();
+            let timeout = Duration::from_secs(PORT_LOCK_TIMEOUT_SECS);
+
+            loop {
+                let result =
+                    unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+                if result == 0 {
+                    break;
+                }
+
+                if start.elapsed() > timeout {
+                    panic!(
+                        "Timeout after {}s waiting to acquire lock for port {}. \
+                         Another test may be hung. Try removing: {:?}",
+                        PORT_LOCK_TIMEOUT_SECS, port, lock_path
+                    );
+                }
+
+                std::thread::sleep(Duration::from_millis(100));
             }
+
+            files.push(file);
         }
 
-        TestLock { _file: file }
+        PortLock { _files: files }
     }
 }
 
-impl Drop for TestLock {
+impl Drop for PortLock {
     fn drop(&mut self) {
-        unsafe {
-            libc::flock(self._file.as_raw_fd(), libc::LOCK_UN);
-        }
+        // File locks are automatically released when the file is closed
+        // The _file field being dropped handles this
     }
 }
 
-/// Test configuration - matches docker-compose setup
+/// Allocate a unique port for a test. Each call returns a different port.
+/// Ports are allocated from a high range (10000+) to avoid conflicts with
+/// the Docker container's fixed services.
+pub fn allocate_test_port() -> u16 {
+    let offset = DYNAMIC_PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    DYNAMIC_PORT_BASE + offset
+}
+
+// ============================================================================
+// TEST CONFIGURATION
+// ============================================================================
+
+/// Test configuration - matches docker compose setup
 const SSH_HOST: &str = "localhost";
 const SSH_PORT: u16 = 2222;
 const SSH_USER: &str = "testuser";
 
+/// Fixed ports in the Docker container (TCP)
+pub const DOCKER_TCP_PORT_HTTP: u16 = 8080;
+pub const DOCKER_TCP_PORT_ECHO: u16 = 3000;
+pub const DOCKER_TCP_PORT_POSTGRES: u16 = 5432;
+
+/// Fixed ports in the Docker container (UDP)
+/// Note: Port 9999 is bound to 127.0.0.1, used only for localhost-bound test
+pub const DOCKER_UDP_PORT_ECHO_LOCALHOST: u16 = 9999;
+
+/// Get healthcheck wait time from environment variable or use default.
+/// Set E2E_HEALTHCHECK_WAIT_SECS to a lower value (e.g., 5) for faster testing.
+pub fn get_healthcheck_wait_secs() -> u64 {
+    std::env::var("E2E_HEALTHCHECK_WAIT_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(30)
+}
+
+/// Get long healthcheck wait time (for traffic pause test).
+/// Set E2E_HEALTHCHECK_LONG_WAIT_SECS to a lower value (e.g., 10) for faster testing.
+pub fn get_healthcheck_long_wait_secs() -> u64 {
+    std::env::var("E2E_HEALTHCHECK_LONG_WAIT_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(45)
+}
+
 /// Get the path to the test SSH key
 fn test_key_path() -> PathBuf {
+    // CARGO_MANIFEST_DIR points to crates/port-linker/, but tests are at workspace root
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     PathBuf::from(manifest_dir)
+        .parent() // crates/
+        .unwrap()
+        .parent() // workspace root
+        .unwrap()
         .join("tests")
         .join("docker")
         .join("test_key")
 }
 
 /// Check if the Docker test environment is running
-fn is_test_env_running() -> bool {
+pub fn is_test_env_running() -> bool {
     TcpStream::connect_timeout(
         &format!("127.0.0.1:{}", SSH_PORT).parse().unwrap(),
         Duration::from_secs(1),
@@ -93,7 +191,7 @@ fn is_test_env_running() -> bool {
 }
 
 /// Start port-linker as a background process
-fn start_port_linker(extra_args: &[&str]) -> std::io::Result<Child> {
+pub fn start_port_linker(extra_args: &[&str]) -> std::io::Result<Child> {
     let key_path = test_key_path();
 
     std::process::Command::new(bin_path())
@@ -105,17 +203,46 @@ fn start_port_linker(extra_args: &[&str]) -> std::io::Result<Child> {
         .arg("--no-notifications")
         .arg("--log-level")
         .arg("debug")
+        // Auto-kill conflicting local processes to prevent hangs when
+        // orphaned processes from previous test runs are still bound to ports
+        .arg("--auto-kill")
         .args(extra_args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        // Use null for stdout/stderr to prevent buffer blocking.
+        // When piped, if the buffer fills up and isn't read, the process blocks.
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .spawn()
 }
 
+/// Maximum time to wait for port-linker process to exit after kill (seconds)
+const PROCESS_EXIT_TIMEOUT_SECS: u64 = 10;
+
 /// Stop port-linker and wait for cleanup
 #[track_caller]
-fn stop_port_linker(mut child: Child, ports: &[u16]) {
+pub fn stop_port_linker(mut child: Child, ports: &[u16]) {
     child.kill().ok();
-    let _ = child.wait();
+
+    // Wait for process to exit with a timeout to prevent hanging
+    match child.wait_timeout(Duration::from_secs(PROCESS_EXIT_TIMEOUT_SECS)) {
+        Ok(Some(_status)) => {
+            // Process exited normally
+        }
+        Ok(None) => {
+            // Timeout - process didn't exit, try SIGKILL
+            eprintln!(
+                "Warning: port-linker process did not exit within {}s after SIGTERM, sending SIGKILL",
+                PROCESS_EXIT_TIMEOUT_SECS
+            );
+            unsafe {
+                libc::kill(child.id() as i32, libc::SIGKILL);
+            }
+            // Wait a bit more after SIGKILL
+            let _ = child.wait_timeout(Duration::from_secs(5));
+        }
+        Err(e) => {
+            eprintln!("Warning: error waiting for port-linker process: {}", e);
+        }
+    }
 
     // Wait for ports to be released
     for &port in ports {
@@ -127,8 +254,8 @@ fn stop_port_linker(mut child: Child, ports: &[u16]) {
     }
 }
 
-/// Wait for a local port to become available
-fn wait_for_port(port: u16, timeout: Duration) -> bool {
+/// Wait for a local port to become available (listening)
+pub fn wait_for_port(port: u16, timeout: Duration) -> bool {
     let start = std::time::Instant::now();
     while start.elapsed() < timeout {
         if TcpStream::connect_timeout(
@@ -144,8 +271,8 @@ fn wait_for_port(port: u16, timeout: Duration) -> bool {
     false
 }
 
-/// Wait for a local port to become unavailable
-fn wait_for_port_closed(port: u16, timeout: Duration) -> bool {
+/// Wait for a local port to become unavailable (closed)
+pub fn wait_for_port_closed(port: u16, timeout: Duration) -> bool {
     let start = std::time::Instant::now();
     while start.elapsed() < timeout {
         if TcpStream::connect_timeout(
@@ -162,7 +289,7 @@ fn wait_for_port_closed(port: u16, timeout: Duration) -> bool {
 }
 
 /// Check if a port is currently listening
-fn is_port_open(port: u16) -> bool {
+pub fn is_port_open(port: u16) -> bool {
     TcpStream::connect_timeout(
         &format!("127.0.0.1:{}", port).parse().unwrap(),
         Duration::from_millis(500),
@@ -171,12 +298,19 @@ fn is_port_open(port: u16) -> bool {
 }
 
 /// Run a command on the remote host via SSH
-fn ssh_exec(command: &str) -> std::io::Result<std::process::Output> {
+/// Includes connection and keepalive timeouts to prevent indefinite hangs
+pub fn ssh_exec(command: &str) -> std::io::Result<std::process::Output> {
     std::process::Command::new("ssh")
         .arg("-o")
         .arg("StrictHostKeyChecking=no")
         .arg("-o")
         .arg("UserKnownHostsFile=/dev/null")
+        .arg("-o")
+        .arg("ConnectTimeout=10")
+        .arg("-o")
+        .arg("ServerAliveInterval=5")
+        .arg("-o")
+        .arg("ServerAliveCountMax=2")
         .arg("-i")
         .arg(test_key_path())
         .arg("-p")
@@ -186,8 +320,8 @@ fn ssh_exec(command: &str) -> std::io::Result<std::process::Output> {
         .output()
 }
 
-/// Start a service on the remote host (returns the PID)
-fn start_remote_service(port: u16) -> Option<u32> {
+/// Start a TCP service on the remote host (returns the PID)
+pub fn start_remote_service(port: u16) -> Option<u32> {
     // Start a simple netcat listener in the background
     let output = ssh_exec(&format!(
         "nohup sh -c 'while true; do echo \"test response\" | nc -l -p {} 2>/dev/null; done' > /dev/null 2>&1 & echo $!",
@@ -200,12 +334,12 @@ fn start_remote_service(port: u16) -> Option<u32> {
 }
 
 /// Stop a service on the remote host by PID
-fn stop_remote_service(pid: u32) {
+pub fn stop_remote_service(pid: u32) {
     let _ = ssh_exec(&format!("kill {} 2>/dev/null", pid));
 }
 
 /// Send data through a forwarded port and get response
-fn send_and_receive(port: u16, data: &[u8]) -> std::io::Result<Vec<u8>> {
+pub fn send_and_receive(port: u16, data: &[u8]) -> std::io::Result<Vec<u8>> {
     let mut stream = TcpStream::connect(format!("127.0.0.1:{}", port))?;
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     stream.write_all(data)?;
@@ -222,13 +356,74 @@ fn send_and_receive(port: u16, data: &[u8]) -> std::io::Result<Vec<u8>> {
 }
 
 // ============================================================================
-// TESTS
+// UDP HELPER FUNCTIONS
+// ============================================================================
+
+/// Send UDP data through a forwarded port and get response
+pub fn udp_send_and_receive(port: u16, data: &[u8]) -> std::io::Result<Vec<u8>> {
+    let socket = UdpSocket::bind("127.0.0.1:0")?;
+    socket.set_read_timeout(Some(Duration::from_secs(5)))?;
+    socket.connect(format!("127.0.0.1:{}", port))?;
+    socket.send(data)?;
+
+    let mut buf = [0u8; 65535];
+    match socket.recv(&mut buf) {
+        Ok(n) => Ok(buf[..n].to_vec()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Check if a UDP port responds (by sending a test packet and waiting for response)
+pub fn is_udp_port_responding(port: u16) -> bool {
+    let socket = match UdpSocket::bind("127.0.0.1:0") {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    socket.set_read_timeout(Some(Duration::from_secs(2))).ok();
+    if socket.connect(format!("127.0.0.1:{}", port)).is_err() {
+        return false;
+    }
+    if socket.send(b"ping").is_err() {
+        return false;
+    }
+
+    let mut buf = [0u8; 1024];
+    socket.recv(&mut buf).is_ok()
+}
+
+/// Wait for a UDP port to become responsive
+pub fn wait_for_udp_port(port: u16, timeout: Duration) -> bool {
+    let start = std::time::Instant::now();
+    while start.elapsed() < timeout {
+        if is_udp_port_responding(port) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    false
+}
+
+/// Start a UDP service on the remote host (returns the PID)
+pub fn start_remote_udp_service(port: u16) -> Option<u32> {
+    // Start a socat UDP echo server in the background
+    let output = ssh_exec(&format!(
+        "nohup socat UDP4-LISTEN:{},fork EXEC:'/bin/cat' > /dev/null 2>&1 & echo $!",
+        port
+    ))
+    .ok()?;
+
+    let pid_str = String::from_utf8_lossy(&output.stdout);
+    pid_str.trim().parse().ok()
+}
+
+// ============================================================================
+// TEST HELPERS
 // ============================================================================
 
 /// Skip tests if Docker environment is not running
 macro_rules! require_test_env {
     () => {
-        if !is_test_env_running() {
+        if !$crate::is_test_env_running() {
             eprintln!("SKIPPED: Docker test environment not running");
             eprintln!("Run: ./tests/docker/setup-test-env.sh");
             panic!();
@@ -236,283 +431,16 @@ macro_rules! require_test_env {
     };
 }
 
-#[test]
-#[timeout(60000)]
-fn test_connects_and_discovers_ports() {
-    let _lock = TestLock::acquire();
-    require_test_env!();
+pub(crate) use require_test_env;
 
-    let child = start_port_linker(&["--scan-interval", "1"]).expect("Failed to start port-linker");
-
-    // Wait for ports to be forwarded
-    let port_8080_ready = wait_for_port(8080, Duration::from_secs(15));
-
-    // Stop port-linker and wait for cleanup
-    stop_port_linker(child, &[8080]);
-
-    assert!(
-        port_8080_ready,
-        "Port 8080 was not forwarded within timeout"
-    );
-}
-
-#[test]
-#[timeout(60000)]
-fn test_forwards_http_traffic() {
-    let _lock = TestLock::acquire();
-    require_test_env!();
-
-    let child = start_port_linker(&["--scan-interval", "1", "-p", "8080"])
-        .expect("Failed to start port-linker");
-
-    // Wait for port 8080 to be forwarded
-    assert!(
-        wait_for_port(8080, Duration::from_secs(15)),
-        "Port 8080 was not forwarded"
-    );
-
-    // Make HTTP request through forwarded port
-    let response = send_and_receive(8080, b"GET / HTTP/1.0\r\n\r\n");
-
-    // Stop port-linker and wait for cleanup
-    stop_port_linker(child, &[8080]);
-
-    assert!(
-        response.is_ok(),
-        "Failed to connect through forwarded port: {:?}",
-        response.err()
-    );
-    let response_data = response.unwrap();
-    assert!(
-        !response_data.is_empty(),
-        "Got empty response from forwarded port"
-    );
-}
-
-#[test]
-#[timeout(60000)]
-fn test_port_whitelist() {
-    let _lock = TestLock::acquire();
-    require_test_env!();
-
-    // Only forward port 8080
-    let child = start_port_linker(&["--scan-interval", "1", "-p", "8080"])
-        .expect("Failed to start port-linker");
-
-    // Wait for port 8080 to be forwarded
-    assert!(
-        wait_for_port(8080, Duration::from_secs(15)),
-        "Port 8080 was not forwarded"
-    );
-
-    // Give it a moment to forward other ports (if it incorrectly would)
-    std::thread::sleep(Duration::from_secs(3));
-
-    // Port 5432 should NOT be forwarded (not in whitelist)
-    let port_5432_open = is_port_open(5432);
-
-    // Stop port-linker and wait for cleanup
-    stop_port_linker(child, &[8080]);
-
-    assert!(
-        !port_5432_open,
-        "Port 5432 was forwarded despite not being in whitelist"
-    );
-}
-
-#[test]
-#[timeout(60000)]
-fn test_port_exclusion() {
-    let _lock = TestLock::acquire();
-    require_test_env!();
-
-    // Exclude port 8080
-    let child = start_port_linker(&[
-        "--scan-interval",
-        "1",
-        "-x",
-        "8080",
-        "--no-default-excludes",
-    ])
-    .expect("Failed to start port-linker");
-
-    // Wait for port 5432 to be forwarded (should be forwarded)
-    let port_5432_ready = wait_for_port(5432, Duration::from_secs(15));
-
-    // Give time for 8080 to potentially be forwarded
-    std::thread::sleep(Duration::from_secs(2));
-
-    // Port 8080 should NOT be forwarded (excluded)
-    let port_8080_open = is_port_open(8080);
-
-    // Stop port-linker and wait for cleanup
-    stop_port_linker(child, &[3000, 5432]);
-
-    assert!(port_5432_ready, "Port 5432 was not forwarded");
-    assert!(
-        !port_8080_open,
-        "Port 8080 was forwarded despite being excluded"
-    );
-}
-
-#[test]
-#[timeout(60000)]
-fn test_clean_shutdown() {
-    let _lock = TestLock::acquire();
-    require_test_env!();
-
-    let mut child = start_port_linker(&["--scan-interval", "1", "-p", "8080"])
-        .expect("Failed to start port-linker");
-
-    // Wait for port to be forwarded
-    assert!(
-        wait_for_port(8080, Duration::from_secs(15)),
-        "Port 8080 was not forwarded"
-    );
-
-    // Send SIGTERM for graceful shutdown
-    unsafe {
-        libc::kill(child.id() as i32, libc::SIGTERM);
-    }
-
-    // Wait for process to exit
-    let status = child.wait().expect("Failed to wait for process");
-
-    // Port should be closed after shutdown
-    assert!(
-        wait_for_port_closed(8080, Duration::from_secs(5)),
-        "Port 8080 still open after shutdown"
-    );
-
-    // Process should have exited cleanly (or with SIGTERM)
-    assert!(
-        status.success() || status.code() == Some(130) || status.code().is_none(),
-        "Process exited with unexpected status: {:?}",
-        status
-    );
-}
-
-#[test]
-#[timeout(60000)]
-fn test_multiple_ports() {
-    let _lock = TestLock::acquire();
-    require_test_env!();
-
-    let child = start_port_linker(&[
-        "--scan-interval",
-        "1",
-        "-p",
-        "8080,5432",
-        "--no-default-excludes",
-    ])
-    .expect("Failed to start port-linker");
-
-    // Wait for both ports
-    let port_8080_ready = wait_for_port(8080, Duration::from_secs(15));
-    let port_5432_ready = wait_for_port(5432, Duration::from_secs(5));
-
-    // Stop port-linker and wait for cleanup
-    stop_port_linker(child, &[8080, 5432]);
-
-    assert!(port_8080_ready, "Port 8080 was not forwarded");
-    assert!(port_5432_ready, "Port 5432 was not forwarded");
-}
-
-#[test]
-#[timeout(60000)]
-fn test_localhost_bound_port() {
-    let _lock = TestLock::acquire();
-    require_test_env!();
-
-    // Port 3000 is bound to 127.0.0.1 on the remote
-    let child = start_port_linker(&["--scan-interval", "1", "-p", "3000"])
-        .expect("Failed to start port-linker");
-
-    // Wait for port to be forwarded
-    let port_ready = wait_for_port(3000, Duration::from_secs(15));
-
-    // Stop port-linker and wait for cleanup
-    stop_port_linker(child, &[3000]);
-
-    assert!(
-        port_ready,
-        "Port 3000 (bound to 127.0.0.1 on remote) was not forwarded"
-    );
-}
-
-#[test]
-#[timeout(60000)]
-fn test_new_service_detected() {
-    let _lock = TestLock::acquire();
-    require_test_env!();
-
-    // Start port-linker monitoring all ports except defaults
-    let child = start_port_linker(&["--scan-interval", "1", "--no-default-excludes"])
-        .expect("Failed to start port-linker");
-
-    // Wait for initial port 8080 to be forwarded
-    assert!(
-        wait_for_port(8080, Duration::from_secs(15)),
-        "Initial port 8080 was not forwarded"
-    );
-
-    // Start a new service on port 9000 on the remote
-    let service_pid = start_remote_service(9000).expect("Failed to start remote service");
-
-    // Wait for port-linker to detect and forward the new port
-    let new_port_ready = wait_for_port(9000, Duration::from_secs(10));
-
-    // Cleanup
-    stop_remote_service(service_pid);
-    stop_port_linker(child, &[8080, 5432, 3000]);
-
-    assert!(
-        new_port_ready,
-        "New service on port 9000 was not detected and forwarded"
-    );
-}
-
-#[test]
-#[timeout(60000)]
-fn test_service_removal_detected() {
-    let _lock = TestLock::acquire();
-    require_test_env!();
-
-    // Start a temporary service on port 9001
-    let service_pid = start_remote_service(9001).expect("Failed to start remote service");
-
-    // Give the service a moment to start
-    std::thread::sleep(Duration::from_secs(1));
-
-    // Start port-linker
-    let child = start_port_linker(&["--scan-interval", "1", "-p", "9001"])
-        .expect("Failed to start port-linker");
-
-    // Wait for the service to be forwarded
-    assert!(
-        wait_for_port(9001, Duration::from_secs(15)),
-        "Port 9001 was not forwarded"
-    );
-
-    // Stop the remote service
-    stop_remote_service(service_pid);
-
-    // Wait for port-linker to detect the removal and close the forward
-    let port_closed = wait_for_port_closed(9001, Duration::from_secs(10));
-
-    // Cleanup
-    stop_port_linker(child, &[]);
-
-    assert!(
-        port_closed,
-        "Port 9001 forward was not closed after service stopped"
-    );
-}
+// ============================================================================
+// TESTS - NO PORT USAGE (can run fully in parallel)
+// ============================================================================
 
 #[test]
 #[timeout(30000)]
 fn test_invalid_ssh_host() {
-    // This should fail quickly with connection error
+    // This should fail quickly with connection error - no port locks needed
     Command::new(bin_path())
         .arg("testuser@nonexistent.invalid")
         .arg("-i")
@@ -527,7 +455,7 @@ fn test_invalid_ssh_host() {
 fn test_invalid_ssh_key() {
     require_test_env!();
 
-    // Use a non-existent key - error may be in stdout (logging) or stderr
+    // Use a non-existent key - no port locks needed
     Command::new(bin_path())
         .arg(format!("{}@{}", SSH_USER, SSH_HOST))
         .arg("-P")

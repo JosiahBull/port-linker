@@ -18,21 +18,25 @@ fi
 
 # Build and start the Docker container
 echo "Building Docker image..."
-docker-compose build
+docker compose build
+
+# Ensure that the old server is shutdown and removed.
+echo "Cleaning up any old containers..."
+docker compose down -v
 
 echo "Starting SSH target container..."
-docker-compose up -d
+docker compose up -d
 
 # Wait for container to be healthy
 echo "Waiting for container to be ready..."
 for i in {1..30}; do
-    if docker-compose exec -T ssh-target nc -z localhost 22 2>/dev/null; then
+    if docker compose exec -T ssh-target nc -z localhost 22 2>/dev/null; then
         echo "Container is ready!"
         break
     fi
     if [ $i -eq 30 ]; then
         echo "ERROR: Container failed to start within 60 seconds"
-        docker-compose logs
+        docker compose logs
         exit 1
     fi
     sleep 2
@@ -60,4 +64,4 @@ echo "SSH user: testuser"
 echo "SSH key: $SCRIPT_DIR/test_key"
 echo ""
 echo "To run tests: cargo test --test e2e"
-echo "To stop: docker-compose down"
+echo "To stop: docker compose down"

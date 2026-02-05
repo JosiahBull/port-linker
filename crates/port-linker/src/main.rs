@@ -48,7 +48,8 @@ async fn run(cli: Cli) -> error::Result<()> {
     );
 
     // Connect to SSH
-    let client = SshClient::connect(&parsed_host, cli.ssh_port, cli.identity_file.clone()).await?;
+    let client =
+        Arc::new(SshClient::connect(&parsed_host, cli.ssh_port, cli.identity_file.clone()).await?);
 
     // Load port mapping
     let port_mapping = Arc::new(PortMapping::load_default());
@@ -63,7 +64,7 @@ async fn run(cli: Cli) -> error::Result<()> {
 
     // Create forward manager
     let excluded_ports = cli.excluded_ports();
-    let manager = ForwardManager::new(
+    let mut manager = ForwardManager::new(
         client.handle(),
         notifier.clone(),
         cli.auto_kill,
@@ -71,12 +72,24 @@ async fn run(cli: Cli) -> error::Result<()> {
         excluded_ports,
     );
 
+    // Set SSH client for UDP tunneling
+    manager.set_ssh_client(client.clone());
+
+    // Log protocol mode
+    match cli.protocol {
+        cli::ProtocolFilter::Tcp => info!("Forwarding TCP ports only"),
+        cli::ProtocolFilter::Udp => info!("Forwarding UDP ports only"),
+        cli::ProtocolFilter::Both => info!("Forwarding both TCP and UDP ports"),
+    }
+
     // Create and run monitor
     let mut monitor = Monitor::new(
         client,
         manager,
         notifier,
         Duration::from_secs(cli.scan_interval),
+        cli.forward_tcp(),
+        cli.forward_udp(),
     );
 
     monitor.run().await

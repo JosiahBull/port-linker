@@ -208,6 +208,72 @@ impl SshClient {
         // Try to open a session channel as a health check
         self.handle.channel_open_session().await.is_ok()
     }
+
+    /// Write bytes to a file on the remote host.
+    ///
+    /// Uses base64 encoding to safely transfer binary data through the shell.
+    pub async fn write_file(&self, path: &str, data: &[u8]) -> Result<()> {
+        use std::io::Write;
+
+        // Base64 encode the data
+        let mut encoded = Vec::new();
+        {
+            let mut encoder = base64::write::EncoderWriter::new(
+                &mut encoded,
+                &base64::engine::general_purpose::STANDARD,
+            );
+            encoder.write_all(data).map_err(|e| {
+                PortLinkerError::SshChannel(format!("Failed to encode data: {}", e))
+            })?;
+        }
+        let encoded_str = String::from_utf8(encoded).map_err(|e| {
+            PortLinkerError::SshChannel(format!("Invalid UTF-8 in encoded data: {}", e))
+        })?;
+
+        // Write in chunks to avoid shell command line limits
+        // Most shells have a limit around 128KB-1MB, we'll use 64KB chunks to be safe
+        const CHUNK_SIZE: usize = 65536;
+
+        // First chunk creates the file
+        let first_chunk = if encoded_str.len() > CHUNK_SIZE {
+            &encoded_str[..CHUNK_SIZE]
+        } else {
+            &encoded_str
+        };
+
+        let cmd = format!("echo -n '{}' | base64 -d > {}", first_chunk, path);
+        self.exec(&cmd).await?;
+
+        // Subsequent chunks append
+        let mut offset = CHUNK_SIZE;
+        while offset < encoded_str.len() {
+            let end = (offset + CHUNK_SIZE).min(encoded_str.len());
+            let chunk = &encoded_str[offset..end];
+            let cmd = format!("echo -n '{}' | base64 -d >> {}", chunk, path);
+            self.exec(&cmd).await?;
+            offset = end;
+        }
+
+        Ok(())
+    }
+
+    /// Execute a command and return the channel for streaming I/O.
+    ///
+    /// This is used for long-running processes like the UDP proxy where we need
+    /// to send and receive data over the channel's stdin/stdout.
+    pub async fn exec_channel(&self, command: &str) -> Result<russh::Channel<russh::client::Msg>> {
+        let channel =
+            self.handle.channel_open_session().await.map_err(|e| {
+                PortLinkerError::SshChannel(format!("Failed to open channel: {}", e))
+            })?;
+
+        channel
+            .exec(true, command)
+            .await
+            .map_err(|e| PortLinkerError::SshChannel(format!("Failed to exec command: {}", e)))?;
+
+        Ok(channel)
+    }
 }
 
 fn load_ssh_config(host: &str) -> Option<ssh2_config_rs::HostParams> {

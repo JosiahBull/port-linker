@@ -1,10 +1,8 @@
 use crate::error::{PortLinkerError, Result};
 use crate::notify::NotificationEvent;
+use port_linker_assets::LOGO_128;
 use std::path::PathBuf;
 use std::sync::OnceLock;
-
-/// Embedded logo PNG (128x128, generated from assets/logo.svg at build time)
-const LOGO_PNG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/logo_128.png"));
 
 /// Get path to the logo file, creating it in a temp location if needed
 fn get_logo_path() -> Option<&'static PathBuf> {
@@ -20,12 +18,12 @@ fn get_logo_path() -> Option<&'static PathBuf> {
 
             // Write the logo if it doesn't exist or is different
             let should_write = match std::fs::read(&logo_path) {
-                Ok(existing) => existing != LOGO_PNG,
+                Ok(existing) => existing != LOGO_128,
                 Err(_) => true,
             };
 
             if should_write {
-                std::fs::write(&logo_path, LOGO_PNG).ok()?;
+                std::fs::write(&logo_path, LOGO_128).ok()?;
             }
 
             Some(logo_path)

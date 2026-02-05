@@ -1,4 +1,4 @@
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use std::collections::HashSet;
 use std::path::PathBuf;
 
@@ -11,6 +11,18 @@ pub const DEFAULT_EXCLUDED_PORTS: &[u16] = &[
     5353,  // mDNS
     41641, // Tailscale
 ];
+
+/// Protocol filter for port discovery and forwarding.
+#[derive(Debug, Clone, Copy, Default, ValueEnum, PartialEq, Eq)]
+pub enum ProtocolFilter {
+    /// Only forward TCP ports (default, backward compatible)
+    #[default]
+    Tcp,
+    /// Only forward UDP ports
+    Udp,
+    /// Forward both TCP and UDP ports
+    Both,
+}
 
 #[derive(Parser, Debug, Clone)]
 #[command(name = "port-linker")]
@@ -63,6 +75,10 @@ pub struct Cli {
     /// SSH port
     #[arg(short = 'P', long = "port", default_value = "22")]
     pub ssh_port: u16,
+
+    /// Protocol to forward: tcp, udp, or both
+    #[arg(long = "protocol", value_enum, default_value = "tcp")]
+    pub protocol: ProtocolFilter,
 }
 
 #[derive(Debug, Clone)]
@@ -101,5 +117,15 @@ impl Cli {
         }
 
         excluded
+    }
+
+    /// Check if TCP forwarding is enabled
+    pub fn forward_tcp(&self) -> bool {
+        matches!(self.protocol, ProtocolFilter::Tcp | ProtocolFilter::Both)
+    }
+
+    /// Check if UDP forwarding is enabled
+    pub fn forward_udp(&self) -> bool {
+        matches!(self.protocol, ProtocolFilter::Udp | ProtocolFilter::Both)
     }
 }

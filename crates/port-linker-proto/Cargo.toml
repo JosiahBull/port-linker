@@ -1,0 +1,9 @@
+[package]
+name = "port-linker-proto"
+version.workspace = true
+edition.workspace = true
+description = "Protocol definitions for port-linker UDP tunneling"
+license.workspace = true
+
+# Keep dependencies minimal for small binary size in udp-proxy
+[dependencies]

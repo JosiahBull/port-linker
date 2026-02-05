@@ -1,62 +1,58 @@
-[package]
-name = "port-linker"
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2021"
 description = "A CLI tool that connects to remote systems via SSH and automatically forwards discovered ports to localhost"
 repository = "https://github.com/JosiahParry/port-linker"
 license = "MIT"
 
-[dependencies]
+[workspace.dependencies]
+# Async runtime
 tokio = { version = "1", features = ["full"] }
+
+# CLI
 clap = { version = "4", features = ["derive"] }
+
+# SSH
 russh = "0.57"
+ssh2-config-rs = "0.7.2"
+
+# System
 sysinfo = "0.38"
-notify-rust = "4"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-thiserror = "2"
-dialoguer = "0.12"
 dirs = "6"
 shellexpand = "3"
 whoami = "2"
-ssh2-config-rs = "0.7.2"
 
-[build-dependencies]
-resvg = "0.46"
+# Notifications
+notify-rust = "4"
 
-[dev-dependencies]
-assert_cmd = "2"
-insta = "1"
-libc = "0.2"
-ntest = "0.9"
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-[package.metadata.binstall]
-pkg-url = "{ repo }/releases/download/v{ version }/port-linker-{ target }{ archive-suffix }"
-pkg-fmt = "tgz"
+# Error handling
+thiserror = "2"
 
-[package.metadata.binstall.overrides.x86_64-unknown-linux-gnu]
-pkg-url = "{ repo }/releases/download/v{ version }/port-linker-linux-x86_64.tar.gz"
+# User interaction
+dialoguer = "0.12"
 
-[package.metadata.binstall.overrides.x86_64-unknown-linux-musl]
-pkg-url = "{ repo }/releases/download/v{ version }/port-linker-linux-x86_64-musl.tar.gz"
-
-[package.metadata.binstall.overrides.aarch64-unknown-linux-gnu]
-pkg-url = "{ repo }/releases/download/v{ version }/port-linker-linux-aarch64.tar.gz"
-
-[package.metadata.binstall.overrides.aarch64-unknown-linux-musl]
-pkg-url = "{ repo }/releases/download/v{ version }/port-linker-linux-aarch64-musl.tar.gz"
-
-[package.metadata.binstall.overrides.x86_64-apple-darwin]
-pkg-url = "{ repo }/releases/download/v{ version }/port-linker-macos-x86_64.tar.gz"
-
-[package.metadata.binstall.overrides.aarch64-apple-darwin]
-pkg-url = "{ repo }/releases/download/v{ version }/port-linker-macos-aarch64.tar.gz"
+# Internal crates
+port-linker-proto = { path = "crates/port-linker-proto" }
 
 [profile.release]
 lto = true
 codegen-units = 1
 strip = true
 
-[[test]]
-name = "e2e"
-path = "tests/e2e/mod.rs"
+# Heavily optimized profile for udp-proxy - minimal binary size for SSH transfer
+# Based on release but with aggressive size optimizations
+[profile.udp-proxy-release]
+inherits = "release"
+opt-level = "z"           # Optimize for size
+lto = true                # Link-time optimization
+codegen-units = 1         # Single codegen unit for better optimization
+panic = "abort"           # No unwinding = smaller binary
+strip = "symbols"         # Strip all symbols TODO: can soon be immediate-abort once stabilised

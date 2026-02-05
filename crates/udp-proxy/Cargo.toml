@@ -1,0 +1,10 @@
+[package]
+name = "udp-proxy"
+version.workspace = true
+edition.workspace = true
+description = "UDP proxy binary for port-linker remote forwarding"
+license.workspace = true
+
+[dependencies]
+port-linker-proto = { path = "../port-linker-proto" }
+libc = "0.2"

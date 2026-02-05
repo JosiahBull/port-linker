@@ -41,6 +41,9 @@ pub enum PortLinkerError {
 
     #[error("SSH key error: {0}")]
     SshKey(String),
+
+    #[error("Unsupported remote platform: {os}/{arch} - no udp-proxy binary available")]
+    UnsupportedPlatform { os: String, arch: String },
 }
 
 pub type Result<T> = std::result::Result<T, PortLinkerError>;

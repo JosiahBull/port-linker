@@ -3,13 +3,23 @@ use std::fs;
 use std::path::Path;
 
 fn main() {
-    println!("cargo:rerun-if-changed=assets/logo.svg");
+    println!("cargo:rerun-if-changed=../../assets/logo.svg");
 
     let out_dir = env::var("OUT_DIR").unwrap();
-    let svg_path = Path::new("assets/logo.svg");
+    generate_logos(&out_dir);
+}
+
+fn generate_logos(out_dir: &str) {
+    let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
+    let svg_path = Path::new(&manifest_dir)
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("assets/logo.svg");
 
     // Read and parse the SVG
-    let svg_data = fs::read(svg_path).expect("Failed to read logo.svg");
+    let svg_data = fs::read(&svg_path).expect("Failed to read logo.svg");
     let tree = resvg::usvg::Tree::from_data(&svg_data, &resvg::usvg::Options::default())
         .expect("Failed to parse SVG");
 
@@ -21,9 +31,8 @@ fn main() {
     ];
 
     for (size, filename) in sizes {
-        let output_path = Path::new(&out_dir).join(filename);
+        let output_path = Path::new(out_dir).join(filename);
         render_png(&tree, size, &output_path);
-        // println!("cargo:warning=Generated {} ({}x{})", filename, size, size);
     }
 }
 

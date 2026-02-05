@@ -1,6 +1,7 @@
 pub mod desktop;
 
 use crate::mapping::PortMapping;
+use port_linker_proto::Protocol;
 use std::sync::Arc;
 use tracing::{info, warn};
 
@@ -9,12 +10,31 @@ use tracing::{info, warn};
 pub struct PortInfo {
     pub port: u16,
     pub description: String,
+    pub protocol: Protocol,
 }
 
 impl PortInfo {
     pub fn new(port: u16, process_name: Option<&str>, mapping: &PortMapping) -> Self {
         let description = mapping.describe(port, process_name);
-        Self { port, description }
+        Self {
+            port,
+            description,
+            protocol: Protocol::Tcp,
+        }
+    }
+
+    pub fn new_with_protocol(
+        port: u16,
+        process_name: Option<&str>,
+        protocol: Protocol,
+        mapping: &PortMapping,
+    ) -> Self {
+        let description = mapping.describe(port, process_name);
+        Self {
+            port,
+            description,
+            protocol,
+        }
     }
 }
 
@@ -26,6 +46,7 @@ pub enum NotificationEvent {
     ConnectionRestored,
     ProcessKilled { port: u16, process_name: String },
     ConflictDetected { port: u16 },
+    TunnelRestarted { port: u16, protocol: Protocol },
 }
 
 impl NotificationEvent {
@@ -49,6 +70,7 @@ impl NotificationEvent {
             NotificationEvent::ConnectionRestored => "Connection Restored".to_string(),
             NotificationEvent::ProcessKilled { .. } => "Process Killed".to_string(),
             NotificationEvent::ConflictDetected { .. } => "Port Conflict".to_string(),
+            NotificationEvent::TunnelRestarted { .. } => "Tunnel Restarted".to_string(),
         }
     }
 
@@ -57,11 +79,11 @@ impl NotificationEvent {
             NotificationEvent::PortsForwarded { ports } => {
                 if ports.len() == 1 {
                     let p = &ports[0];
-                    format!(":{} ({})", p.port, p.description)
+                    format!("{} :{} ({})", p.protocol, p.port, p.description)
                 } else {
                     ports
                         .iter()
-                        .map(|p| format!(":{} ({})", p.port, p.description))
+                        .map(|p| format!("{} :{} ({})", p.protocol, p.port, p.description))
                         .collect::<Vec<_>>()
                         .join("\n")
                 }
@@ -87,6 +109,9 @@ impl NotificationEvent {
             }
             NotificationEvent::ConflictDetected { port } => {
                 format!("Port {} is already in use locally", port)
+            }
+            NotificationEvent::TunnelRestarted { port, protocol } => {
+                format!("{} tunnel for port {} restarted", protocol, port)
             }
         }
     }
