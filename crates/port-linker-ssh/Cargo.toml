@@ -19,3 +19,6 @@ shellexpand.workspace = true
 whoami.workspace = true
 sysinfo.workspace = true
 base64 = "0.22"
+
+[lints]
+workspace = true

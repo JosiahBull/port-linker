@@ -58,3 +58,6 @@ pkg-url = "{ repo }/releases/download/v{ version }/port-linker-macos-aarch64.tar
 [[test]]
 name = "e2e"
 path = "../../tests/e2e/mod.rs"
+
+[lints]
+workspace = true

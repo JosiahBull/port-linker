@@ -7,3 +7,6 @@ license.workspace = true
 
 # Keep dependencies minimal for small binary size in udp-proxy
 [dependencies]
+
+[lints]
+workspace = true

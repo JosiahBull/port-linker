@@ -13,3 +13,6 @@ notify-rust.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
 dirs.workspace = true
+
+[lints]
+workspace = true

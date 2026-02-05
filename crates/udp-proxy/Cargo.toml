@@ -12,3 +12,6 @@ verbose = []
 [dependencies]
 port-linker-proto = { path = "../port-linker-proto" }
 libc = "0.2"
+
+[lints]
+workspace = true
