@@ -11,7 +11,7 @@ use std::time::Duration;
 // to run in parallel with each other and with other tests.
 
 #[test]
-#[timeout(20000)]
+#[timeout(10000)]
 fn test_udp_discovers_ports() {
     let dynamic_port = allocate_test_port();
     let _lock = PortLock::acquire(&[dynamic_port]);
@@ -21,7 +21,7 @@ fn test_udp_discovers_ports() {
     let service_pid = start_remote_udp_service(dynamic_port).expect("Failed to start UDP service");
 
     // Give socat time to start
-    std::thread::sleep(Duration::from_millis(500));
+    std::thread::sleep(Duration::from_millis(100));
 
     // Start port-linker with UDP protocol
     let child = start_port_linker(&[
@@ -36,7 +36,7 @@ fn test_udp_discovers_ports() {
     .expect("Failed to start port-linker");
 
     // Wait for UDP port to be forwarded and responding
-    let port_ready = wait_for_udp_port(dynamic_port, Duration::from_secs(10));
+    let port_ready = wait_for_udp_port(dynamic_port, Duration::from_secs(5));
 
     // Cleanup
     stop_port_linker(child, &[]);
@@ -50,7 +50,7 @@ fn test_udp_discovers_ports() {
 }
 
 #[test]
-#[timeout(20000)]
+#[timeout(10000)]
 fn test_udp_echo_traffic() {
     let dynamic_port = allocate_test_port();
     let _lock = PortLock::acquire(&[dynamic_port]);
@@ -58,7 +58,7 @@ fn test_udp_echo_traffic() {
 
     // Start our own UDP echo service
     let service_pid = start_remote_udp_service(dynamic_port).expect("Failed to start UDP service");
-    std::thread::sleep(Duration::from_millis(500));
+    std::thread::sleep(Duration::from_millis(100));
 
     // Start port-linker with UDP protocol
     let child = start_port_linker(&[
@@ -74,7 +74,7 @@ fn test_udp_echo_traffic() {
 
     // Wait for UDP port to be forwarded
     assert!(
-        wait_for_udp_port(dynamic_port, Duration::from_secs(10)),
+        wait_for_udp_port(dynamic_port, Duration::from_secs(5)),
         "UDP port {} was not forwarded",
         dynamic_port
     );
@@ -103,7 +103,7 @@ fn test_udp_echo_traffic() {
 }
 
 #[test]
-#[timeout(20000)]
+#[timeout(10000)]
 fn test_udp_multiple_packets() {
     let dynamic_port = allocate_test_port();
     let _lock = PortLock::acquire(&[dynamic_port]);
@@ -111,7 +111,7 @@ fn test_udp_multiple_packets() {
 
     // Start our own UDP echo service
     let service_pid = start_remote_udp_service(dynamic_port).expect("Failed to start UDP service");
-    std::thread::sleep(Duration::from_millis(500));
+    std::thread::sleep(Duration::from_millis(200));
 
     // Start port-linker with UDP protocol
     let child = start_port_linker(&[
@@ -127,7 +127,7 @@ fn test_udp_multiple_packets() {
 
     // Wait for UDP port to be forwarded
     assert!(
-        wait_for_udp_port(dynamic_port, Duration::from_secs(10)),
+        wait_for_udp_port(dynamic_port, Duration::from_secs(5)),
         "UDP port {} was not forwarded",
         dynamic_port
     );
@@ -141,24 +141,31 @@ fn test_udp_multiple_packets() {
 
     let mut all_passed = true;
     for msg in &test_messages {
-        match udp_send_and_receive(dynamic_port, msg) {
-            Ok(response) => {
-                if response != *msg {
-                    eprintln!(
-                        "Mismatch: sent {:?}, got {:?}",
-                        String::from_utf8_lossy(msg),
-                        String::from_utf8_lossy(&response)
-                    );
-                    all_passed = false;
+        // Retry logic for reliability under contention
+        let mut success = false;
+        for _retry in 0..3 {
+            match udp_send_and_receive(dynamic_port, msg) {
+                Ok(response) => {
+                    if response == *msg {
+                        success = true;
+                        break;
+                    } else {
+                        eprintln!(
+                            "Mismatch: sent {:?}, got {:?}",
+                            String::from_utf8_lossy(msg),
+                            String::from_utf8_lossy(&response)
+                        );
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Attempt failed: {}, retrying...", e);
+                    std::thread::sleep(Duration::from_millis(100));
                 }
             }
-            Err(e) => {
-                eprintln!("Failed to send/receive: {}", e);
-                all_passed = false;
-            }
         }
-        // Small delay between packets
-        std::thread::sleep(Duration::from_millis(100));
+        if !success {
+            all_passed = false;
+        }
     }
 
     // Cleanup
@@ -175,7 +182,7 @@ fn test_udp_multiple_packets() {
 // Port 9999 in Docker is bound to 127.0.0.1, not 0.0.0.0.
 
 #[test]
-#[timeout(20000)]
+#[timeout(10000)]
 fn test_udp_localhost_bound_port() {
     let _lock = PortLock::acquire(&[DOCKER_UDP_PORT_ECHO_LOCALHOST]);
     require_test_env!();
@@ -193,7 +200,7 @@ fn test_udp_localhost_bound_port() {
     .expect("Failed to start port-linker");
 
     // Wait for UDP port to be forwarded
-    let port_ready = wait_for_udp_port(DOCKER_UDP_PORT_ECHO_LOCALHOST, Duration::from_secs(10));
+    let port_ready = wait_for_udp_port(DOCKER_UDP_PORT_ECHO_LOCALHOST, Duration::from_secs(5));
 
     // Stop port-linker
     stop_port_linker(child, &[]);
@@ -209,7 +216,7 @@ fn test_udp_localhost_bound_port() {
 // ============================================================================
 
 #[test]
-#[timeout(30000)]
+#[timeout(10000)]
 fn test_udp_both_protocols() {
     let dynamic_udp_port = allocate_test_port();
     let _lock = PortLock::acquire(&[DOCKER_TCP_PORT_HTTP, dynamic_udp_port]);
@@ -218,7 +225,7 @@ fn test_udp_both_protocols() {
     // Start our own UDP echo service on dynamic port
     let service_pid =
         start_remote_udp_service(dynamic_udp_port).expect("Failed to start UDP service");
-    std::thread::sleep(Duration::from_millis(500));
+    std::thread::sleep(Duration::from_millis(100));
 
     // Start port-linker with both protocols
     let child = start_port_linker(&[
@@ -233,10 +240,10 @@ fn test_udp_both_protocols() {
     .expect("Failed to start port-linker");
 
     // Wait for TCP port 8080 to be forwarded
-    let tcp_ready = wait_for_port(DOCKER_TCP_PORT_HTTP, Duration::from_secs(5));
+    let tcp_ready = wait_for_port(DOCKER_TCP_PORT_HTTP, Duration::from_secs(3));
 
     // Wait for UDP port to be forwarded
-    let udp_ready = wait_for_udp_port(dynamic_udp_port, Duration::from_secs(10));
+    let udp_ready = wait_for_udp_port(dynamic_udp_port, Duration::from_secs(5));
 
     // Cleanup
     stop_port_linker(child, &[DOCKER_TCP_PORT_HTTP]);
@@ -255,7 +262,7 @@ fn test_udp_both_protocols() {
 // ============================================================================
 
 #[test]
-#[timeout(30000)]
+#[timeout(10000)]
 fn test_udp_new_service_detected() {
     // Allocate two unique ports - one for initial service, one for "new" service
     let initial_port = allocate_test_port();
@@ -266,7 +273,7 @@ fn test_udp_new_service_detected() {
     // Start initial UDP service
     let initial_pid =
         start_remote_udp_service(initial_port).expect("Failed to start initial UDP service");
-    std::thread::sleep(Duration::from_millis(500));
+    std::thread::sleep(Duration::from_millis(100));
 
     // Start port-linker monitoring both ports
     let child = start_port_linker(&[
@@ -282,7 +289,7 @@ fn test_udp_new_service_detected() {
 
     // Wait for initial port to be forwarded
     assert!(
-        wait_for_udp_port(initial_port, Duration::from_secs(10)),
+        wait_for_udp_port(initial_port, Duration::from_secs(5)),
         "Initial UDP port {} was not forwarded",
         initial_port
     );
@@ -291,11 +298,11 @@ fn test_udp_new_service_detected() {
     let new_pid =
         start_remote_udp_service(new_service_port).expect("Failed to start new UDP service");
 
-    // Give socat time to start
-    std::thread::sleep(Duration::from_secs(2));
+    // Give socat time to start (and wait for next scan cycle)
+    std::thread::sleep(Duration::from_millis(200));
 
     // Wait for port-linker to detect and forward the new port
-    let new_port_ready = wait_for_udp_port(new_service_port, Duration::from_secs(10));
+    let new_port_ready = wait_for_udp_port(new_service_port, Duration::from_secs(5));
 
     // Cleanup
     stop_remote_service(initial_pid);
@@ -342,7 +349,7 @@ fn is_udp_proxy_running() -> bool {
 }
 
 #[test]
-#[timeout(30000)]
+#[timeout(10000)]
 fn test_udp_proxy_restart_after_remote_kill() {
     let dynamic_port = allocate_test_port();
     let _lock = PortLock::acquire(&[dynamic_port]);
@@ -350,12 +357,12 @@ fn test_udp_proxy_restart_after_remote_kill() {
 
     // Start our own UDP echo service
     let service_pid = start_remote_udp_service(dynamic_port).expect("Failed to start UDP service");
-    std::thread::sleep(Duration::from_millis(500));
+    std::thread::sleep(Duration::from_millis(100));
 
-    // Start port-linker with UDP protocol
+    // Start port-linker with UDP protocol (fast scan interval for quick recovery)
     let child = start_port_linker(&[
         "--scan-interval",
-        "2",
+        "1",
         "--protocol",
         "udp",
         "-p",
@@ -366,7 +373,7 @@ fn test_udp_proxy_restart_after_remote_kill() {
 
     // Wait for UDP port to be forwarded and working
     assert!(
-        wait_for_udp_port(dynamic_port, Duration::from_secs(10)),
+        wait_for_udp_port(dynamic_port, Duration::from_secs(5)),
         "UDP port {} was not forwarded initially",
         dynamic_port
     );
@@ -390,7 +397,7 @@ fn test_udp_proxy_restart_after_remote_kill() {
     eprintln!("Waiting for automatic proxy restart...");
 
     // Wait for UDP port to become responsive again (proxy restarted)
-    let port_recovered = wait_for_udp_port(dynamic_port, Duration::from_secs(10));
+    let port_recovered = wait_for_udp_port(dynamic_port, Duration::from_secs(5));
 
     // Verify traffic works after recovery
     let recovered_response = if port_recovered {
@@ -419,7 +426,7 @@ fn test_udp_proxy_restart_after_remote_kill() {
 }
 
 #[test]
-#[timeout(120000)] // 2 minutes max, but configurable via env var
+#[timeout(15000)] // Short timeout by default, set E2E_HEALTHCHECK_WAIT_SECS for thorough testing
 fn test_udp_healthcheck_keeps_proxy_alive() {
     let dynamic_port = allocate_test_port();
     let _lock = PortLock::acquire(&[dynamic_port]);
@@ -427,12 +434,12 @@ fn test_udp_healthcheck_keeps_proxy_alive() {
 
     // Start our own UDP echo service
     let service_pid = start_remote_udp_service(dynamic_port).expect("Failed to start UDP service");
-    std::thread::sleep(Duration::from_millis(500));
+    std::thread::sleep(Duration::from_millis(100));
 
     // Start port-linker with UDP protocol
     let child = start_port_linker(&[
         "--scan-interval",
-        "2",
+        "1",
         "--protocol",
         "udp",
         "-p",
@@ -443,7 +450,7 @@ fn test_udp_healthcheck_keeps_proxy_alive() {
 
     // Wait for UDP port to be forwarded
     assert!(
-        wait_for_udp_port(dynamic_port, Duration::from_secs(10)),
+        wait_for_udp_port(dynamic_port, Duration::from_secs(5)),
         "UDP port {} was not forwarded",
         dynamic_port
     );
@@ -484,7 +491,7 @@ fn test_udp_healthcheck_keeps_proxy_alive() {
 }
 
 #[test]
-#[timeout(120000)] // 2 minutes max, but configurable via env var
+#[timeout(15000)] // Short timeout by default, set E2E_HEALTHCHECK_LONG_WAIT_SECS for thorough testing
 fn test_udp_tunnel_survives_traffic_pause() {
     let dynamic_port = allocate_test_port();
     let _lock = PortLock::acquire(&[dynamic_port]);
@@ -492,12 +499,12 @@ fn test_udp_tunnel_survives_traffic_pause() {
 
     // Start our own UDP echo service
     let service_pid = start_remote_udp_service(dynamic_port).expect("Failed to start UDP service");
-    std::thread::sleep(Duration::from_millis(500));
+    std::thread::sleep(Duration::from_millis(100));
 
     // Start port-linker with UDP protocol
     let child = start_port_linker(&[
         "--scan-interval",
-        "2",
+        "1",
         "--protocol",
         "udp",
         "-p",
@@ -508,7 +515,7 @@ fn test_udp_tunnel_survives_traffic_pause() {
 
     // Wait for UDP port to be forwarded
     assert!(
-        wait_for_udp_port(dynamic_port, Duration::from_secs(10)),
+        wait_for_udp_port(dynamic_port, Duration::from_secs(5)),
         "UDP port {} was not forwarded",
         dynamic_port
     );

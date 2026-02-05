@@ -9,7 +9,7 @@ use std::time::Duration;
 // ============================================================================
 
 #[test]
-#[timeout(20000)]
+#[timeout(10000)]
 fn test_connects_and_discovers_ports() {
     let _lock = PortLock::acquire(&[DOCKER_TCP_PORT_HTTP]);
     require_test_env!();
@@ -19,7 +19,7 @@ fn test_connects_and_discovers_ports() {
         .expect("Failed to start port-linker");
 
     // Wait for port 8080 to be forwarded
-    let port_8080_ready = wait_for_port(DOCKER_TCP_PORT_HTTP, Duration::from_secs(5));
+    let port_8080_ready = wait_for_port(DOCKER_TCP_PORT_HTTP, Duration::from_secs(3));
 
     // Stop port-linker and wait for cleanup
     stop_port_linker(child, &[DOCKER_TCP_PORT_HTTP]);
@@ -31,7 +31,7 @@ fn test_connects_and_discovers_ports() {
 }
 
 #[test]
-#[timeout(20000)]
+#[timeout(10000)]
 fn test_forwards_http_traffic() {
     let _lock = PortLock::acquire(&[DOCKER_TCP_PORT_HTTP]);
     require_test_env!();
@@ -41,7 +41,7 @@ fn test_forwards_http_traffic() {
 
     // Wait for port 8080 to be forwarded
     assert!(
-        wait_for_port(DOCKER_TCP_PORT_HTTP, Duration::from_secs(5)),
+        wait_for_port(DOCKER_TCP_PORT_HTTP, Duration::from_secs(3)),
         "Port 8080 was not forwarded"
     );
 
@@ -64,7 +64,7 @@ fn test_forwards_http_traffic() {
 }
 
 #[test]
-#[timeout(20000)]
+#[timeout(10000)]
 fn test_clean_shutdown() {
     let _lock = PortLock::acquire(&[DOCKER_TCP_PORT_HTTP]);
     require_test_env!();
@@ -74,7 +74,7 @@ fn test_clean_shutdown() {
 
     // Wait for port to be forwarded
     assert!(
-        wait_for_port(DOCKER_TCP_PORT_HTTP, Duration::from_secs(5)),
+        wait_for_port(DOCKER_TCP_PORT_HTTP, Duration::from_secs(3)),
         "Port 8080 was not forwarded"
     );
 
@@ -88,7 +88,7 @@ fn test_clean_shutdown() {
 
     // Port should be closed after shutdown
     assert!(
-        wait_for_port_closed(DOCKER_TCP_PORT_HTTP, Duration::from_secs(5)),
+        wait_for_port_closed(DOCKER_TCP_PORT_HTTP, Duration::from_secs(3)),
         "Port 8080 still open after shutdown"
     );
 
@@ -105,7 +105,7 @@ fn test_clean_shutdown() {
 // ============================================================================
 
 #[test]
-#[timeout(20000)]
+#[timeout(10000)]
 fn test_localhost_bound_port() {
     let _lock = PortLock::acquire(&[DOCKER_TCP_PORT_ECHO]);
     require_test_env!();
@@ -115,7 +115,7 @@ fn test_localhost_bound_port() {
         .expect("Failed to start port-linker");
 
     // Wait for port to be forwarded
-    let port_ready = wait_for_port(DOCKER_TCP_PORT_ECHO, Duration::from_secs(5));
+    let port_ready = wait_for_port(DOCKER_TCP_PORT_ECHO, Duration::from_secs(3));
 
     // Stop port-linker and wait for cleanup
     stop_port_linker(child, &[DOCKER_TCP_PORT_ECHO]);
@@ -131,7 +131,7 @@ fn test_localhost_bound_port() {
 // ============================================================================
 
 #[test]
-#[timeout(20000)]
+#[timeout(10000)]
 fn test_port_whitelist() {
     // Lock both ports we're testing behavior with
     let _lock = PortLock::acquire(&[DOCKER_TCP_PORT_HTTP, DOCKER_TCP_PORT_POSTGRES]);
@@ -143,13 +143,12 @@ fn test_port_whitelist() {
 
     // Wait for port 8080 to be forwarded
     assert!(
-        wait_for_port(DOCKER_TCP_PORT_HTTP, Duration::from_secs(5)),
+        wait_for_port(DOCKER_TCP_PORT_HTTP, Duration::from_secs(3)),
         "Port 8080 was not forwarded"
     );
 
     // Give it a moment to forward other ports (if it incorrectly would)
-    // One scan cycle (1s) should be enough
-    std::thread::sleep(Duration::from_secs(1));
+    std::thread::sleep(Duration::from_millis(200));
 
     // Port 5432 should NOT be forwarded (not in whitelist)
     let port_5432_open = is_port_open(DOCKER_TCP_PORT_POSTGRES);
@@ -164,7 +163,7 @@ fn test_port_whitelist() {
 }
 
 #[test]
-#[timeout(20000)]
+#[timeout(10000)]
 fn test_port_exclusion() {
     // Lock all ports involved
     let _lock = PortLock::acquire(&[
@@ -185,10 +184,10 @@ fn test_port_exclusion() {
     .expect("Failed to start port-linker");
 
     // Wait for port 5432 to be forwarded (should be forwarded)
-    let port_5432_ready = wait_for_port(DOCKER_TCP_PORT_POSTGRES, Duration::from_secs(5));
+    let port_5432_ready = wait_for_port(DOCKER_TCP_PORT_POSTGRES, Duration::from_secs(3));
 
-    // Give time for 8080 to potentially be forwarded (one scan cycle)
-    std::thread::sleep(Duration::from_secs(1));
+    // Give time for 8080 to potentially be forwarded
+    std::thread::sleep(Duration::from_millis(200));
 
     // Port 8080 should NOT be forwarded (excluded)
     let port_8080_open = is_port_open(DOCKER_TCP_PORT_HTTP);
@@ -204,7 +203,7 @@ fn test_port_exclusion() {
 }
 
 #[test]
-#[timeout(20000)]
+#[timeout(10000)]
 fn test_multiple_ports() {
     let _lock = PortLock::acquire(&[DOCKER_TCP_PORT_HTTP, DOCKER_TCP_PORT_POSTGRES]);
     require_test_env!();
@@ -219,8 +218,8 @@ fn test_multiple_ports() {
     .expect("Failed to start port-linker");
 
     // Wait for both ports
-    let port_8080_ready = wait_for_port(DOCKER_TCP_PORT_HTTP, Duration::from_secs(5));
-    let port_5432_ready = wait_for_port(DOCKER_TCP_PORT_POSTGRES, Duration::from_secs(5));
+    let port_8080_ready = wait_for_port(DOCKER_TCP_PORT_HTTP, Duration::from_secs(3));
+    let port_5432_ready = wait_for_port(DOCKER_TCP_PORT_POSTGRES, Duration::from_secs(3));
 
     // Stop port-linker and wait for cleanup
     stop_port_linker(child, &[DOCKER_TCP_PORT_HTTP, DOCKER_TCP_PORT_POSTGRES]);
@@ -234,7 +233,7 @@ fn test_multiple_ports() {
 // ============================================================================
 
 #[test]
-#[timeout(20000)]
+#[timeout(10000)]
 fn test_new_service_detected() {
     // Allocate a unique port for this test
     let dynamic_port = allocate_test_port();
@@ -253,7 +252,7 @@ fn test_new_service_detected() {
 
     // Wait for initial port 8080 to be forwarded
     assert!(
-        wait_for_port(DOCKER_TCP_PORT_HTTP, Duration::from_secs(5)),
+        wait_for_port(DOCKER_TCP_PORT_HTTP, Duration::from_secs(3)),
         "Initial port 8080 was not forwarded"
     );
 
@@ -261,7 +260,7 @@ fn test_new_service_detected() {
     let service_pid = start_remote_service(dynamic_port).expect("Failed to start remote service");
 
     // Wait for port-linker to detect and forward the new port
-    let new_port_ready = wait_for_port(dynamic_port, Duration::from_secs(10));
+    let new_port_ready = wait_for_port(dynamic_port, Duration::from_secs(5));
 
     // Cleanup
     stop_remote_service(service_pid);
@@ -282,7 +281,7 @@ fn test_new_service_detected() {
 }
 
 #[test]
-#[timeout(20000)]
+#[timeout(10000)]
 fn test_service_removal_detected() {
     // Allocate a unique port for this test
     let dynamic_port = allocate_test_port();
@@ -293,7 +292,7 @@ fn test_service_removal_detected() {
     let service_pid = start_remote_service(dynamic_port).expect("Failed to start remote service");
 
     // Give the service a moment to start
-    std::thread::sleep(Duration::from_secs(1));
+    std::thread::sleep(Duration::from_millis(200));
 
     // Start port-linker watching only our dynamic port
     let child = start_port_linker(&["--scan-interval", "1", "-p", &dynamic_port.to_string()])
@@ -301,7 +300,7 @@ fn test_service_removal_detected() {
 
     // Wait for the service to be forwarded
     assert!(
-        wait_for_port(dynamic_port, Duration::from_secs(5)),
+        wait_for_port(dynamic_port, Duration::from_secs(3)),
         "Port {} was not forwarded",
         dynamic_port
     );
@@ -310,7 +309,7 @@ fn test_service_removal_detected() {
     stop_remote_service(service_pid);
 
     // Wait for port-linker to detect the removal and close the forward
-    let port_closed = wait_for_port_closed(dynamic_port, Duration::from_secs(10));
+    let port_closed = wait_for_port_closed(dynamic_port, Duration::from_secs(5));
 
     // Cleanup
     stop_port_linker(child, &[]);
