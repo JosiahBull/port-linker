@@ -11,14 +11,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpStream;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, instrument, warn};
 
 pub struct SshClient {
     handle: Arc<Handle<ClientHandler>>,
     config: SshClientConfig,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct SshClientConfig {
     pub host: String,
     pub port: u16,
@@ -27,6 +27,7 @@ pub struct SshClientConfig {
 }
 
 impl SshClient {
+    #[instrument(name = "ssh_connect", skip(identity_file), fields(host = %parsed_host.host, port = ssh_port))]
     pub async fn connect(
         parsed_host: &ParsedHost,
         ssh_port: u16,
@@ -63,6 +64,7 @@ impl SshClient {
         Ok(Self { handle, config })
     }
 
+    #[instrument(name = "establish_connection", skip(identity_files), fields(host = %config.host, user = %config.user))]
     async fn establish_connection(
         config: &SshClientConfig,
         identity_files: &[PathBuf],
@@ -157,6 +159,7 @@ impl SshClient {
         self.handle.clone()
     }
 
+    #[instrument(name = "ssh_exec", skip(self, command), fields(cmd_preview = %command.chars().take(50).collect::<String>()))]
     pub async fn exec(&self, command: &str) -> Result<String> {
         let mut channel =
             self.handle.channel_open_session().await.map_err(|e| {

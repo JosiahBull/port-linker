@@ -18,7 +18,7 @@ use std::time::Duration;
 use tokio::net::UdpSocket;
 use tokio::sync::oneshot;
 use tokio::time::{interval, Instant};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 /// Interval between healthcheck pings sent to the remote proxy.
 const HEALTHCHECK_INTERVAL: Duration = Duration::from_secs(15);
@@ -321,7 +321,7 @@ async fn udp_forward_loop(
                                 Message::Pong(_value) => {
                                     // Update last pong time
                                     last_pong = Instant::now();
-                                    debug!("Received healthcheck pong for port {}", remote_port);
+                                    trace!("Received healthcheck pong for port {}", remote_port);
                                 }
                                 Message::Ping(_) => {
                                     // Ignore unexpected ping from remote

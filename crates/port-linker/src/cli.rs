@@ -2,6 +2,41 @@ use clap::{Parser, ValueEnum};
 use std::collections::HashSet;
 use std::path::PathBuf;
 
+/// Log output format.
+#[derive(Debug, Clone, Copy, Default, ValueEnum, PartialEq, Eq)]
+pub enum LogFormat {
+    /// Human-readable format with colors (if enabled)
+    #[default]
+    Pretty,
+    /// Compact single-line format
+    Compact,
+    /// JSON format for machine parsing
+    Json,
+}
+
+/// Color output mode.
+#[derive(Debug, Clone, Copy, Default, ValueEnum, PartialEq, Eq)]
+pub enum ColorMode {
+    /// Auto-detect based on terminal capabilities
+    #[default]
+    Auto,
+    /// Always use colors
+    Always,
+    /// Never use colors
+    Never,
+}
+
+impl ColorMode {
+    /// Determine if colors should be enabled based on mode and terminal detection.
+    pub fn should_enable(&self) -> bool {
+        match self {
+            ColorMode::Always => true,
+            ColorMode::Never => false,
+            ColorMode::Auto => std::io::IsTerminal::is_terminal(&std::io::stderr()),
+        }
+    }
+}
+
 /// Ports excluded by default (common system services that shouldn't be forwarded)
 pub const DEFAULT_EXCLUDED_PORTS: &[u16] = &[
     22,    // SSH
@@ -63,6 +98,14 @@ pub struct Cli {
     /// Log level (trace, debug, info, warn, error)
     #[arg(long = "log-level", default_value = "info")]
     pub log_level: String,
+
+    /// Log output format
+    #[arg(long = "log-format", value_enum, default_value = "pretty")]
+    pub log_format: LogFormat,
+
+    /// Enable colored log output (auto-detected by default)
+    #[arg(long = "color", default_value = "auto")]
+    pub color: ColorMode,
 
     /// Port scan interval in milliseconds
     #[arg(long = "scan-interval-ms", default_value = "3000")]

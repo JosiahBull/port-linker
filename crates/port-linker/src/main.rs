@@ -8,7 +8,7 @@ mod process;
 mod ssh;
 
 use clap::Parser;
-use cli::Cli;
+use cli::{Cli, LogFormat};
 use forward::ForwardManager;
 use mapping::PortMapping;
 use monitor::Monitor;
@@ -17,8 +17,8 @@ use ssh::SshClient;
 use std::io::Write;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{debug, error, info};
-use tracing_subscriber::EnvFilter;
+use tracing::{debug, error, info, instrument};
+use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 /// A writer that wraps stderr and flushes after each write.
 /// This ensures log lines are immediately visible when stderr is piped.
@@ -41,17 +41,7 @@ impl Write for FlushingStderr {
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
-
-    // Initialize logging with a flushing writer to ensure logs are visible
-    // immediately when stderr is piped (e.g., in tests)
-    let filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&cli.log_level));
-
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(false)
-        .with_writer(|| FlushingStderr)
-        .init();
+    init_logging(&cli);
 
     if let Err(e) = run(cli).await {
         error!("Error: {}", e);
@@ -59,6 +49,93 @@ async fn main() {
     }
 }
 
+/// Initialize the logging system based on CLI configuration.
+fn init_logging(cli: &Cli) {
+    // Build filter that respects RUST_LOG env var but also silences noisy crates at DEBUG level.
+    // These crates produce excessive output at DEBUG that should only appear at TRACE.
+    let base_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new(&cli.log_level));
+
+    // Check if user explicitly requested trace level or set specific crate overrides
+    let rust_log = std::env::var("RUST_LOG").unwrap_or_default();
+    let wants_verbose_ssh = rust_log.contains("russh")
+        || rust_log.contains("ssh_key")
+        || cli.log_level.to_lowercase() == "trace";
+
+    // Add directives to silence noisy SSH-related crates unless TRACE is requested
+    // or the user explicitly sets them in RUST_LOG
+    let filter = if wants_verbose_ssh {
+        base_filter
+    } else {
+        base_filter
+            .add_directive("russh=info".parse().unwrap())
+            .add_directive("russh_keys=info".parse().unwrap())
+            .add_directive("internal_russh_forked_ssh_key=info".parse().unwrap())
+            .add_directive("ssh_key=info".parse().unwrap())
+    };
+
+    // Always silence noisy HTTP crates unless explicitly enabled
+    let wants_verbose_http = rust_log.contains("hyper")
+        || rust_log.contains("reqwest")
+        || rust_log.contains("h2")
+        || rust_log.contains("tower");
+
+    let filter = if wants_verbose_http {
+        filter
+    } else {
+        filter
+            .add_directive("hyper=info".parse().unwrap())
+            .add_directive("reqwest=info".parse().unwrap())
+            .add_directive("h2=info".parse().unwrap())
+            .add_directive("tower=info".parse().unwrap())
+    };
+
+    let use_color = cli.color.should_enable();
+
+    match cli.log_format {
+        LogFormat::Json => {
+            // JSON format for machine parsing - no colors, structured output
+            tracing_subscriber::registry()
+                .with(filter)
+                .with(
+                    fmt::layer()
+                        .json()
+                        .with_target(true)
+                        .with_span_list(true)
+                        .with_writer(|| FlushingStderr),
+                )
+                .init();
+        }
+        LogFormat::Compact => {
+            // Compact single-line format
+            tracing_subscriber::registry()
+                .with(filter)
+                .with(
+                    fmt::layer()
+                        .compact()
+                        .with_ansi(use_color)
+                        .with_target(false)
+                        .with_writer(|| FlushingStderr),
+                )
+                .init();
+        }
+        LogFormat::Pretty => {
+            // Pretty human-readable format (default)
+            tracing_subscriber::registry()
+                .with(filter)
+                .with(
+                    fmt::layer()
+                        .pretty()
+                        .with_ansi(use_color)
+                        .with_target(false)
+                        .with_writer(|| FlushingStderr),
+                )
+                .init();
+        }
+    }
+}
+
+#[instrument(name = "run", skip(cli), fields(host = %cli.host, protocol = ?cli.protocol))]
 async fn run(cli: Cli) -> error::Result<()> {
     let parsed_host = cli.parse_host();
 

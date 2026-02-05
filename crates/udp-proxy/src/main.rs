@@ -20,12 +20,34 @@
 //!
 //! The proxy responds to Ping messages with Pong messages. If no Ping is received
 //! for 60 seconds, the proxy automatically shuts down to prevent zombie processes.
+//!
+//! # Debug Builds
+//!
+//! In debug builds, the proxy outputs verbose logging to stderr which is relayed
+//! back through the SSH channel for debugging.
 
 use port_linker_proto::{Message, UdpPacket};
 use std::io::{self, Read, Write};
 use std::net::UdpSocket;
 use std::os::unix::io::AsRawFd;
 use std::time::{Duration, Instant};
+
+/// Debug logging macro - only outputs in debug builds.
+/// Messages are written to stderr, which is relayed back through SSH.
+macro_rules! debug_log {
+    ($($arg:tt)*) => {
+        #[cfg(debug_assertions)]
+        eprintln!("[udp-proxy] {}", format!($($arg)*));
+    };
+}
+
+/// Verbose trace logging - only in debug builds, for per-packet info.
+macro_rules! trace_log {
+    ($($arg:tt)*) => {
+        #[cfg(all(debug_assertions, feature = "verbose"))]
+        eprintln!("[udp-proxy:trace] {}", format!($($arg)*));
+    };
+}
 
 /// Timeout after which the proxy shuts down if no healthcheck is received.
 const HEALTHCHECK_TIMEOUT: Duration = Duration::from_secs(60);
@@ -58,8 +80,13 @@ fn run() -> io::Result<()> {
     };
     let target = format!("{}:{}", target_addr, port);
 
+    debug_log!("Starting UDP proxy for {} (target: {})", port, target);
+
     // Create UDP socket for forwarding to the target service
     let socket = UdpSocket::bind("0.0.0.0:0")?;
+    let local_addr = socket.local_addr()?;
+    debug_log!("Bound local socket to {}", local_addr);
+
     socket.set_nonblocking(true)?;
 
     // Set read timeout on socket for polling
@@ -67,6 +94,7 @@ fn run() -> io::Result<()> {
 
     // Set stdin to non-blocking using raw fd
     set_nonblocking_stdin()?;
+    debug_log!("Initialized, entering main loop");
 
     let mut stdin = io::stdin();
     let mut stdout = io::stdout();
@@ -81,9 +109,24 @@ fn run() -> io::Result<()> {
     // Track last healthcheck time
     let mut last_healthcheck = Instant::now();
 
+    // Stats for debug builds
+    #[cfg(debug_assertions)]
+    let mut packets_forwarded: u64 = 0;
+    #[cfg(debug_assertions)]
+    let mut packets_received: u64 = 0;
+    #[cfg(debug_assertions)]
+    let mut pings_received: u64 = 0;
+
     loop {
         // Check healthcheck timeout
         if last_healthcheck.elapsed() > HEALTHCHECK_TIMEOUT {
+            debug_log!(
+                "Healthcheck timeout after {:?} - shutting down (forwarded: {}, received: {}, pings: {})",
+                last_healthcheck.elapsed(),
+                packets_forwarded,
+                packets_received,
+                pings_received
+            );
             eprintln!("Healthcheck timeout - shutting down");
             break;
         }
@@ -92,9 +135,11 @@ fn run() -> io::Result<()> {
         match stdin.read(&mut read_buf) {
             Ok(0) => {
                 // EOF - SSH channel closed
+                debug_log!("SSH channel closed (EOF)");
                 break;
             }
             Ok(n) => {
+                trace_log!("Read {} bytes from SSH channel", n);
                 pending_buf.extend_from_slice(&read_buf[..n]);
 
                 // Process all complete messages in the buffer
@@ -104,14 +149,32 @@ fn run() -> io::Result<()> {
                             // Remember the packet ID for response correlation
                             last_packet_id = packet.id;
 
+                            trace_log!(
+                                "Forwarding UDP packet id={} ({} bytes) to {}",
+                                packet.id,
+                                packet.data.len(),
+                                target
+                            );
+
                             // Forward to target UDP service
                             if let Err(e) = socket.send_to(&packet.data, &target) {
                                 eprintln!("Failed to send UDP packet: {}", e);
+                            } else {
+                                #[cfg(debug_assertions)]
+                                {
+                                    packets_forwarded += 1;
+                                }
                             }
                         }
                         Message::Ping(value) => {
                             // Update healthcheck timestamp
                             last_healthcheck = Instant::now();
+                            #[cfg(debug_assertions)]
+                            {
+                                pings_received += 1;
+                            }
+
+                            trace_log!("Received ping {}, sending pong", value);
 
                             // Respond with Pong
                             let pong = Message::Pong(value);
@@ -123,6 +186,7 @@ fn run() -> io::Result<()> {
                         }
                         Message::Pong(_) => {
                             // Ignore unexpected Pong messages
+                            debug_log!("Received unexpected Pong message");
                         }
                     }
 
@@ -133,6 +197,7 @@ fn run() -> io::Result<()> {
                 // No data available, continue to check for UDP responses
             }
             Err(e) => {
+                debug_log!("Stdin read error: {}", e);
                 return Err(e);
             }
         }
@@ -140,6 +205,18 @@ fn run() -> io::Result<()> {
         // Try to receive UDP responses from the target service
         match socket.recv_from(&mut recv_buf) {
             Ok((n, _src)) => {
+                trace_log!(
+                    "Received UDP response from {} ({} bytes), sending back with id={}",
+                    _src,
+                    n,
+                    last_packet_id
+                );
+
+                #[cfg(debug_assertions)]
+                {
+                    packets_received += 1;
+                }
+
                 // Create response packet with the last seen packet ID
                 // This allows the local side to correlate responses
                 let response = UdpPacket::new(
@@ -169,6 +246,13 @@ fn run() -> io::Result<()> {
         // Small sleep to avoid busy-waiting
         std::thread::sleep(Duration::from_micros(100));
     }
+
+    debug_log!(
+        "Shutting down. Stats: forwarded={}, received={}, pings={}",
+        packets_forwarded,
+        packets_received,
+        pings_received
+    );
 
     Ok(())
 }

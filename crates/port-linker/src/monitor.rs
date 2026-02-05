@@ -5,7 +5,7 @@ use crate::ssh::{Scanner, SshClient};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::interval;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, instrument, trace, warn};
 
 pub struct Monitor {
     client: Arc<SshClient>,
@@ -35,6 +35,7 @@ impl Monitor {
         }
     }
 
+    #[instrument(name = "monitor", skip(self), fields(interval_ms = self.scan_interval.as_millis() as u64))]
     pub async fn run(&mut self) -> Result<()> {
         let mut scan_interval = interval(self.scan_interval);
         let mut reconnect_delay = Duration::from_secs(1);
@@ -103,8 +104,10 @@ impl Monitor {
         Ok(())
     }
 
+    #[instrument(name = "scan_and_sync", skip(self))]
     async fn scan_and_sync(&mut self) -> Result<()> {
-        debug!("Scanning remote ports...");
+        trace!("Starting port scan cycle");
+        let scan_start = std::time::Instant::now();
 
         // Scan based on protocol filter
         let remote_ports = if self.forward_tcp && self.forward_udp {
@@ -115,43 +118,47 @@ impl Monitor {
             Scanner::scan_tcp_ports(&self.client).await?
         };
 
-        debug!(
-            "Found {} remote ports: {:?}",
+        trace!(
+            "Scan found {} remote ports in {:?}",
             remote_ports.len(),
-            remote_ports
-                .iter()
-                .map(|p| format!("{}:{}", p.protocol, p.port))
-                .collect::<Vec<_>>()
+            scan_start.elapsed()
         );
 
         // Check for dead UDP tunnels and restart them
         // This handles cases where the remote proxy died (healthcheck timeout, etc.)
         if self.forward_udp {
-            self.manager
+            let restarted = self
+                .manager
                 .check_and_restart_dead_udp_tunnels(&remote_ports)
                 .await;
+            if restarted > 0 {
+                debug!("Restarted {} dead UDP tunnel(s)", restarted);
+            }
         }
 
         // Sync based on protocol filter
-        // Note: sync_all_forwards properly handles both TCP and UDP ports
-        // while sync_forwards only handles TCP. We use sync_all_forwards for
-        // any protocol combination since it correctly partitions by protocol.
         self.manager.sync_all_forwards(remote_ports).await?;
 
-        // Log active tunnels
+        // Log active tunnels summary
         let tcp_active = self.manager.active_tcp_tunnels();
         let udp_active = self.manager.active_udp_tunnels();
+        let total = tcp_active.len() + udp_active.len();
 
-        if !tcp_active.is_empty() {
-            debug!("Active TCP tunnels: {:?}", tcp_active);
-        }
-        if !udp_active.is_empty() {
-            debug!("Active UDP tunnels: {:?}", udp_active);
+        if total > 0 {
+            trace!(
+                "Active tunnels: {} TCP {:?}, {} UDP {:?}",
+                tcp_active.len(),
+                tcp_active,
+                udp_active.len(),
+                udp_active
+            );
         }
 
+        trace!("Scan cycle completed in {:?}", scan_start.elapsed());
         Ok(())
     }
 
+    #[instrument(name = "shutdown", skip(self))]
     async fn shutdown(&mut self) {
         info!("Shutting down tunnels...");
         self.manager.shutdown().await;

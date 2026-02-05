@@ -5,6 +5,10 @@ edition.workspace = true
 description = "UDP proxy binary for port-linker remote forwarding"
 license.workspace = true
 
+[features]
+# Enable verbose per-packet trace logging (very noisy, only for debugging)
+verbose = []
+
 [dependencies]
 port-linker-proto = { path = "../port-linker-proto" }
 libc = "0.2"

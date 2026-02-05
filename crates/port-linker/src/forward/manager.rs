@@ -9,7 +9,7 @@ use port_linker_proto::Protocol;
 use russh::client::Handle;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, instrument, trace, warn};
 
 /// Key for tracking tunnels - combines port and protocol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -72,6 +72,7 @@ impl ForwardManager {
     }
 
     /// Sync all forwards, separating TCP and UDP.
+    #[instrument(name = "sync_forwards", skip(self, remote_ports), fields(port_count = remote_ports.len()))]
     pub async fn sync_all_forwards(&mut self, remote_ports: Vec<RemotePort>) -> Result<()> {
         let (tcp_ports, udp_ports): (Vec<_>, Vec<_>) = remote_ports
             .into_iter()
@@ -84,13 +85,14 @@ impl ForwardManager {
     }
 
     /// Sync TCP port forwards.
+    #[instrument(name = "sync_tcp", skip(self, remote_ports), fields(port_count = remote_ports.len()))]
     async fn sync_tcp_forwards(&mut self, remote_ports: Vec<RemotePort>) -> Result<()> {
         // Filter out excluded ports
         let non_excluded: Vec<RemotePort> = remote_ports
             .into_iter()
             .filter(|p| {
                 if self.excluded_ports.contains(&p.port) {
-                    debug!("Excluding TCP port {} (in exclusion list)", p.port);
+                    trace!("Excluding TCP port {} (in exclusion list)", p.port);
                     false
                 } else {
                     true
@@ -173,6 +175,7 @@ impl ForwardManager {
     }
 
     /// Sync UDP port forwards.
+    #[instrument(name = "sync_udp", skip(self, remote_ports), fields(port_count = remote_ports.len()))]
     async fn sync_udp_forwards(&mut self, remote_ports: Vec<RemotePort>) -> Result<()> {
         let client = match &self.ssh_client {
             Some(c) => c.clone(),
@@ -187,7 +190,7 @@ impl ForwardManager {
             .into_iter()
             .filter(|p| {
                 if self.excluded_ports.contains(&p.port) {
-                    debug!("Excluding UDP port {} (in exclusion list)", p.port);
+                    trace!("Excluding UDP port {} (in exclusion list)", p.port);
                     false
                 } else {
                     true
@@ -301,6 +304,7 @@ impl ForwardManager {
         Ok(())
     }
 
+    #[instrument(name = "handle_conflict", skip(self, remote_port), fields(port = port, protocol = ?protocol))]
     async fn handle_port_conflict(
         &mut self,
         port: u16,
@@ -492,6 +496,7 @@ impl ForwardManager {
         restarted
     }
 
+    #[instrument(name = "manager_shutdown", skip(self))]
     pub async fn shutdown(&mut self) {
         info!("Shutting down all tunnels");
 
