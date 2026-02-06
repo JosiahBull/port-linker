@@ -108,7 +108,7 @@ impl PortMapping {
     }
 
     /// Get description for a port only if it exists in the mapping
-    #[allow(dead_code)]
+    #[allow(dead_code, reason = "public API for downstream use")]
     pub fn get(&self, port: u16) -> Option<&str> {
         self.descriptions.get(&port).map(|s| s.as_str())
     }
@@ -149,5 +149,47 @@ mod tests {
         let mapping = PortMapping::default();
         assert_eq!(mapping.describe(8080, Some("node")), "node");
         assert_eq!(mapping.describe(8080, None), "port 8080");
+    }
+
+    #[test]
+    fn test_describe_prefers_mapping_over_process() {
+        let content = "8080 = \"Web Server\"";
+        let mapping = PortMapping::parse(content).unwrap();
+        assert_eq!(mapping.describe(8080, Some("nginx")), "Web Server");
+    }
+
+    #[test]
+    fn test_parse_empty() {
+        let mapping = PortMapping::parse("").unwrap();
+        assert!(mapping.get(8080).is_none());
+    }
+
+    #[test]
+    fn test_parse_comments_only() {
+        let content = "# just comments\n# nothing here\n";
+        let mapping = PortMapping::parse(content).unwrap();
+        assert!(mapping.get(1).is_none());
+    }
+
+    #[test]
+    fn test_parse_invalid_port() {
+        let content = "notaport = \"something\"";
+        let mapping = PortMapping::parse(content).unwrap();
+        // Should parse fine but have no entries (key isn't a valid port)
+        assert!(mapping.get(0).is_none());
+    }
+
+    #[test]
+    fn test_parse_empty_value() {
+        let content = "8080 = \"\"";
+        let mapping = PortMapping::parse(content).unwrap();
+        // Empty description should not be inserted
+        assert!(mapping.get(8080).is_none());
+    }
+
+    #[test]
+    fn test_get_returns_none_for_missing() {
+        let mapping = PortMapping::default();
+        assert!(mapping.get(12345).is_none());
     }
 }

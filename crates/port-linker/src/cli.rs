@@ -152,3 +152,80 @@ impl Cli {
         matches!(self.protocol, ProtocolFilter::Udp | ProtocolFilter::Both)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cli_with(args: &[&str]) -> Cli {
+        let mut full_args = vec!["port-linker"];
+        full_args.extend_from_slice(args);
+        Cli::parse_from(full_args)
+    }
+
+    #[test]
+    fn test_excluded_ports_defaults() {
+        let cli = cli_with(&["host"]);
+        let excluded = cli.excluded_ports();
+        for &port in DEFAULT_EXCLUDED_PORTS {
+            assert!(excluded.contains(&port), "Should contain default port {}", port);
+        }
+    }
+
+    #[test]
+    fn test_excluded_ports_no_defaults() {
+        let cli = cli_with(&["host", "--no-default-excludes"]);
+        let excluded = cli.excluded_ports();
+        assert!(excluded.is_empty());
+    }
+
+    #[test]
+    fn test_excluded_ports_custom() {
+        let cli = cli_with(&["host", "--exclude", "9090,9091"]);
+        let excluded = cli.excluded_ports();
+        assert!(excluded.contains(&9090));
+        assert!(excluded.contains(&9091));
+        // Should still include defaults
+        assert!(excluded.contains(&22));
+    }
+
+    #[test]
+    fn test_excluded_ports_custom_no_defaults() {
+        let cli = cli_with(&["host", "--no-default-excludes", "--exclude", "9090"]);
+        let excluded = cli.excluded_ports();
+        assert!(excluded.contains(&9090));
+        assert!(!excluded.contains(&22));
+        assert_eq!(excluded.len(), 1);
+    }
+
+    #[test]
+    fn test_forward_tcp_default() {
+        let cli = cli_with(&["host"]);
+        assert!(cli.forward_tcp());
+        assert!(!cli.forward_udp());
+    }
+
+    #[test]
+    fn test_forward_udp_only() {
+        let cli = cli_with(&["host", "--protocol", "udp"]);
+        assert!(!cli.forward_tcp());
+        assert!(cli.forward_udp());
+    }
+
+    #[test]
+    fn test_forward_both() {
+        let cli = cli_with(&["host", "--protocol", "both"]);
+        assert!(cli.forward_tcp());
+        assert!(cli.forward_udp());
+    }
+
+    #[test]
+    fn test_color_mode_always() {
+        assert!(ColorMode::Always.should_enable());
+    }
+
+    #[test]
+    fn test_color_mode_never() {
+        assert!(!ColorMode::Never.should_enable());
+    }
+}

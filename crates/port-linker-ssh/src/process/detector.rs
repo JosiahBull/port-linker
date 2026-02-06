@@ -5,7 +5,7 @@ use tracing::debug;
 pub struct ProcessInfo {
     pub pid: u32,
     pub name: String,
-    #[allow(dead_code)]
+    #[allow(dead_code, reason = "retained for diagnostic/logging use")]
     pub command: Option<String>,
 }
 
@@ -46,9 +46,9 @@ fn find_with_lsof(port: u16) -> Option<ProcessInfo> {
     // node    12345  user   22u  IPv4  0x1234  0t0  TCP *:8080 (LISTEN)
     for line in stdout.lines().skip(1) {
         let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() >= 2 {
-            if let Ok(pid) = parts[1].parse::<u32>() {
-                let name = parts[0].to_string();
+        if let (Some(name_str), Some(pid_str)) = (parts.get(0), parts.get(1)) {
+            if let Ok(pid) = pid_str.parse::<u32>() {
+                let name = (*name_str).to_string();
 
                 // Get full command
                 let command = get_process_command(pid);
@@ -125,9 +125,9 @@ fn find_with_ss(port: u16) -> Option<ProcessInfo> {
     // Format: users:(("process",pid=1234,fd=5))
     for line in stdout.lines() {
         if let Some(start) = line.find("pid=") {
-            let rest = &line[start + 4..];
+            let rest = line.get(start.checked_add(4)?..)?;
             if let Some(end) = rest.find(',') {
-                let pid: u32 = rest[..end].parse().ok()?;
+                let pid: u32 = rest.get(..end)?.parse().ok()?;
 
                 // Get process name from /proc
                 let cmdline = std::fs::read_to_string(format!("/proc/{}/comm", pid)).ok()?;

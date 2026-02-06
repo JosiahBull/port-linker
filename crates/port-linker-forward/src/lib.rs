@@ -2,14 +2,17 @@
 //!
 //! This crate provides:
 //! - TCP port forwarding through SSH tunnels
-//! - UDP port forwarding using embedded remote proxy
+//! - UDP port forwarding via remote target-agent (multiplexed)
+//! - AgentSession for communicating with the remote agent
 //! - ForwardManager for coordinating multiple tunnels
 
+pub mod agent;
 pub mod error;
 pub mod manager;
 pub mod tcp;
 pub mod udp;
 
+pub use agent::AgentSession;
 pub use error::{ForwardError, Result};
 pub use manager::{ForwardManager, TunnelKey};
 pub use tcp::{TcpTunnel, TunnelHandle};

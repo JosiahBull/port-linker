@@ -87,8 +87,7 @@ impl NotificationEvent {
     pub fn body(&self) -> String {
         match self {
             NotificationEvent::PortsForwarded { ports } => {
-                if ports.len() == 1 {
-                    let p = &ports[0];
+                if let [p] = ports.as_slice() {
                     format!("{} :{} ({})", p.protocol, p.port, p.description)
                 } else {
                     ports
@@ -99,8 +98,8 @@ impl NotificationEvent {
                 }
             }
             NotificationEvent::PortsRemoved { ports } => {
-                if ports.len() == 1 {
-                    format!("Port {} stopped", ports[0].port)
+                if let [p] = ports.as_slice() {
+                    format!("Port {} stopped", p.port)
                 } else {
                     format!(
                         "Ports {} stopped",
@@ -189,5 +188,213 @@ impl Notifier {
     /// Notify about a single event (connection, conflict, etc.)
     pub async fn notify_event(&self, event: NotificationEvent) {
         self.notify(event).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_port_info(port: u16, desc: &str, protocol: Protocol) -> PortInfo {
+        PortInfo {
+            port,
+            description: desc.to_string(),
+            protocol,
+        }
+    }
+
+    #[test]
+    fn test_port_info_new() {
+        let mapping = PortMapping::default();
+        let info = PortInfo::new(8080, Some("nginx"), &mapping);
+        assert_eq!(info.port, 8080);
+        assert_eq!(info.description, "nginx");
+        assert_eq!(info.protocol, Protocol::Tcp);
+    }
+
+    #[test]
+    fn test_port_info_new_with_protocol() {
+        let mapping = PortMapping::default();
+        let info = PortInfo::new_with_protocol(53, Some("dnsmasq"), Protocol::Udp, &mapping);
+        assert_eq!(info.port, 53);
+        assert_eq!(info.description, "dnsmasq");
+        assert_eq!(info.protocol, Protocol::Udp);
+    }
+
+    #[test]
+    fn test_port_info_no_process_name() {
+        let mapping = PortMapping::default();
+        let info = PortInfo::new(9999, None, &mapping);
+        assert_eq!(info.description, "port 9999");
+    }
+
+    #[test]
+    fn test_title_single_port_forwarded() {
+        let event = NotificationEvent::PortsForwarded {
+            ports: vec![make_port_info(8080, "nginx", Protocol::Tcp)],
+        };
+        assert_eq!(event.title(), "Port Forwarded");
+    }
+
+    #[test]
+    fn test_title_multiple_ports_forwarded() {
+        let event = NotificationEvent::PortsForwarded {
+            ports: vec![
+                make_port_info(8080, "nginx", Protocol::Tcp),
+                make_port_info(3000, "node", Protocol::Tcp),
+            ],
+        };
+        assert_eq!(event.title(), "2 Ports Forwarded");
+    }
+
+    #[test]
+    fn test_title_single_port_removed() {
+        let event = NotificationEvent::PortsRemoved {
+            ports: vec![make_port_info(8080, "nginx", Protocol::Tcp)],
+        };
+        assert_eq!(event.title(), "Port Removed");
+    }
+
+    #[test]
+    fn test_title_multiple_ports_removed() {
+        let event = NotificationEvent::PortsRemoved {
+            ports: vec![
+                make_port_info(8080, "nginx", Protocol::Tcp),
+                make_port_info(3000, "node", Protocol::Tcp),
+                make_port_info(5432, "postgres", Protocol::Tcp),
+            ],
+        };
+        assert_eq!(event.title(), "3 Ports Removed");
+    }
+
+    #[test]
+    fn test_title_connection_events() {
+        assert_eq!(NotificationEvent::ConnectionLost.title(), "Connection Lost");
+        assert_eq!(
+            NotificationEvent::ConnectionRestored.title(),
+            "Connection Restored"
+        );
+    }
+
+    #[test]
+    fn test_title_process_killed() {
+        let event = NotificationEvent::ProcessKilled {
+            port: 8080,
+            process_name: "nginx".to_string(),
+        };
+        assert_eq!(event.title(), "Process Killed");
+    }
+
+    #[test]
+    fn test_title_conflict_and_restart() {
+        assert_eq!(
+            NotificationEvent::ConflictDetected { port: 80 }.title(),
+            "Port Conflict"
+        );
+        assert_eq!(
+            NotificationEvent::TunnelRestarted {
+                port: 53,
+                protocol: Protocol::Udp
+            }
+            .title(),
+            "Tunnel Restarted"
+        );
+    }
+
+    #[test]
+    fn test_body_single_port_forwarded() {
+        let event = NotificationEvent::PortsForwarded {
+            ports: vec![make_port_info(8080, "nginx", Protocol::Tcp)],
+        };
+        assert_eq!(event.body(), "TCP :8080 (nginx)");
+    }
+
+    #[test]
+    fn test_body_multiple_ports_forwarded() {
+        let event = NotificationEvent::PortsForwarded {
+            ports: vec![
+                make_port_info(8080, "nginx", Protocol::Tcp),
+                make_port_info(53, "dnsmasq", Protocol::Udp),
+            ],
+        };
+        let body = event.body();
+        assert!(body.contains("TCP :8080 (nginx)"));
+        assert!(body.contains("UDP :53 (dnsmasq)"));
+        assert!(body.contains('\n'));
+    }
+
+    #[test]
+    fn test_body_single_port_removed() {
+        let event = NotificationEvent::PortsRemoved {
+            ports: vec![make_port_info(8080, "nginx", Protocol::Tcp)],
+        };
+        assert_eq!(event.body(), "Port 8080 stopped");
+    }
+
+    #[test]
+    fn test_body_multiple_ports_removed() {
+        let event = NotificationEvent::PortsRemoved {
+            ports: vec![
+                make_port_info(8080, "nginx", Protocol::Tcp),
+                make_port_info(3000, "node", Protocol::Tcp),
+            ],
+        };
+        assert_eq!(event.body(), "Ports 8080, 3000 stopped");
+    }
+
+    #[test]
+    fn test_body_connection_events() {
+        assert_eq!(
+            NotificationEvent::ConnectionLost.body(),
+            "SSH connection lost. Reconnecting..."
+        );
+        assert_eq!(
+            NotificationEvent::ConnectionRestored.body(),
+            "SSH connection restored."
+        );
+    }
+
+    #[test]
+    fn test_body_process_killed() {
+        let event = NotificationEvent::ProcessKilled {
+            port: 80,
+            process_name: "apache".to_string(),
+        };
+        assert_eq!(event.body(), "Killed apache on port 80");
+    }
+
+    #[test]
+    fn test_body_conflict_detected() {
+        let event = NotificationEvent::ConflictDetected { port: 3000 };
+        assert_eq!(event.body(), "Port 3000 is already in use locally");
+    }
+
+    #[test]
+    fn test_body_tunnel_restarted() {
+        let event = NotificationEvent::TunnelRestarted {
+            port: 53,
+            protocol: Protocol::Udp,
+        };
+        assert_eq!(event.body(), "UDP tunnel for port 53 restarted");
+    }
+
+    #[test]
+    fn test_is_error() {
+        assert!(NotificationEvent::ConnectionLost.is_error());
+        assert!(NotificationEvent::ConflictDetected { port: 80 }.is_error());
+
+        assert!(!NotificationEvent::ConnectionRestored.is_error());
+        assert!(!NotificationEvent::PortsForwarded { ports: vec![] }.is_error());
+        assert!(!NotificationEvent::PortsRemoved { ports: vec![] }.is_error());
+        assert!(!NotificationEvent::ProcessKilled {
+            port: 80,
+            process_name: "x".to_string()
+        }
+        .is_error());
+        assert!(!NotificationEvent::TunnelRestarted {
+            port: 53,
+            protocol: Protocol::Tcp
+        }
+        .is_error());
     }
 }

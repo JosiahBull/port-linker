@@ -210,14 +210,14 @@ impl SshClient {
             .map_err(|e| SshError::Channel(format!("Invalid UTF-8 in output: {}", e)))
     }
 
-    #[allow(dead_code)]
+    #[allow(dead_code, reason = "kept for future use")]
     pub async fn open_direct_tcpip(
         &self,
         remote_host: &str,
         remote_port: u16,
     ) -> Result<russh::Channel<russh::client::Msg>> {
         self.handle
-            .channel_open_direct_tcpip(remote_host, remote_port as u32, "127.0.0.1", 0)
+            .channel_open_direct_tcpip(remote_host, u32::from(remote_port), "127.0.0.1", 0)
             .await
             .map_err(|e| SshError::Channel(format!("Failed to open direct-tcpip channel: {}", e)))
     }
@@ -250,26 +250,22 @@ impl SshClient {
 
         // Write in chunks to avoid shell command line limits
         // Most shells have a limit around 128KB-1MB, we'll use 64KB chunks to be safe
+        // Note: base64 output is pure ASCII, so byte and char boundaries are the same.
         const CHUNK_SIZE: usize = 65536;
 
-        // First chunk creates the file
-        let first_chunk = if encoded_str.len() > CHUNK_SIZE {
-            &encoded_str[..CHUNK_SIZE]
-        } else {
-            &encoded_str
-        };
+        let encoded_bytes = encoded_str.as_bytes();
+        let mut is_first = true;
 
-        let cmd = format!("echo -n '{}' | base64 -d > {}", first_chunk, path);
-        self.exec(&cmd).await?;
+        for chunk_bytes in encoded_bytes.chunks(CHUNK_SIZE) {
+            // SAFETY: base64 output is pure ASCII, so any byte slice is valid UTF-8
+            let chunk = std::str::from_utf8(chunk_bytes).map_err(|e| {
+                SshError::Channel(format!("Invalid UTF-8 in base64 chunk: {}", e))
+            })?;
 
-        // Subsequent chunks append
-        let mut offset = CHUNK_SIZE;
-        while offset < encoded_str.len() {
-            let end = (offset + CHUNK_SIZE).min(encoded_str.len());
-            let chunk = &encoded_str[offset..end];
-            let cmd = format!("echo -n '{}' | base64 -d >> {}", chunk, path);
+            let redirect = if is_first { ">" } else { ">>" };
+            let cmd = format!("echo -n '{}' | base64 -d {} {}", chunk, redirect, path);
             self.exec(&cmd).await?;
-            offset = end;
+            is_first = false;
         }
 
         Ok(())

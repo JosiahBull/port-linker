@@ -8,6 +8,7 @@ license.workspace = true
 
 [dependencies]
 port-linker-proto.workspace = true
+port-scanner = { path = "../port-scanner" }
 russh.workspace = true
 ssh2-config-rs.workspace = true
 tokio.workspace = true

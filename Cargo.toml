@@ -31,6 +31,7 @@ notify-rust = "4"
 
 # Logging
 tracing = "0.1"
+tracing-core = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "ansi"] }
 
 # Error handling
@@ -41,25 +42,27 @@ dialoguer = "0.12"
 
 # Internal crates
 port-linker-proto = { path = "crates/port-linker-proto" }
+port-scanner = { path = "crates/port-scanner" }
 port-linker-ssh = { path = "crates/port-linker-ssh" }
 port-linker-notify = { path = "crates/port-linker-notify" }
 port-linker-forward = { path = "crates/port-linker-forward" }
-port-linker-udp-build = { path = "crates/port-linker-udp-build" }
+port-linker-agent-build = { path = "crates/port-linker-agent-build" }
+port-linker-agent-embed = { path = "crates/port-linker-agent-embed" }
 
 [profile.release]
 lto = true
 codegen-units = 1
 strip = true
 
-# Heavily optimized profile for udp-proxy - minimal binary size for SSH transfer
+# Heavily optimized profile for target-agent - minimal binary size for SSH transfer
 # Based on release but with aggressive size optimizations
-[profile.udp-proxy-release]
+[profile.target-agent-release]
 inherits = "release"
 opt-level = "z"           # Optimize for size
 lto = true                # Link-time optimization
 codegen-units = 1         # Single codegen unit for better optimization
 panic = "abort"           # No unwinding = smaller binary
-strip = "symbols"         # Strip all symbols TODO: can soon be immediate-abort once stabilised
+strip = true              # Strip all symbols
 
 [workspace.package.metadata.docs.rs]
 all-features = true

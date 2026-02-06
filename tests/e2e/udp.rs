@@ -323,11 +323,11 @@ fn test_udp_new_service_detected() {
 // Wait times can be configured via environment variables for faster CI:
 //   E2E_HEALTHCHECK_WAIT_SECS=5 E2E_HEALTHCHECK_LONG_WAIT_SECS=10 cargo test
 
-/// Kill the udp-proxy process on the remote to simulate proxy death
-fn kill_remote_udp_proxy() -> bool {
-    // Find and kill all udp-proxy processes on the remote
+/// Kill the target-agent process on the remote to simulate agent death
+fn kill_remote_agent() -> bool {
+    // Find and kill all target-agent processes on the remote
     // Note: Don't use `-f` flag with pkill in BusyBox as it matches the SSH command line itself
-    let output = ssh_exec("pkill udp-proxy 2>/dev/null; echo $?");
+    let output = ssh_exec("pkill target-agent 2>/dev/null; echo $?");
     match output {
         Ok(o) => {
             let status = String::from_utf8_lossy(&o.stdout).trim().to_string();
@@ -338,10 +338,10 @@ fn kill_remote_udp_proxy() -> bool {
     }
 }
 
-/// Check if udp-proxy is running on the remote
-fn is_udp_proxy_running() -> bool {
+/// Check if target-agent is running on the remote
+fn is_agent_running() -> bool {
     // Note: Don't use `-f` flag with pgrep in BusyBox as it can match the SSH command line
-    let output = ssh_exec("pgrep udp-proxy >/dev/null 2>&1 && echo yes || echo no");
+    let output = ssh_exec("pgrep target-agent >/dev/null 2>&1 && echo yes || echo no");
     match output {
         Ok(o) => String::from_utf8_lossy(&o.stdout).trim() == "yes",
         Err(_) => false,
@@ -349,7 +349,7 @@ fn is_udp_proxy_running() -> bool {
 }
 
 #[test]
-#[timeout(10000)]
+#[timeout(30000)]
 fn test_udp_proxy_restart_after_remote_kill() {
     let dynamic_port = allocate_test_port();
     let _lock = PortLock::acquire(&[dynamic_port]);
@@ -386,18 +386,20 @@ fn test_udp_proxy_restart_after_remote_kill() {
         initial_response.err()
     );
 
-    // Kill the udp-proxy on the remote
-    eprintln!("Killing remote udp-proxy process...");
-    let killed = kill_remote_udp_proxy();
-    assert!(killed, "Failed to kill remote udp-proxy");
+    // Kill the target-agent on the remote
+    eprintln!("Killing remote target-agent process...");
+    let killed = kill_remote_agent();
+    assert!(killed, "Failed to kill remote target-agent");
 
-    // When the proxy is killed, the SSH channel closes immediately.
-    // The port-linker detects this via ChannelClosed (not healthcheck timeout)
-    // and restarts the proxy on the next scan cycle (within a few seconds).
-    eprintln!("Waiting for automatic proxy restart...");
+    // When the agent is killed, the SSH channel closes immediately.
+    // The port-linker detects this via ChannelClosed, redeploys the agent
+    // on the next scan cycle, then re-establishes UDP forwarding.
+    // This takes longer than the old per-port proxy because the full agent
+    // binary (~5.8MB) must be re-uploaded via SSH.
+    eprintln!("Waiting for automatic agent recovery and UDP re-forwarding...");
 
-    // Wait for UDP port to become responsive again (proxy restarted)
-    let port_recovered = wait_for_udp_port(dynamic_port, Duration::from_secs(5));
+    // Wait for UDP port to become responsive again (agent redeployed)
+    let port_recovered = wait_for_udp_port(dynamic_port, Duration::from_secs(20));
 
     // Verify traffic works after recovery
     let recovered_response = if port_recovered {
@@ -455,8 +457,8 @@ fn test_udp_healthcheck_keeps_proxy_alive() {
         dynamic_port
     );
 
-    // Verify the proxy is running
-    assert!(is_udp_proxy_running(), "udp-proxy should be running");
+    // Verify the agent is running
+    assert!(is_agent_running(), "target-agent should be running");
 
     // Wait for healthcheck interval (configurable via E2E_HEALTHCHECK_WAIT_SECS)
     // Default: 30 seconds, well under the 60s healthcheck timeout
@@ -467,8 +469,8 @@ fn test_udp_healthcheck_keeps_proxy_alive() {
     );
     std::thread::sleep(Duration::from_secs(wait_secs));
 
-    // Verify the proxy is still running
-    let still_running = is_udp_proxy_running();
+    // Verify the agent is still running
+    let still_running = is_agent_running();
 
     // Verify traffic still works
     let response = udp_send_and_receive(dynamic_port, b"after wait test");
@@ -479,7 +481,7 @@ fn test_udp_healthcheck_keeps_proxy_alive() {
 
     assert!(
         still_running,
-        "udp-proxy should still be running after {} seconds (healthcheck keeps it alive)",
+        "target-agent should still be running after {} seconds (healthcheck keeps it alive)",
         wait_secs
     );
     assert!(

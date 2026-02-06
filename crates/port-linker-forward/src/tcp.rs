@@ -9,9 +9,9 @@ use tracing::{debug, error, info};
 
 #[derive(Debug)]
 pub struct TunnelHandle {
-    #[allow(dead_code)]
+    #[allow(dead_code, reason = "stored for debugging/inspection")]
     pub remote_port: RemotePort,
-    #[allow(dead_code)]
+    #[allow(dead_code, reason = "stored for debugging/inspection")]
     pub local_port: u16,
     shutdown_tx: oneshot::Sender<()>,
 }
@@ -23,9 +23,9 @@ impl TunnelHandle {
 }
 
 pub struct TcpTunnel {
-    #[allow(dead_code)]
+    #[allow(dead_code, reason = "stored for reference")]
     pub remote_port: RemotePort,
-    #[allow(dead_code)]
+    #[allow(dead_code, reason = "stored for reference")]
     pub local_port: u16,
 }
 
@@ -73,7 +73,7 @@ impl TcpTunnel {
             })?;
 
         let remote_port_num = remote_port.port;
-        let bind_address = remote_port.bind_address.clone();
+        let bind_address = remote_port.bind_address.to_string();
 
         tokio::spawn(async move {
             loop {
@@ -125,7 +125,7 @@ impl TcpTunnel {
         };
 
         let mut channel = ssh_handle
-            .channel_open_direct_tcpip(connect_host, remote_port as u32, "127.0.0.1", 0)
+            .channel_open_direct_tcpip(connect_host, u32::from(remote_port), "127.0.0.1", 0)
             .await
             .map_err(|e| ForwardError::PortForward {
                 port: remote_port,
@@ -148,7 +148,7 @@ impl TcpTunnel {
                             break;
                         }
                         Ok(n) => {
-                            if channel.data(&local_buf[..n]).await.is_err() {
+                            if channel.data(local_buf.get(..n).unwrap_or(&[])).await.is_err() {
                                 break;
                             }
                         }

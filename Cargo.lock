@@ -3558,6 +3558,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "port-linker-agent-build"
+version = "0.1.0"
+
+[[package]]
+name = "port-linker-agent-embed"
+version = "0.1.0"
+dependencies = [
+ "port-linker-agent-build",
+]
+
+[[package]]
 name = "port-linker-assets"
 version = "0.1.0"
 dependencies = [
@@ -3568,10 +3579,11 @@ dependencies = [
 name = "port-linker-forward"
 version = "0.1.0"
 dependencies = [
+ "port-linker-agent-embed",
  "port-linker-notify",
  "port-linker-proto",
  "port-linker-ssh",
- "port-linker-udp-embed",
+ "port-scanner",
  "russh",
  "thiserror 2.0.18",
  "tokio",
@@ -3602,6 +3614,7 @@ dependencies = [
  "dialoguer",
  "dirs",
  "port-linker-proto",
+ "port-scanner",
  "russh",
  "shellexpand",
  "ssh2-config-rs",
@@ -3613,14 +3626,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "port-linker-udp-build"
-version = "0.1.0"
-
-[[package]]
-name = "port-linker-udp-embed"
+name = "port-scanner"
 version = "0.1.0"
 dependencies = [
- "port-linker-udp-build",
+ "port-linker-proto",
 ]
 
 [[package]]
@@ -4767,6 +4776,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "target-agent"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "port-linker-proto",
+ "port-scanner",
+ "tracing",
+ "tracing-core",
+]
+
+[[package]]
 name = "tauri-winrt-notification"
 version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5157,14 +5177,6 @@ name = "typenum"
 version = "1.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "562d481066bde0658276a35467c4af00bdc6ee726305698a55b86e61d7ad82bb"
-
-[[package]]
-name = "udp-proxy"
-version = "0.1.0"
-dependencies = [
- "libc",
- "port-linker-proto",
-]
 
 [[package]]
 name = "uds_windows"

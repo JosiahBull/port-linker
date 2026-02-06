@@ -1,7 +1,8 @@
 use crate::error::Result;
-use port_linker_forward::ForwardManager;
+use port_linker_forward::{AgentSession, ForwardManager};
 use port_linker_notify::{NotificationEvent, Notifier};
-use port_linker_ssh::{Scanner, SshClient};
+use port_linker_proto::ScanFlags;
+use port_linker_ssh::{RemotePort, Scanner, SshClient};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::interval;
@@ -65,9 +66,6 @@ impl Monitor {
                                     warn!("Attempting reconnection in {:?}...", reconnect_delay);
                                     tokio::time::sleep(reconnect_delay).await;
 
-                                    // Note: reconnect requires mutable access, but we have Arc
-                                    // For now, we'll just keep trying with the existing client
-                                    // TODO: Handle reconnection properly with Arc<Mutex<SshClient>>
                                     if self.client.is_connected().await {
                                         info!("Connection restored");
                                         self.notifier.notify_event(NotificationEvent::ConnectionRestored).await;
@@ -85,7 +83,7 @@ impl Monitor {
                                         break;
                                     } else {
                                         error!("Connection still down");
-                                        reconnect_delay = (reconnect_delay * 2).min(max_reconnect_delay);
+                                        reconnect_delay = reconnect_delay.saturating_mul(2).min(max_reconnect_delay);
                                     }
                                 }
                             }
@@ -109,14 +107,11 @@ impl Monitor {
         trace!("Starting port scan cycle");
         let scan_start = std::time::Instant::now();
 
-        // Scan based on protocol filter
-        let remote_ports = if self.forward_tcp && self.forward_udp {
-            Scanner::scan_all_ports(&self.client).await?
-        } else if self.forward_udp {
-            Scanner::scan_udp_ports(&self.client).await?
-        } else {
-            Scanner::scan_tcp_ports(&self.client).await?
-        };
+        // Check if agent is still alive; attempt recovery if not
+        self.check_agent_health().await;
+
+        // Try scanning via agent first, fall back to SSH scanner
+        let remote_ports = self.scan_ports().await?;
 
         trace!(
             "Scan found {} remote ports in {:?}",
@@ -124,25 +119,13 @@ impl Monitor {
             scan_start.elapsed()
         );
 
-        // Check for dead UDP tunnels and restart them
-        // This handles cases where the remote proxy died (healthcheck timeout, etc.)
-        if self.forward_udp {
-            let restarted = self
-                .manager
-                .check_and_restart_dead_udp_tunnels(&remote_ports)
-                .await;
-            if restarted > 0 {
-                debug!("Restarted {} dead UDP tunnel(s)", restarted);
-            }
-        }
-
-        // Sync based on protocol filter
+        // Sync all forwards
         self.manager.sync_all_forwards(remote_ports).await?;
 
         // Log active tunnels summary
         let tcp_active = self.manager.active_tcp_tunnels();
         let udp_active = self.manager.active_udp_tunnels();
-        let total = tcp_active.len() + udp_active.len();
+        let total = tcp_active.len().saturating_add(udp_active.len());
 
         if total > 0 {
             trace!(
@@ -158,10 +141,73 @@ impl Monitor {
         Ok(())
     }
 
+    /// Scan for remote ports, using the agent session if available.
+    async fn scan_ports(&self) -> Result<Vec<RemotePort>> {
+        // Try agent-based scanning first
+        if let Some(agent) = self.manager.agent_session() {
+            let flags = ScanFlags {
+                tcp: self.forward_tcp,
+                udp: self.forward_udp,
+            };
+
+            match agent.request_scan(flags).await {
+                Ok(ports) => return Ok(ports),
+                Err(e) => {
+                    warn!("Agent scan failed, falling back to SSH scanner: {}", e);
+                }
+            }
+        }
+
+        // Fallback to SSH-based scanning
+        if self.forward_tcp && self.forward_udp {
+            Ok(Scanner::scan_all_ports(&self.client).await?)
+        } else if self.forward_udp {
+            Ok(Scanner::scan_udp_ports(&self.client).await?)
+        } else {
+            Ok(Scanner::scan_tcp_ports(&self.client).await?)
+        }
+    }
+
+    /// Check if the agent is still alive and attempt to recover if not.
+    async fn check_agent_health(&mut self) {
+        if let Some(agent) = self.manager.agent_session_mut() {
+            if agent.is_alive() {
+                return; // Agent is healthy
+            }
+            warn!("Target agent is no longer alive, attempting recovery...");
+        } else {
+            return; // No agent session configured
+        }
+
+        // Agent is dead - remove the old session and try to redeploy
+        let old_session = self.manager.take_agent_session();
+        if let Some(old) = old_session {
+            // Clean up old binary on remote
+            old.cleanup(&self.client).await;
+        }
+
+        // Attempt to deploy a new agent
+        match AgentSession::deploy_and_start(&self.client).await {
+            Ok(session) => {
+                info!("Target agent recovered successfully");
+                self.manager.set_agent_session(session);
+            }
+            Err(e) => {
+                debug!("Failed to recover target agent: {} - using SSH scanner fallback", e);
+            }
+        }
+    }
+
     #[instrument(name = "shutdown", skip(self))]
     async fn shutdown(&mut self) {
         info!("Shutting down tunnels...");
         self.manager.shutdown().await;
+
+        // Clean up agent binary on remote
+        if let Some(agent) = self.manager.agent_session() {
+            agent.cleanup(&self.client).await;
+        }
+
         info!("Goodbye!");
     }
 }

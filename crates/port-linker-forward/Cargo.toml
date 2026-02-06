@@ -10,7 +10,8 @@ license.workspace = true
 port-linker-proto.workspace = true
 port-linker-ssh = { path = "../port-linker-ssh" }
 port-linker-notify = { path = "../port-linker-notify" }
-port-linker-udp-embed = { path = "../port-linker-udp-embed" }
+port-linker-agent-embed = { path = "../port-linker-agent-embed" }
+port-scanner = { path = "../port-scanner" }
 russh.workspace = true
 tokio.workspace = true
 tracing.workspace = true

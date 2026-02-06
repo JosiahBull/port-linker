@@ -15,4 +15,7 @@ pub use client::{ParsedHost, SshClient, SshClientConfig};
 pub use error::{Result, SshError};
 pub use handler::ClientHandler;
 pub use process::{find_process_on_port, kill_process, prompt_kill, ProcessInfo};
-pub use scanner::{RemotePort, Scanner};
+pub use scanner::Scanner;
+
+// Re-export RemotePort from port-scanner for downstream compatibility
+pub use port_scanner::{BindAddress, RemotePort};

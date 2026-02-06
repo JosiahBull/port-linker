@@ -1,12 +1,12 @@
-//! Embedded udp-proxy binaries for port-linker.
+//! Embedded target-agent binaries for port-linker.
 //!
-//! This crate provides pre-compiled udp-proxy binaries for various target platforms.
+//! This crate provides pre-compiled target-agent binaries for various target platforms.
 //! The binaries are compiled during the build process and embedded into the library.
 //!
 //! # Usage
 //!
 //! ```rust,ignore
-//! use port_linker_udp_embed::get_binary_for_system;
+//! use port_linker_agent_embed::get_binary_for_system;
 //!
 //! // Get the binary for a Linux x86_64 system
 //! if let Some(binary) = get_binary_for_system("linux", "x86_64") {
@@ -20,25 +20,25 @@
 //! - `aarch64-unknown-linux-musl` (Linux ARM64, static binary)
 //! - `aarch64-apple-darwin` (macOS ARM64/Apple Silicon)
 
-/// Embedded udp-proxy binaries for different target architectures.
+/// Embedded target-agent binaries for different target architectures.
 /// Build.rs creates empty placeholder files for targets that fail to compile,
 /// so we can unconditionally include them and check length at runtime.
 mod binaries {
     /// Linux x86_64 (musl static binary)
     pub static X86_64_LINUX_MUSL: &[u8] = include_bytes!(concat!(
         env!("OUT_DIR"),
-        "/udp-proxy-x86_64-unknown-linux-musl"
+        "/target-agent-x86_64-unknown-linux-musl"
     ));
 
     /// Linux aarch64 (musl static binary)
     pub static AARCH64_LINUX_MUSL: &[u8] = include_bytes!(concat!(
         env!("OUT_DIR"),
-        "/udp-proxy-aarch64-unknown-linux-musl"
+        "/target-agent-aarch64-unknown-linux-musl"
     ));
 
     /// macOS aarch64 (Apple Silicon)
     pub static AARCH64_DARWIN: &[u8] =
-        include_bytes!(concat!(env!("OUT_DIR"), "/udp-proxy-aarch64-apple-darwin"));
+        include_bytes!(concat!(env!("OUT_DIR"), "/target-agent-aarch64-apple-darwin"));
 }
 
 /// Information about a target platform.
@@ -60,7 +60,7 @@ impl TargetInfo {
     }
 }
 
-/// Get the udp-proxy binary for the given operating system and architecture.
+/// Get the target-agent binary for the given operating system and architecture.
 ///
 /// # Arguments
 ///
@@ -75,7 +75,7 @@ impl TargetInfo {
 /// # Example
 ///
 /// ```rust
-/// use port_linker_udp_embed::get_binary_for_system;
+/// use port_linker_agent_embed::get_binary_for_system;
 ///
 /// // Check if we have a binary for Linux x86_64
 /// if let Some(binary) = get_binary_for_system("linux", "x86_64") {
@@ -101,7 +101,7 @@ pub fn get_binary_for_system(os: &str, arch: &str) -> Option<&'static [u8]> {
     }
 }
 
-/// Get the udp-proxy binary for the given target info.
+/// Get the target-agent binary for the given target info.
 ///
 /// This is a convenience wrapper around [`get_binary_for_system`].
 pub fn get_binary(target: &TargetInfo) -> Option<&'static [u8]> {
@@ -162,5 +162,39 @@ mod tests {
         if let (Some(a), Some(b)) = (aarch64, arm64) {
             assert_eq!(a.len(), b.len());
         }
+    }
+
+    #[test]
+    fn test_unsupported_target_returns_none() {
+        assert!(get_binary_for_system("windows", "x86_64").is_none());
+        assert!(get_binary_for_system("linux", "riscv64").is_none());
+        assert!(get_binary_for_system("plan9", "mips").is_none());
+    }
+
+    #[test]
+    fn test_get_binary_wrapper() {
+        let target = TargetInfo::new("windows", "x86_64");
+        assert!(get_binary(&target).is_none());
+    }
+
+    #[test]
+    fn test_supported_targets_list() {
+        let targets = supported_targets();
+        assert_eq!(targets.len(), 3);
+        assert!(targets.contains(&("linux", "x86_64")));
+        assert!(targets.contains(&("linux", "aarch64")));
+        assert!(targets.contains(&("darwin", "aarch64")));
+    }
+
+    #[test]
+    fn test_target_info_new() {
+        let info = TargetInfo::new("linux", "x86_64");
+        assert_eq!(info.os, "linux");
+        assert_eq!(info.arch, "x86_64");
+    }
+
+    #[test]
+    fn test_is_target_available_unsupported() {
+        assert!(!is_target_available("windows", "x86_64"));
     }
 }

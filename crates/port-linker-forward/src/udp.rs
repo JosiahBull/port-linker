@@ -1,16 +1,13 @@
-//! UDP tunnel implementation using embedded udp-proxy binary.
+//! Legacy per-port UDP tunnel implementation.
 //!
-//! This module handles the local side of UDP tunneling:
-//! 1. Detects the remote system architecture
-//! 2. Transfers the appropriate udp-proxy binary to the remote host
-//! 3. Starts the proxy via SSH
-//! 4. Binds a local UDP socket
-//! 5. Forwards UDP packets through the SSH channel to the remote proxy
+//! This module provides backward-compatible per-port UDP tunneling. For the
+//! preferred multiplexed approach, see the `agent` module which routes all
+//! UDP through a single target-agent process.
 
 use crate::error::{ForwardError, Result};
 use port_linker_proto::{Message, UdpPacket};
 use port_linker_ssh::SshClient;
-use port_linker_udp_embed::get_binary_for_system;
+use port_linker_agent_embed::get_binary_for_system;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -266,7 +263,7 @@ async fn udp_forward_loop(
                 }
 
                 // Send ping
-                ping_counter += 1;
+                ping_counter = ping_counter.wrapping_add(1);
                 let ping = Message::Ping(ping_counter);
                 if let Err(e) = channel.data(&ping.encode()[..]).await {
                     debug!("Failed to send healthcheck ping: {}", e);
@@ -284,7 +281,7 @@ async fn udp_forward_loop(
                             src_addr.port(),
                             remote_port,
                             id,
-                            recv_buf[..n].to_vec(),
+                            recv_buf.get(..n).unwrap_or(&[]).to_vec(),
                         );
 
                         // Send to remote via SSH channel using Message wrapper
@@ -323,8 +320,13 @@ async fn udp_forward_loop(
                                     last_pong = Instant::now();
                                     trace!("Received healthcheck pong for port {}", remote_port);
                                 }
-                                Message::Ping(_) => {
-                                    // Ignore unexpected ping from remote
+                                Message::LogBatch(_)
+                                | Message::Ping(_)
+                                | Message::ScanRequest(_)
+                                | Message::ScanResponse(_)
+                                | Message::StartUdpForward { .. }
+                                | Message::StopUdpForward(_) => {
+                                    // Ignore unexpected messages from remote
                                 }
                             }
                             pending_from_remote.drain(..consumed);
@@ -364,7 +366,7 @@ mod tests {
     #[test]
     fn test_udp_proxy_binaries_available() {
         // At least one binary should be available via the embed crate
-        let available = port_linker_udp_embed::available_targets();
+        let available = port_linker_agent_embed::available_targets();
         assert!(
             !available.is_empty(),
             "At least one udp-proxy binary should be available"

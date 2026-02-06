@@ -1,0 +1,13 @@
+[package]
+name = "port-scanner"
+version.workspace = true
+edition.workspace = true
+description = "Port scanning library for discovering listening ports on local and remote systems"
+repository.workspace = true
+license.workspace = true
+
+[dependencies]
+port-linker-proto = { path = "../port-linker-proto" }
+
+[lints]
+workspace = true

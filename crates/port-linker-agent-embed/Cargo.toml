@@ -1,15 +1,15 @@
 [package]
-name = "port-linker-udp-embed"
+name = "port-linker-agent-embed"
 version.workspace = true
 edition.workspace = true
-description = "Embedded udp-proxy binaries for port-linker"
+description = "Embedded target-agent binaries for port-linker"
 repository.workspace = true
 license.workspace = true
 
 [dependencies]
 
 [build-dependencies]
-port-linker-udp-build = { path = "../port-linker-udp-build" }
+port-linker-agent-build = { path = "../port-linker-agent-build" }
 
 [lints]
 workspace = true

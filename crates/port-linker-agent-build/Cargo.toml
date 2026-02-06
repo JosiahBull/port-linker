@@ -1,5 +1,5 @@
 [package]
-name = "port-linker-udp-build"
+name = "port-linker-agent-build"
 version.workspace = true
 edition.workspace = true
 description = "Cross-compilation build infrastructure for port-linker"

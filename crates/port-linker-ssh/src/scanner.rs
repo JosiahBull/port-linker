@@ -1,15 +1,8 @@
 use crate::client::SshClient;
 use crate::error::{Result, SshError};
 use port_linker_proto::Protocol;
+use port_scanner::{BindAddress, RemotePort};
 use tracing::{debug, info, trace};
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct RemotePort {
-    pub port: u16,
-    pub bind_address: String,
-    pub process_name: Option<String>,
-    pub protocol: Protocol,
-}
 
 pub struct Scanner;
 
@@ -104,7 +97,7 @@ impl Scanner {
             // Skip header
             if let Some(port) = Self::parse_line(line, protocol, expected_prefix) {
                 // Only include ports bound to localhost or all interfaces
-                if Self::is_forwardable_address(&port.bind_address) {
+                if port.bind_address.is_forwardable() {
                     trace!(
                         "Found forwardable port: {}:{} ({})",
                         port.bind_address,
@@ -157,25 +150,7 @@ impl Scanner {
             return None;
         }
 
-        // Detect the output format and find the local address column index.
-        // We need to handle multiple formats:
-        //
-        // 1. ss with protocol filter (ss -tlnp or ss -ulnp) - NO Netid column:
-        //    State  Recv-Q Send-Q Local Address:Port Peer Address:Port Process
-        //    LISTEN 0      128    0.0.0.0:22         0.0.0.0:*
-        //    parts[0] = "LISTEN" (state), local_addr at index 3
-        //
-        // 2. ss without protocol filter (ss -lnp) - HAS Netid column:
-        //    Netid State  Recv-Q Send-Q Local Address:Port Peer Address:Port Process
-        //    tcp   LISTEN 0      128    0.0.0.0:22         0.0.0.0:*
-        //    parts[0] = "tcp" (protocol), local_addr at index 4
-        //
-        // 3. netstat format:
-        //    Proto Recv-Q Send-Q Local Address Foreign Address State PID/Program
-        //    tcp   0      0      0.0.0.0:8080  0.0.0.0:*       LISTEN 1234/nginx
-        //    parts[0] = "tcp", parts[1] = "0" (number), local_addr at index 3
-
-        let first_col = parts[0].to_lowercase();
+        let first_col = parts.first()?.to_lowercase();
         let is_state = matches!(
             first_col.as_str(),
             "listen" | "estab" | "established" | "unconn" | "time-wait" | "close-wait" | "syn-sent" | "syn-recv"
@@ -183,33 +158,18 @@ impl Scanner {
         let is_protocol = first_col.starts_with(expected_prefix);
 
         let local_addr_idx = if is_state {
-            // Format 1: ss with protocol filter, no Netid column
-            // State Recv-Q Send-Q LocalAddr:Port ...
-            // [0]   [1]    [2]    [3]
             3
         } else if is_protocol {
-            // Could be format 2 (ss) or format 3 (netstat)
-            if parts[1].parse::<u32>().is_ok() {
-                // Format 3: netstat - parts[1] is Recv-Q (a number)
-                // Proto Recv-Q Send-Q LocalAddr ...
-                // [0]   [1]    [2]    [3]
-                3
+            if parts.get(1).and_then(|p| p.parse::<u32>().ok()).is_some() {
+                3 // netstat
             } else {
-                // Format 2: ss with Netid column - parts[1] is State
-                // Netid State Recv-Q Send-Q LocalAddr:Port ...
-                // [0]   [1]   [2]    [3]    [4]
-                4
+                4 // ss with Netid
             }
         } else {
-            // Unknown format or wrong protocol
             return None;
         };
 
-        if parts.len() <= local_addr_idx {
-            return None;
-        }
-
-        let local_addr = parts[local_addr_idx];
+        let local_addr = parts.get(local_addr_idx)?;
         let (bind_address, port) = Self::parse_address_port(local_addr)?;
 
         // Try to extract process name
@@ -223,45 +183,41 @@ impl Scanner {
         })
     }
 
-    fn parse_address_port(addr: &str) -> Option<(String, u16)> {
+    fn parse_address_port(addr: &str) -> Option<(BindAddress, u16)> {
         // Handle IPv6 format [::]:port or [::1]:port
         if addr.starts_with('[') {
             let end_bracket = addr.find(']')?;
-            let address = &addr[1..end_bracket];
-            let port_str = addr.get(end_bracket + 2..)?;
+            let address = addr.get(1..end_bracket)?;
+            let port_str = addr.get(end_bracket.checked_add(2)?..)?;
             let port = port_str.parse().ok()?;
-            return Some((address.to_string(), port));
+            let bind_addr = BindAddress::parse_str(address)?;
+            return Some((bind_addr, port));
         }
 
-        // Handle IPv4 format address:port
-        // But also handle :::port (IPv6 any)
+        // Handle :::port (IPv6 any)
         if let Some(port_str) = addr.strip_prefix(":::") {
             let port = port_str.parse().ok()?;
-            return Some(("::".to_string(), port));
+            return Some((BindAddress::parse_str("::").unwrap_or(BindAddress::V6(std::net::Ipv6Addr::UNSPECIFIED)), port));
         }
 
         // Standard IPv4 or single colon format
         let last_colon = addr.rfind(':')?;
-        let address = &addr[..last_colon];
-        let port_str = &addr[last_colon + 1..];
+        let address = addr.get(..last_colon)?;
+        let port_str = addr.get(last_colon.checked_add(1)?..)?;
 
-        // Handle * as 0.0.0.0
-        let address = if address == "*" {
-            "0.0.0.0".to_string()
-        } else {
-            address.to_string()
-        };
+        let bind_addr = BindAddress::parse_str(address)
+            .unwrap_or(BindAddress::V4(std::net::Ipv4Addr::UNSPECIFIED));
 
         let port = port_str.parse().ok()?;
-        Some((address, port))
+        Some((bind_addr, port))
     }
 
     fn extract_process_name(line: &str) -> Option<String> {
         // ss format: users:(("process",pid=1234,fd=5))
         if let Some(start) = line.find("users:((\"") {
-            let rest = &line[start + 9..];
+            let rest = line.get(start.checked_add(9)?..)?;
             if let Some(end) = rest.find('"') {
-                return Some(rest[..end].to_string());
+                return Some(rest.get(..end)?.to_string());
             }
         }
 
@@ -269,26 +225,26 @@ impl Scanner {
         for part in line.split_whitespace().rev() {
             if part.contains('/') {
                 let parts: Vec<&str> = part.split('/').collect();
-                if parts.len() == 2 && parts[0].parse::<u32>().is_ok() {
-                    return Some(parts[1].to_string());
+                if parts.len() == 2 {
+                    if let Some(pid_str) = parts.first() {
+                        if pid_str.parse::<u32>().is_ok() {
+                            if let Some(name) = parts.get(1) {
+                                return Some((*name).to_string());
+                            }
+                        }
+                    }
                 }
             }
         }
 
         None
     }
-
-    fn is_forwardable_address(addr: &str) -> bool {
-        matches!(
-            addr,
-            "0.0.0.0" | "127.0.0.1" | "::" | "::1" | "*" | "localhost"
-        )
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::{Ipv4Addr, Ipv6Addr};
 
     #[test]
     fn test_parse_ss_tcp_output() {
@@ -298,15 +254,15 @@ tcp    LISTEN  0       128     127.0.0.1:3000        0.0.0.0:*         users:(("
 tcp    LISTEN  0       128     [::]:80               [::]:*            users:(("nginx",pid=9012,fd=6))"#;
 
         let ports = Scanner::parse_output(output, Protocol::Tcp).unwrap();
-        assert_eq!(ports.len(), 3);
+        assert_eq!(ports.len(), 3, "Expected 3 ports, got {:?}", ports);
 
         let port_22 = ports.iter().find(|p| p.port == 22).unwrap();
-        assert_eq!(port_22.bind_address, "0.0.0.0");
+        assert_eq!(port_22.bind_address, BindAddress::V4(Ipv4Addr::UNSPECIFIED));
         assert_eq!(port_22.process_name, Some("sshd".to_string()));
         assert_eq!(port_22.protocol, Protocol::Tcp);
 
         let port_3000 = ports.iter().find(|p| p.port == 3000).unwrap();
-        assert_eq!(port_3000.bind_address, "127.0.0.1");
+        assert_eq!(port_3000.bind_address, BindAddress::V4(Ipv4Addr::LOCALHOST));
         assert_eq!(port_3000.process_name, Some("node".to_string()));
     }
 
@@ -317,10 +273,10 @@ udp    UNCONN  0       0       0.0.0.0:53            0.0.0.0:*         users:(("
 udp    UNCONN  0       0       127.0.0.1:323         0.0.0.0:*         users:(("chronyd",pid=5678,fd=6))"#;
 
         let ports = Scanner::parse_output(output, Protocol::Udp).unwrap();
-        assert_eq!(ports.len(), 2);
+        assert_eq!(ports.len(), 2, "Expected 2 ports, got {:?}", ports);
 
         let port_53 = ports.iter().find(|p| p.port == 53).unwrap();
-        assert_eq!(port_53.bind_address, "0.0.0.0");
+        assert_eq!(port_53.bind_address, BindAddress::V4(Ipv4Addr::UNSPECIFIED));
         assert_eq!(port_53.process_name, Some("dnsmasq".to_string()));
         assert_eq!(port_53.protocol, Protocol::Udp);
     }
@@ -329,29 +285,28 @@ udp    UNCONN  0       0       127.0.0.1:323         0.0.0.0:*         users:(("
     fn test_parse_address_port() {
         assert_eq!(
             Scanner::parse_address_port("0.0.0.0:8080"),
-            Some(("0.0.0.0".to_string(), 8080))
+            Some((BindAddress::V4(Ipv4Addr::UNSPECIFIED), 8080))
         );
         assert_eq!(
             Scanner::parse_address_port("127.0.0.1:3000"),
-            Some(("127.0.0.1".to_string(), 3000))
+            Some((BindAddress::V4(Ipv4Addr::LOCALHOST), 3000))
         );
         assert_eq!(
             Scanner::parse_address_port("[::]:80"),
-            Some(("::".to_string(), 80))
+            Some((BindAddress::V6(Ipv6Addr::UNSPECIFIED), 80))
         );
         assert_eq!(
             Scanner::parse_address_port(":::8080"),
-            Some(("::".to_string(), 8080))
+            Some((BindAddress::V6(Ipv6Addr::UNSPECIFIED), 8080))
         );
         assert_eq!(
             Scanner::parse_address_port("*:22"),
-            Some(("0.0.0.0".to_string(), 22))
+            Some((BindAddress::V4(Ipv4Addr::UNSPECIFIED), 22))
         );
     }
 
     #[test]
     fn test_parse_ss_tcp_output_no_netid() {
-        // ss -tlnp output format (no Netid column because -t implies TCP)
         let output = r#"State  Recv-Q Send-Q               Local Address:Port  Peer Address:PortProcess
 LISTEN 0      128                        0.0.0.0:22         0.0.0.0:*
 LISTEN 0      4096                       0.0.0.0:5432       0.0.0.0:*
@@ -362,37 +317,34 @@ LISTEN 0      4096                             *:9100             *:*           
 
         let ports = Scanner::parse_output(output, Protocol::Tcp).unwrap();
 
-        // Should find: 22, 5432, 8888, 12345, 4243, 9100 (all forwardable)
         assert!(ports.len() >= 6, "Expected at least 6 ports, got {}", ports.len());
 
         let port_22 = ports.iter().find(|p| p.port == 22).unwrap();
-        assert_eq!(port_22.bind_address, "0.0.0.0");
+        assert_eq!(port_22.bind_address, BindAddress::V4(Ipv4Addr::UNSPECIFIED));
         assert_eq!(port_22.protocol, Protocol::Tcp);
 
         let port_8888 = ports.iter().find(|p| p.port == 8888).unwrap();
-        assert_eq!(port_8888.bind_address, "0.0.0.0");
+        assert_eq!(port_8888.bind_address, BindAddress::V4(Ipv4Addr::UNSPECIFIED));
         assert_eq!(port_8888.process_name, Some("python3.13".to_string()));
 
         let port_12345 = ports.iter().find(|p| p.port == 12345).unwrap();
-        assert_eq!(port_12345.bind_address, "127.0.0.1");
+        assert_eq!(port_12345.bind_address, BindAddress::V4(Ipv4Addr::LOCALHOST));
 
-        // * should be normalized to 0.0.0.0
         let port_4243 = ports.iter().find(|p| p.port == 4243).unwrap();
-        assert_eq!(port_4243.bind_address, "0.0.0.0");
+        assert_eq!(port_4243.bind_address, BindAddress::V4(Ipv4Addr::UNSPECIFIED));
     }
 
     #[test]
     fn test_parse_ss_udp_output_no_netid() {
-        // ss -ulnp output format (no Netid column because -u implies UDP)
         let output = r#"State  Recv-Q Send-Q Local Address:Port Peer Address:Port Process
 UNCONN 0      0      0.0.0.0:53          0.0.0.0:*     users:(("dnsmasq",pid=1234,fd=5))
 UNCONN 0      0      127.0.0.1:323       0.0.0.0:*     users:(("chronyd",pid=5678,fd=6))"#;
 
         let ports = Scanner::parse_output(output, Protocol::Udp).unwrap();
-        assert_eq!(ports.len(), 2);
+        assert_eq!(ports.len(), 2, "Expected 2 ports, got {:?}", ports);
 
         let port_53 = ports.iter().find(|p| p.port == 53).unwrap();
-        assert_eq!(port_53.bind_address, "0.0.0.0");
+        assert_eq!(port_53.bind_address, BindAddress::V4(Ipv4Addr::UNSPECIFIED));
         assert_eq!(port_53.process_name, Some("dnsmasq".to_string()));
         assert_eq!(port_53.protocol, Protocol::Udp);
     }

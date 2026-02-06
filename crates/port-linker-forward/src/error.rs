@@ -12,7 +12,7 @@ pub enum ForwardError {
     #[error("SSH error: {0}")]
     Ssh(#[from] port_linker_ssh::SshError),
 
-    #[error("Unsupported remote platform: {os}/{arch} - no udp-proxy binary available")]
+    #[error("Unsupported remote platform: {os}/{arch} - no target-agent binary available")]
     UnsupportedPlatform { os: String, arch: String },
 
     #[error("IO error: {0}")]

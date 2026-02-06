@@ -1,15 +1,15 @@
+use crate::agent::AgentSession;
 use crate::error::{ForwardError, Result};
 use crate::tcp::{TcpTunnel, TunnelHandle};
-use crate::udp::{start_udp_tunnel, TunnelStopReason, UdpProxyManager, UdpTunnelHandle};
 use port_linker_notify::{NotificationEvent, Notifier, PortInfo};
 use port_linker_proto::Protocol;
 use port_linker_ssh::{
-    find_process_on_port, kill_process, prompt_kill, ClientHandler, RemotePort, SshClient,
+    find_process_on_port, kill_process, prompt_kill, ClientHandler, RemotePort,
 };
 use russh::client::Handle;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tracing::{debug, error, info, instrument, trace, warn};
+use tracing::{error, info, instrument, trace, warn};
 
 /// Key for tracking tunnels - combines port and protocol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -26,10 +26,9 @@ impl TunnelKey {
 
 pub struct ForwardManager {
     tcp_tunnels: HashMap<u16, TunnelHandle>,
-    udp_tunnels: HashMap<u16, UdpTunnelHandle>,
-    udp_proxy_manager: UdpProxyManager,
+    udp_forwarded_ports: HashSet<u16>,
+    agent_session: Option<AgentSession>,
     ssh_handle: Arc<Handle<ClientHandler>>,
-    ssh_client: Option<Arc<SshClient>>,
     notifier: Arc<Notifier>,
     auto_kill: bool,
     port_filter: Option<Vec<u16>>,
@@ -46,10 +45,9 @@ impl ForwardManager {
     ) -> Self {
         Self {
             tcp_tunnels: HashMap::new(),
-            udp_tunnels: HashMap::new(),
-            udp_proxy_manager: UdpProxyManager::new(),
+            udp_forwarded_ports: HashSet::new(),
+            agent_session: None,
             ssh_handle,
-            ssh_client: None,
             notifier,
             auto_kill,
             port_filter,
@@ -57,9 +55,26 @@ impl ForwardManager {
         }
     }
 
-    /// Set the SSH client reference for UDP tunneling.
-    pub fn set_ssh_client(&mut self, client: Arc<SshClient>) {
-        self.ssh_client = Some(client);
+    /// Set the agent session for scanning and UDP forwarding.
+    pub fn set_agent_session(&mut self, session: AgentSession) {
+        self.agent_session = Some(session);
+    }
+
+    /// Get a reference to the agent session.
+    pub fn agent_session(&self) -> Option<&AgentSession> {
+        self.agent_session.as_ref()
+    }
+
+    /// Get a mutable reference to the agent session (for health checking).
+    pub fn agent_session_mut(&mut self) -> Option<&mut AgentSession> {
+        self.agent_session.as_mut()
+    }
+
+    /// Remove and return the agent session, clearing tracked UDP forwards
+    /// since the local sockets are owned by the agent's background task.
+    pub fn take_agent_session(&mut self) -> Option<AgentSession> {
+        self.udp_forwarded_ports.clear();
+        self.agent_session.take()
     }
 
     pub fn update_ssh_handle(&mut self, handle: Arc<Handle<ClientHandler>>) {
@@ -111,12 +126,12 @@ impl ForwardManager {
         };
 
         let desired_port_nums: HashSet<u16> = desired_ports.iter().map(|p| p.port).collect();
-        let current_port_nums: HashSet<u16> = self.tcp_tunnels.keys().cloned().collect();
+        let current_port_nums: HashSet<u16> = self.tcp_tunnels.keys().copied().collect();
 
         // Remove tunnels that are no longer needed
         let to_remove: Vec<u16> = current_port_nums
             .difference(&desired_port_nums)
-            .cloned()
+            .copied()
             .collect();
 
         let mut removed_ports = Vec::new();
@@ -174,16 +189,13 @@ impl ForwardManager {
         Ok(())
     }
 
-    /// Sync UDP port forwards.
+    /// Sync UDP port forwards via the agent session.
     #[instrument(name = "sync_udp", skip(self, remote_ports), fields(port_count = remote_ports.len()))]
     async fn sync_udp_forwards(&mut self, remote_ports: Vec<RemotePort>) -> Result<()> {
-        let client = match &self.ssh_client {
-            Some(c) => c.clone(),
-            None => {
-                warn!("SSH client not set, skipping UDP forwarding");
-                return Ok(());
-            }
-        };
+        if self.agent_session.is_none() {
+            warn!("No agent session, skipping UDP forwarding");
+            return Ok(());
+        }
 
         // Filter out excluded ports
         let non_excluded: Vec<RemotePort> = remote_ports
@@ -209,68 +221,56 @@ impl ForwardManager {
         };
 
         let desired_port_nums: HashSet<u16> = desired_ports.iter().map(|p| p.port).collect();
-        let current_port_nums: HashSet<u16> = self.udp_tunnels.keys().cloned().collect();
+        let current_port_nums = self.udp_forwarded_ports.clone();
 
-        // Remove tunnels that are no longer needed
+        // Remove forwards that are no longer needed
         let to_remove: Vec<u16> = current_port_nums
             .difference(&desired_port_nums)
-            .cloned()
+            .copied()
             .collect();
 
         let mut removed_ports = Vec::new();
         for port in to_remove {
-            if let Some(handle) = self.udp_tunnels.remove(&port) {
-                info!("Removing UDP tunnel for port {}", port);
-                handle.shutdown();
-                removed_ports.push(PortInfo::new_with_protocol(
-                    port,
-                    None,
-                    Protocol::Udp,
-                    self.notifier.mapping(),
-                ));
+            info!("Removing UDP forward for port {}", port);
+            if let Some(agent) = &self.agent_session {
+                agent.stop_udp_forward(port).await;
             }
+            self.udp_forwarded_ports.remove(&port);
+            removed_ports.push(PortInfo::new_with_protocol(
+                port,
+                None,
+                Protocol::Udp,
+                self.notifier.mapping(),
+            ));
         }
 
         self.notifier.notify_ports_removed(removed_ports).await;
 
-        // Add new tunnels
+        // Add new forwards
         let to_add: Vec<RemotePort> = desired_ports
             .into_iter()
             .filter(|p| !current_port_nums.contains(&p.port))
             .collect();
 
-        if to_add.is_empty() {
-            return Ok(());
-        }
-
-        // Ensure UDP proxy is deployed
-        let proxy_path = match self.udp_proxy_manager.ensure_deployed(&client).await {
-            Ok(path) => path,
-            Err(e) => {
-                error!("Failed to deploy UDP proxy: {}", e);
-                return Ok(()); // Don't fail the whole sync
-            }
-        };
-
         let mut added_ports = Vec::new();
         for remote_port in to_add {
-            match start_udp_tunnel(
-                &client,
-                &proxy_path,
-                remote_port.port,
-                &remote_port.bind_address,
-                None,
-            )
-            .await
-            {
-                Ok(handle) => {
+            let result = if let Some(agent) = &self.agent_session {
+                agent
+                    .start_udp_forward(remote_port.port, &remote_port.bind_address)
+                    .await
+            } else {
+                continue;
+            };
+
+            match result {
+                Ok(()) => {
                     added_ports.push(PortInfo::new_with_protocol(
                         remote_port.port,
                         remote_port.process_name.as_deref(),
                         Protocol::Udp,
                         self.notifier.mapping(),
                     ));
-                    self.udp_tunnels.insert(remote_port.port, handle);
+                    self.udp_forwarded_ports.insert(remote_port.port);
                 }
                 Err(ForwardError::PortInUse(port)) => {
                     if let Some(port_info) = self
@@ -282,7 +282,7 @@ impl ForwardManager {
                 }
                 Err(e) => {
                     error!(
-                        "Failed to add UDP tunnel for port {}: {}",
+                        "Failed to add UDP forward for port {}: {}",
                         remote_port.port, e
                     );
                 }
@@ -352,27 +352,22 @@ impl ForwardManager {
                         }
                     }
                     Protocol::Udp => {
-                        if let Some(client) = &self.ssh_client {
-                            if let Ok(proxy_path) =
-                                self.udp_proxy_manager.ensure_deployed(client).await
-                            {
-                                if let Ok(handle) = start_udp_tunnel(
-                                    client,
-                                    &proxy_path,
+                        if let Some(agent) = &self.agent_session {
+                            if agent
+                                .start_udp_forward(
                                     remote_port.port,
                                     &remote_port.bind_address,
-                                    None,
                                 )
                                 .await
-                                {
-                                    self.udp_tunnels.insert(remote_port.port, handle);
-                                    return Ok(Some(PortInfo::new_with_protocol(
-                                        port,
-                                        remote_port.process_name.as_deref(),
-                                        protocol,
-                                        self.notifier.mapping(),
-                                    )));
-                                }
+                                .is_ok()
+                            {
+                                self.udp_forwarded_ports.insert(remote_port.port);
+                                return Ok(Some(PortInfo::new_with_protocol(
+                                    port,
+                                    remote_port.process_name.as_deref(),
+                                    protocol,
+                                    self.notifier.mapping(),
+                                )));
                             }
                         }
                     }
@@ -394,112 +389,15 @@ impl ForwardManager {
     }
 
     pub fn active_tcp_tunnels(&self) -> Vec<u16> {
-        self.tcp_tunnels.keys().cloned().collect()
+        self.tcp_tunnels.keys().copied().collect()
     }
 
     pub fn active_udp_tunnels(&self) -> Vec<u16> {
-        self.udp_tunnels.keys().cloned().collect()
+        self.udp_forwarded_ports.iter().copied().collect()
     }
 
     pub fn active_tunnels(&self) -> Vec<u16> {
-        self.tcp_tunnels.keys().cloned().collect()
-    }
-
-    /// Check for dead UDP tunnels and restart them.
-    /// Returns the number of tunnels that were restarted.
-    pub async fn check_and_restart_dead_udp_tunnels(
-        &mut self,
-        remote_ports: &[RemotePort],
-    ) -> usize {
-        let client = match &self.ssh_client {
-            Some(c) => c.clone(),
-            None => return 0,
-        };
-
-        // Find dead tunnels
-        let mut dead_ports: Vec<(u16, TunnelStopReason)> = Vec::new();
-        for (port, handle) in self.udp_tunnels.iter_mut() {
-            if !handle.is_alive() {
-                // Try to get the reason from the death receiver
-                let reason = handle
-                    .take_death_receiver()
-                    .and_then(|mut rx| rx.try_recv().ok())
-                    .unwrap_or(TunnelStopReason::ChannelClosed);
-                dead_ports.push((*port, reason));
-            }
-        }
-
-        if dead_ports.is_empty() {
-            return 0;
-        }
-
-        // Remove dead tunnels
-        for (port, reason) in &dead_ports {
-            if let Some(handle) = self.udp_tunnels.remove(port) {
-                info!(
-                    "Removing dead UDP tunnel for port {} (reason: {:?})",
-                    port, reason
-                );
-                // Don't call shutdown() - the tunnel is already dead
-                drop(handle);
-            }
-        }
-
-        // Ensure UDP proxy is deployed (it might need to be redeployed)
-        let proxy_path = match self.udp_proxy_manager.ensure_deployed(&client).await {
-            Ok(path) => path,
-            Err(e) => {
-                error!("Failed to deploy UDP proxy for restart: {}", e);
-                return 0;
-            }
-        };
-
-        // Restart dead tunnels
-        let mut restarted = 0;
-        for (port, reason) in dead_ports {
-            // Find the remote port info
-            let remote_port = remote_ports.iter().find(|p| p.port == port);
-            let (bind_address, _process_name) = match remote_port {
-                Some(p) => (p.bind_address.as_str(), p.process_name.as_deref()),
-                None => {
-                    // Port no longer exists on remote, skip
-                    debug!(
-                        "UDP port {} no longer exists on remote, not restarting",
-                        port
-                    );
-                    continue;
-                }
-            };
-
-            info!(
-                "Restarting UDP tunnel for port {} (was stopped due to {:?})",
-                port, reason
-            );
-
-            match start_udp_tunnel(&client, &proxy_path, port, bind_address, None).await {
-                Ok(handle) => {
-                    self.udp_tunnels.insert(port, handle);
-                    restarted += 1;
-
-                    // Notify about restart
-                    self.notifier
-                        .notify_event(NotificationEvent::TunnelRestarted {
-                            port,
-                            protocol: Protocol::Udp,
-                        })
-                        .await;
-                }
-                Err(e) => {
-                    error!("Failed to restart UDP tunnel for port {}: {}", port, e);
-                }
-            }
-        }
-
-        if restarted > 0 {
-            info!("Restarted {} UDP tunnel(s)", restarted);
-        }
-
-        restarted
+        self.tcp_tunnels.keys().copied().collect()
     }
 
     #[instrument(name = "manager_shutdown", skip(self))]
@@ -507,24 +405,16 @@ impl ForwardManager {
         info!("Shutting down all tunnels");
 
         // Shutdown TCP tunnels
-        let tcp_ports: Vec<u16> = self.tcp_tunnels.keys().cloned().collect();
+        let tcp_ports: Vec<u16> = self.tcp_tunnels.keys().copied().collect();
         for port in tcp_ports {
             if let Some(handle) = self.tcp_tunnels.remove(&port) {
                 handle.shutdown();
             }
         }
 
-        // Shutdown UDP tunnels
-        let udp_ports: Vec<u16> = self.udp_tunnels.keys().cloned().collect();
-        for port in udp_ports {
-            if let Some(handle) = self.udp_tunnels.remove(&port) {
-                handle.shutdown();
-            }
-        }
-
-        // Clean up remote UDP proxy
-        if let Some(client) = &self.ssh_client {
-            self.udp_proxy_manager.cleanup(client).await;
+        // Shutdown agent session (which handles all UDP forwards)
+        if let Some(agent) = &self.agent_session {
+            agent.shutdown().await;
         }
     }
 }
