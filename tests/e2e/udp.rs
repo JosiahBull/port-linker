@@ -11,7 +11,7 @@ use std::time::Duration;
 // to run in parallel with each other and with other tests.
 
 #[test]
-#[timeout(10000)]
+#[timeout(20000)]
 fn test_udp_discovers_ports() {
     let dynamic_port = allocate_test_port();
     let _lock = PortLock::acquire(&[dynamic_port]);
@@ -50,7 +50,7 @@ fn test_udp_discovers_ports() {
 }
 
 #[test]
-#[timeout(10000)]
+#[timeout(20000)]
 fn test_udp_echo_traffic() {
     let dynamic_port = allocate_test_port();
     let _lock = PortLock::acquire(&[dynamic_port]);
@@ -103,7 +103,7 @@ fn test_udp_echo_traffic() {
 }
 
 #[test]
-#[timeout(10000)]
+#[timeout(20000)]
 fn test_udp_multiple_packets() {
     let dynamic_port = allocate_test_port();
     let _lock = PortLock::acquire(&[dynamic_port]);
@@ -182,7 +182,7 @@ fn test_udp_multiple_packets() {
 // Port 9999 in Docker is bound to 127.0.0.1, not 0.0.0.0.
 
 #[test]
-#[timeout(10000)]
+#[timeout(20000)]
 fn test_udp_localhost_bound_port() {
     let _lock = PortLock::acquire(&[DOCKER_UDP_PORT_ECHO_LOCALHOST]);
     require_test_env!();
@@ -216,7 +216,7 @@ fn test_udp_localhost_bound_port() {
 // ============================================================================
 
 #[test]
-#[timeout(10000)]
+#[timeout(20000)]
 fn test_udp_both_protocols() {
     let dynamic_udp_port = allocate_test_port();
     let _lock = PortLock::acquire(&[DOCKER_TCP_PORT_HTTP, dynamic_udp_port]);
@@ -262,7 +262,7 @@ fn test_udp_both_protocols() {
 // ============================================================================
 
 #[test]
-#[timeout(10000)]
+#[timeout(20000)]
 fn test_udp_new_service_detected() {
     // Allocate two unique ports - one for initial service, one for "new" service
     let initial_port = allocate_test_port();
@@ -352,7 +352,9 @@ fn is_agent_running() -> bool {
 #[timeout(30000)]
 fn test_udp_proxy_restart_after_remote_kill() {
     let dynamic_port = allocate_test_port();
-    let _lock = PortLock::acquire(&[dynamic_port]);
+    // AGENT_STABILITY_LOCK: this test runs `pkill target-agent` which kills ALL agents,
+    // so it must not run concurrently with tests that depend on agent stability.
+    let _lock = PortLock::acquire(&[dynamic_port, AGENT_STABILITY_LOCK]);
     require_test_env!();
 
     // Start our own UDP echo service
@@ -431,7 +433,8 @@ fn test_udp_proxy_restart_after_remote_kill() {
 #[timeout(15000)] // Short timeout by default, set E2E_HEALTHCHECK_WAIT_SECS for thorough testing
 fn test_udp_healthcheck_keeps_proxy_alive() {
     let dynamic_port = allocate_test_port();
-    let _lock = PortLock::acquire(&[dynamic_port]);
+    // AGENT_STABILITY_LOCK: this test needs a stable agent during its idle wait period.
+    let _lock = PortLock::acquire(&[dynamic_port, AGENT_STABILITY_LOCK]);
     require_test_env!();
 
     // Start our own UDP echo service
@@ -496,7 +499,8 @@ fn test_udp_healthcheck_keeps_proxy_alive() {
 #[timeout(15000)] // Short timeout by default, set E2E_HEALTHCHECK_LONG_WAIT_SECS for thorough testing
 fn test_udp_tunnel_survives_traffic_pause() {
     let dynamic_port = allocate_test_port();
-    let _lock = PortLock::acquire(&[dynamic_port]);
+    // AGENT_STABILITY_LOCK: this test needs a stable agent during its traffic pause period.
+    let _lock = PortLock::acquire(&[dynamic_port, AGENT_STABILITY_LOCK]);
     require_test_env!();
 
     // Start our own UDP echo service

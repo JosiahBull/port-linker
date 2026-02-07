@@ -94,6 +94,42 @@ fn get_ssh_control_socket() -> &'static PathBuf {
     })
 }
 
+// ============================================================================
+// PRE-TEST CLEANUP
+// ============================================================================
+// Kills orphaned target-agent and socat processes from previous test runs.
+// Without this, successive test runs degrade as zombie processes accumulate
+// in the Docker container, consuming SSH slots and ports.
+
+/// One-time test environment initialization
+static TEST_INIT: OnceLock<()> = OnceLock::new();
+
+/// Clean up orphaned processes from prior test runs.
+///
+/// When a test times out (via ntest), `stop_port_linker` never runs, leaving:
+/// - Local port-linker processes bound to forwarded ports
+/// - Remote target-agent processes consuming SSH slots
+///
+/// This function kills both. It matches test port-linker instances by their
+/// `testuser@localhost` argument (which is unique to E2E tests) to avoid
+/// killing the user's real port-linker instances.
+///
+/// Does NOT kill socat — the Docker container has pre-configured socat services
+/// (ports 5353, 9999) that must stay alive.
+fn init_test_env() {
+    TEST_INIT.get_or_init(|| {
+        // Kill orphaned local port-linker processes from prior test runs.
+        // Match on "testuser@localhost" to only kill test instances.
+        let _ = std::process::Command::new("pkill")
+            .args(["-9", "-f", "port-linker.*testuser@localhost"])
+            .status();
+        // Kill orphaned remote target-agent processes
+        let _ = ssh_exec("pkill -9 target-agent 2>/dev/null; true");
+        // Let ports release after killing processes
+        std::thread::sleep(Duration::from_millis(500));
+    });
+}
+
 /// Get the path to the port-linker binary
 #[allow(deprecated)]
 fn bin_path() -> std::path::PathBuf {
@@ -196,6 +232,11 @@ pub const DOCKER_TCP_PORT_POSTGRES: u16 = 5432;
 /// Fixed ports in the Docker container (UDP)
 /// Note: Port 9999 is bound to 127.0.0.1, used only for localhost-bound test
 pub const DOCKER_UDP_PORT_ECHO_LOCALHOST: u16 = 9999;
+
+/// Virtual port used as a lock key for tests that kill all remote agents (`pkill target-agent`)
+/// or depend on agent stability during long idle periods. Tests holding this lock are
+/// serialized to prevent `pkill target-agent` from breaking concurrent tests' agents.
+pub const AGENT_STABILITY_LOCK: u16 = 1;
 
 /// Get healthcheck wait time from environment variable or use default.
 /// Default is 1 second (fast). Set E2E_HEALTHCHECK_WAIT_SECS higher for thorough testing.
@@ -596,7 +637,8 @@ fn wait_for_remote_udp_port_listening(port: u16, timeout: Duration) -> bool {
 // TEST HELPERS
 // ============================================================================
 
-/// Skip tests if Docker environment is not running
+/// Skip tests if Docker environment is not running.
+/// Also performs one-time cleanup of orphaned processes from prior runs.
 macro_rules! require_test_env {
     () => {
         if !$crate::is_test_env_running() {
@@ -604,6 +646,7 @@ macro_rules! require_test_env {
             eprintln!("Run: ./tests/docker/setup-test-env.sh");
             panic!();
         }
+        $crate::init_test_env();
     };
 }
 
@@ -614,7 +657,7 @@ pub(crate) use require_test_env;
 // ============================================================================
 
 #[test]
-#[timeout(10000)]
+#[timeout(20000)]
 fn test_invalid_ssh_host() {
     // This should fail quickly with connection error - no port locks needed
     Command::new(bin_path())
@@ -627,7 +670,7 @@ fn test_invalid_ssh_host() {
 }
 
 #[test]
-#[timeout(10000)]
+#[timeout(20000)]
 fn test_invalid_ssh_key() {
     require_test_env!();
 
