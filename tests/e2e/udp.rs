@@ -323,25 +323,24 @@ fn test_udp_new_service_detected() {
 // Wait times can be configured via environment variables for faster CI:
 //   E2E_HEALTHCHECK_WAIT_SECS=5 E2E_HEALTHCHECK_LONG_WAIT_SECS=10 cargo test
 
-/// Kill the target-agent process on the remote to simulate agent death
+/// Kill the agent process on the remote to simulate agent death
 fn kill_remote_agent() -> bool {
-    // Find and kill all target-agent processes on the remote
-    // Note: Don't use `-f` flag with pkill in BusyBox as it matches the SSH command line itself
-    let output = ssh_exec("pkill target-agent 2>/dev/null; echo $?");
-    match output {
-        Ok(o) => {
-            let status = String::from_utf8_lossy(&o.stdout).trim().to_string();
-            // pkill returns 0 if at least one process was killed
-            status == "0"
-        }
-        Err(_) => false,
+    // First check there's an agent running to kill
+    if !is_agent_running() {
+        return false;
     }
+
+    // Record the agent PID(s) before killing, then kill by PID.
+    // We use `kill` instead of `pkill -f` because pkill's pattern matching
+    // can accidentally match the SSH session itself, causing exit code 255.
+    let _ = ssh_exec("kill $(pgrep -f '/tmp/port-linker-agent') 2>/dev/null; true");
+    true
 }
 
-/// Check if target-agent is running on the remote
+/// Check if agent is running on the remote
 fn is_agent_running() -> bool {
-    // Note: Don't use `-f` flag with pgrep in BusyBox as it can match the SSH command line
-    let output = ssh_exec("pgrep target-agent >/dev/null 2>&1 && echo yes || echo no");
+    // Match on /tmp/ prefix to avoid matching the ssh session itself
+    let output = ssh_exec("pgrep -f '/tmp/port-linker-agent' >/dev/null 2>&1 && echo yes || echo no");
     match output {
         Ok(o) => String::from_utf8_lossy(&o.stdout).trim() == "yes",
         Err(_) => false,
@@ -352,7 +351,7 @@ fn is_agent_running() -> bool {
 #[timeout(30000)]
 fn test_udp_proxy_restart_after_remote_kill() {
     let dynamic_port = allocate_test_port();
-    // AGENT_STABILITY_LOCK: this test runs `pkill target-agent` which kills ALL agents,
+    // AGENT_STABILITY_LOCK: this test runs `pkill -f port-linker-agent` which kills ALL agents,
     // so it must not run concurrently with tests that depend on agent stability.
     let _lock = PortLock::acquire(&[dynamic_port, AGENT_STABILITY_LOCK]);
     require_test_env!();
@@ -388,10 +387,10 @@ fn test_udp_proxy_restart_after_remote_kill() {
         initial_response.err()
     );
 
-    // Kill the target-agent on the remote
-    eprintln!("Killing remote target-agent process...");
+    // Kill the agent on the remote
+    eprintln!("Killing remote agent process...");
     let killed = kill_remote_agent();
-    assert!(killed, "Failed to kill remote target-agent");
+    assert!(killed, "Failed to kill remote agent");
 
     // When the agent is killed, the SSH channel closes immediately.
     // The port-linker detects this via ChannelClosed, redeploys the agent
@@ -461,7 +460,7 @@ fn test_udp_healthcheck_keeps_proxy_alive() {
     );
 
     // Verify the agent is running
-    assert!(is_agent_running(), "target-agent should be running");
+    assert!(is_agent_running(), "agent should be running");
 
     // Wait for healthcheck interval (configurable via E2E_HEALTHCHECK_WAIT_SECS)
     // Default: 30 seconds, well under the 60s healthcheck timeout
@@ -484,7 +483,7 @@ fn test_udp_healthcheck_keeps_proxy_alive() {
 
     assert!(
         still_running,
-        "target-agent should still be running after {} seconds (healthcheck keeps it alive)",
+        "agent should still be running after {} seconds (healthcheck keeps it alive)",
         wait_secs
     );
     assert!(

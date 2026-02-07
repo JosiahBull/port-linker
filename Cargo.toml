@@ -41,22 +41,22 @@ thiserror = "2"
 dialoguer = "0.12"
 
 # Internal crates
-port-linker-proto = { path = "crates/port-linker-proto" }
-port-scanner = { path = "crates/port-scanner" }
-port-linker-ssh = { path = "crates/port-linker-ssh" }
-port-linker-notify = { path = "crates/port-linker-notify" }
-port-linker-forward = { path = "crates/port-linker-forward" }
-port-linker-agent-build = { path = "crates/port-linker-agent-build" }
-port-linker-agent-embed = { path = "crates/port-linker-agent-embed" }
+proto = { path = "crates/proto" }
+scanner = { path = "crates/scanner" }
+ssh = { path = "crates/ssh" }
+notify = { path = "crates/notify" }
+forward = { path = "crates/forward" }
+agent-build = { path = "crates/agent-build" }
+agent-embed = { path = "crates/agent-embed" }
 
 [profile.release]
 lto = true
 codegen-units = 1
 strip = true
 
-# Heavily optimized profile for target-agent - minimal binary size for SSH transfer
+# Heavily optimized profile for agent - minimal binary size for SSH transfer
 # Based on release but with aggressive size optimizations
-[profile.target-agent-release]
+[profile.agent-release]
 inherits = "release"
 opt-level = "z"           # Optimize for size
 lto = true                # Link-time optimization

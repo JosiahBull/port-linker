@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Measure target-agent binary size for optimization benchmarking.
+# Measure agent binary size for optimization benchmarking.
 #
 # Usage:
 #   ./scripts/measure-agent-size.sh
@@ -11,8 +11,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 TARGET="aarch64-apple-darwin"
-PROFILE="target-agent-release"
-PACKAGE="target-agent"
+PROFILE="agent-release"
+PACKAGE="agent"
 BUILD_TARGET_DIR="$WORKSPACE_ROOT/target/measure-build"
 
 # Ensure rust-src is installed on nightly
@@ -21,7 +21,7 @@ if ! rustup +nightly component list --installed 2>/dev/null | grep -q rust-src; 
     rustup +nightly component add rust-src
 fi
 
-echo "=== Building target-agent for $TARGET ==="
+echo "=== Building agent for $TARGET ==="
 echo "  Profile: $PROFILE"
 echo ""
 

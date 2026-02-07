@@ -1,8 +1,8 @@
 use crate::error::Result;
-use port_linker_forward::{AgentSession, ForwardManager};
-use port_linker_notify::{NotificationEvent, Notifier};
-use port_linker_proto::ScanFlags;
-use port_linker_ssh::{RemotePort, Scanner, SshClient};
+use forward::{AgentSession, ForwardManager};
+use notify::{NotificationEvent, Notifier};
+use proto::ScanFlags;
+use ssh::{RemotePort, Scanner, SshClient};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::interval;
@@ -193,7 +193,7 @@ impl Monitor {
                 self.manager.set_agent_session(session);
             }
             Err(e) => {
-                debug!("Failed to recover target agent: {} - using SSH scanner fallback", e);
+                debug!("Failed to recover agent: {} - using SSH scanner fallback", e);
             }
         }
     }

@@ -8,10 +8,10 @@ license.workspace = true
 
 [dependencies]
 # Library crates
-port-linker-ssh = { path = "../port-linker-ssh" }
-port-linker-forward = { path = "../port-linker-forward" }
-port-linker-notify = { path = "../port-linker-notify" }
-port-linker-proto.workspace = true
+ssh = { path = "../ssh" }
+forward = { path = "../forward" }
+notify = { path = "../notify" }
+proto.workspace = true
 
 # Async runtime
 tokio.workspace = true

@@ -1,0 +1,18 @@
+[package]
+name = "notify"
+version.workspace = true
+edition.workspace = true
+description = "Desktop notifications and port mapping for port-linker"
+repository.workspace = true
+license.workspace = true
+
+[dependencies]
+proto.workspace = true
+assets = { path = "../assets" }
+notify-rust.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+dirs.workspace = true
+
+[lints]
+workspace = true

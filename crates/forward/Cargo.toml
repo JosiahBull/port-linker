@@ -1,0 +1,21 @@
+[package]
+name = "forward"
+version.workspace = true
+edition.workspace = true
+description = "TCP and UDP tunnel management for port-linker"
+repository.workspace = true
+license.workspace = true
+
+[dependencies]
+proto.workspace = true
+ssh = { path = "../ssh" }
+notify = { path = "../notify" }
+agent-embed = { path = "../agent-embed" }
+scanner = { path = "../scanner" }
+russh.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

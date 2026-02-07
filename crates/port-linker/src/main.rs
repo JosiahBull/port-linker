@@ -5,9 +5,9 @@ mod monitor;
 use clap::Parser;
 use cli::{Cli, LogFormat};
 use monitor::Monitor;
-use port_linker_forward::{AgentSession, ForwardManager};
-use port_linker_notify::{Notifier, PortMapping};
-use port_linker_ssh::SshClient;
+use forward::{AgentSession, ForwardManager};
+use notify::{Notifier, PortMapping};
+use ssh::SshClient;
 use std::io::Write;
 use std::sync::Arc;
 use std::time::Duration;
@@ -131,7 +131,7 @@ fn init_logging(cli: &Cli) {
 
 #[instrument(name = "run", skip(cli), fields(host = %cli.host, protocol = ?cli.protocol))]
 async fn run(cli: Cli) -> error::Result<()> {
-    let parsed_host = port_linker_ssh::ParsedHost::parse(&cli.host);
+    let parsed_host = ssh::ParsedHost::parse(&cli.host);
 
     info!(
         "port-linker v{} - Connecting to {}",
@@ -164,7 +164,7 @@ async fn run(cli: Cli) -> error::Result<()> {
         excluded_ports,
     );
 
-    // Deploy target-agent and create agent session
+    // Deploy agent and create agent session
     match AgentSession::deploy_and_start(&client).await {
         Ok(session) => {
             info!("Target agent deployed successfully");
@@ -172,7 +172,7 @@ async fn run(cli: Cli) -> error::Result<()> {
         }
         Err(e) => {
             warn!(
-                "Failed to deploy target agent: {} - falling back to SSH-based scanning",
+                "Failed to deploy agent: {} - falling back to SSH-based scanning",
                 e
             );
         }

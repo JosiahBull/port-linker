@@ -44,6 +44,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "agent"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "proto",
+ "scanner",
+ "tracing",
+ "tracing-core",
+]
+
+[[package]]
+name = "agent-build"
+version = "0.1.0"
+
+[[package]]
+name = "agent-embed"
+version = "0.1.0"
+dependencies = [
+ "agent-build",
+]
+
+[[package]]
 name = "aho-corasick"
 version = "1.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -169,6 +191,13 @@ dependencies = [
  "predicates-core",
  "predicates-tree",
  "wait-timeout",
+]
+
+[[package]]
+name = "assets"
+version = "0.1.0"
+dependencies = [
+ "resvg",
 ]
 
 [[package]]
@@ -1274,6 +1303,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
 dependencies = [
  "percent-encoding",
+]
+
+[[package]]
+name = "forward"
+version = "0.1.0"
+dependencies = [
+ "agent-embed",
+ "notify",
+ "proto",
+ "russh",
+ "scanner",
+ "ssh",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -3059,6 +3103,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "notify"
+version = "0.1.0"
+dependencies = [
+ "assets",
+ "dirs",
+ "notify-rust",
+ "proto",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
 name = "notify-rust"
 version = "4.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3543,93 +3599,18 @@ version = "0.1.0"
 dependencies = [
  "assert_cmd",
  "clap",
+ "forward",
  "insta",
  "libc",
+ "notify",
  "ntest",
- "port-linker-forward",
- "port-linker-notify",
- "port-linker-proto",
- "port-linker-ssh",
+ "proto",
+ "ssh",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
  "tracing-subscriber",
  "wait-timeout",
-]
-
-[[package]]
-name = "port-linker-agent-build"
-version = "0.1.0"
-
-[[package]]
-name = "port-linker-agent-embed"
-version = "0.1.0"
-dependencies = [
- "port-linker-agent-build",
-]
-
-[[package]]
-name = "port-linker-assets"
-version = "0.1.0"
-dependencies = [
- "resvg",
-]
-
-[[package]]
-name = "port-linker-forward"
-version = "0.1.0"
-dependencies = [
- "port-linker-agent-embed",
- "port-linker-notify",
- "port-linker-proto",
- "port-linker-ssh",
- "port-scanner",
- "russh",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "port-linker-notify"
-version = "0.1.0"
-dependencies = [
- "dirs",
- "notify-rust",
- "port-linker-assets",
- "port-linker-proto",
- "thiserror 2.0.18",
- "tracing",
-]
-
-[[package]]
-name = "port-linker-proto"
-version = "0.1.0"
-
-[[package]]
-name = "port-linker-ssh"
-version = "0.1.0"
-dependencies = [
- "base64",
- "dialoguer",
- "dirs",
- "port-linker-proto",
- "port-scanner",
- "russh",
- "shellexpand",
- "ssh2-config-rs",
- "sysinfo",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "whoami",
-]
-
-[[package]]
-name = "port-scanner"
-version = "0.1.0"
-dependencies = [
- "port-linker-proto",
 ]
 
 [[package]]
@@ -3755,6 +3736,10 @@ checksum = "962200e2d7d551451297d9fdce85138374019ada198e30ea9ede38034e27604c"
 dependencies = [
  "parking_lot",
 ]
+
+[[package]]
+name = "proto"
+version = "0.1.0"
 
 [[package]]
 name = "quick-error"
@@ -4301,6 +4286,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "scanner"
+version = "0.1.0"
+dependencies = [
+ "proto",
+]
+
+[[package]]
 name = "schannel"
 version = "0.1.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4632,6 +4624,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "ssh"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "dialoguer",
+ "dirs",
+ "proto",
+ "russh",
+ "scanner",
+ "shellexpand",
+ "ssh2-config-rs",
+ "sysinfo",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "whoami",
+]
+
+[[package]]
 name = "ssh-cipher"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4773,17 +4784,6 @@ dependencies = [
  "objc2-core-foundation",
  "objc2-io-kit",
  "windows 0.62.2",
-]
-
-[[package]]
-name = "target-agent"
-version = "0.1.0"
-dependencies = [
- "libc",
- "port-linker-proto",
- "port-scanner",
- "tracing",
- "tracing-core",
 ]
 
 [[package]]

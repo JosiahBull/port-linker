@@ -97,7 +97,7 @@ fn get_ssh_control_socket() -> &'static PathBuf {
 // ============================================================================
 // PRE-TEST CLEANUP
 // ============================================================================
-// Kills orphaned target-agent and socat processes from previous test runs.
+// Kills orphaned agent and socat processes from previous test runs.
 // Without this, successive test runs degrade as zombie processes accumulate
 // in the Docker container, consuming SSH slots and ports.
 
@@ -108,7 +108,7 @@ static TEST_INIT: OnceLock<()> = OnceLock::new();
 ///
 /// When a test times out (via ntest), `stop_port_linker` never runs, leaving:
 /// - Local port-linker processes bound to forwarded ports
-/// - Remote target-agent processes consuming SSH slots
+/// - Remote agent processes consuming SSH slots
 ///
 /// This function kills both. It matches test port-linker instances by their
 /// `testuser@localhost` argument (which is unique to E2E tests) to avoid
@@ -123,8 +123,8 @@ fn init_test_env() {
         let _ = std::process::Command::new("pkill")
             .args(["-9", "-f", "port-linker.*testuser@localhost"])
             .status();
-        // Kill orphaned remote target-agent processes
-        let _ = ssh_exec("pkill -9 target-agent 2>/dev/null; true");
+        // Kill orphaned remote agent processes
+        let _ = ssh_exec("pkill -9 -f '/tmp/port-linker-agent' 2>/dev/null; true");
         // Let ports release after killing processes
         std::thread::sleep(Duration::from_millis(500));
     });
@@ -233,9 +233,9 @@ pub const DOCKER_TCP_PORT_POSTGRES: u16 = 5432;
 /// Note: Port 9999 is bound to 127.0.0.1, used only for localhost-bound test
 pub const DOCKER_UDP_PORT_ECHO_LOCALHOST: u16 = 9999;
 
-/// Virtual port used as a lock key for tests that kill all remote agents (`pkill target-agent`)
+/// Virtual port used as a lock key for tests that kill all remote agents (`pkill -f port-linker-agent`)
 /// or depend on agent stability during long idle periods. Tests holding this lock are
-/// serialized to prevent `pkill target-agent` from breaking concurrent tests' agents.
+/// serialized to prevent `pkill -f port-linker-agent` from breaking concurrent tests' agents.
 pub const AGENT_STABILITY_LOCK: u16 = 1;
 
 /// Get healthcheck wait time from environment variable or use default.

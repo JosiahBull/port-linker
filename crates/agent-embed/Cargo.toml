@@ -1,0 +1,15 @@
+[package]
+name = "agent-embed"
+version.workspace = true
+edition.workspace = true
+description = "Embedded agent binaries for port-linker"
+repository.workspace = true
+license.workspace = true
+
+[dependencies]
+
+[build-dependencies]
+agent-build = { path = "../agent-build" }
+
+[lints]
+workspace = true
