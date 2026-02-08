@@ -7,7 +7,7 @@ description = "Logo and asset generation for port-linker"
 [dependencies]
 
 [build-dependencies]
-resvg = "0.45"
+resvg = "0.46"
 
 [lints]
 workspace = true
