@@ -18,6 +18,11 @@ pub struct TunnelHandle {
 
 impl TunnelHandle {
     pub fn shutdown(self) {
+        #[allow(
+            clippy::let_underscore_must_use,
+            dropping_copy_types,
+            reason = "receiver may be dropped; nothing to do on send failure"
+        )]
         let _ = self.shutdown_tx.send(());
     }
 }
@@ -82,7 +87,7 @@ impl TcpTunnel {
                         match result {
                             Ok((stream, addr)) => {
                                 debug!("New TCP connection from {} for port {}", addr, local_port);
-                                let ssh_handle = ssh_handle.clone();
+                                let ssh_handle = Arc::clone(&ssh_handle);
                                 let bind_addr = bind_address.clone();
 
                                 tokio::spawn(async move {
@@ -135,7 +140,7 @@ impl TcpTunnel {
         let (mut local_read, mut local_write) = local_stream.split();
 
         // Create a stream from the channel
-        let mut local_buf = vec![0u8; 32768];
+        let mut local_buf = vec![0_u8; 32768];
 
         loop {
             tokio::select! {
@@ -144,7 +149,7 @@ impl TcpTunnel {
                     match result {
                         Ok(0) => {
                             debug!("Local connection closed");
-                            let _ = channel.eof().await;
+                            drop(channel.eof().await);
                             break;
                         }
                         Ok(n) => {
@@ -167,7 +172,7 @@ impl TcpTunnel {
                                 break;
                             }
                         }
-                        Some(russh::ChannelMsg::Eof) | Some(russh::ChannelMsg::Close) | None => {
+                        Some(russh::ChannelMsg::Eof | russh::ChannelMsg::Close) | None => {
                             debug!("Channel closed");
                             break;
                         }

@@ -29,7 +29,7 @@ pub fn kill_process(proc_info: &ProcessInfo) -> Result<()> {
 
     let pid = Pid::from_u32(proc_info.pid);
 
-    if let Some(process) = sys.process(pid) {
+    if sys.process(pid).is_some() {
         // Try SIGTERM first via kill command
         let term_result = std::process::Command::new("kill")
             .args(["-TERM", &proc_info.pid.to_string()])
@@ -37,7 +37,9 @@ pub fn kill_process(proc_info: &ProcessInfo) -> Result<()> {
 
         if term_result.is_err() {
             warn!("SIGTERM failed, trying SIGKILL");
-            process.kill();
+            if let Some(process) = sys.process(pid) {
+                process.kill();
+            }
         }
 
         // Wait a moment for process to exit
@@ -54,13 +56,13 @@ pub fn kill_process(proc_info: &ProcessInfo) -> Result<()> {
         }
 
         info!("Process {} killed", proc_info.pid);
-        Ok(())
     } else {
         // Process might have already exited
         warn!(
             "Process {} not found (may have already exited)",
             proc_info.pid
         );
-        Ok(())
     }
+
+    Ok(())
 }

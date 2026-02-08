@@ -18,7 +18,7 @@ pub struct Monitor {
 }
 
 impl Monitor {
-    pub fn new(
+    pub const fn new(
         client: Arc<SshClient>,
         manager: ForwardManager,
         notifier: Arc<Notifier>,
@@ -59,7 +59,7 @@ impl Monitor {
 
                             // Check if connection is still alive
                             if !self.client.is_connected().await {
-                                self.notifier.notify_event(NotificationEvent::ConnectionLost).await;
+                                self.notifier.notify_event(NotificationEvent::ConnectionLost);
 
                                 // Attempt reconnection with exponential backoff
                                 loop {
@@ -68,7 +68,7 @@ impl Monitor {
 
                                     if self.client.is_connected().await {
                                         info!("Connection restored");
-                                        self.notifier.notify_event(NotificationEvent::ConnectionRestored).await;
+                                        self.notifier.notify_event(NotificationEvent::ConnectionRestored);
 
                                         // Update manager with handle
                                         self.manager.update_ssh_handle(

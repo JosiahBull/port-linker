@@ -70,8 +70,12 @@ fn run() -> io::Result<()> {
     );
 
     let scanner: Option<Box<dyn PortScanner>> = pick_scanner(&platform);
-    if let Some(ref s) = scanner {
-        agent_debug!("Using scanner: {}", s.name());
+    #[allow(
+        clippy::branches_sharing_code,
+        reason = "branches differ when agent-tracing feature is enabled"
+    )]
+    if let Some(ref _s) = scanner {
+        agent_debug!("Using scanner: {}", _s.name());
     } else {
         agent_debug!("No suitable scanner found");
     }
@@ -93,12 +97,12 @@ fn run() -> io::Result<()> {
     // Track last healthcheck time
     let mut last_healthcheck = Instant::now();
 
-    // Stats for debug builds
-    #[cfg(debug_assertions)]
+    // Stats for debug builds (only used when agent-tracing is also enabled)
+    #[cfg(all(debug_assertions, feature = "agent-tracing"))]
     let mut packets_forwarded: u64 = 0;
-    #[cfg(debug_assertions)]
+    #[cfg(all(debug_assertions, feature = "agent-tracing"))]
     let mut packets_received: u64 = 0;
-    #[cfg(debug_assertions)]
+    #[cfg(all(debug_assertions, feature = "agent-tracing"))]
     let mut pings_received: u64 = 0;
 
     loop {
@@ -124,14 +128,14 @@ fn run() -> io::Result<()> {
                     match message {
                         Message::Udp(packet) => {
                             handle_udp_packet(&packet, &mut udp_sockets);
-                            #[cfg(debug_assertions)]
+                            #[cfg(all(debug_assertions, feature = "agent-tracing"))]
                             {
                                 packets_forwarded += 1;
                             }
                         }
                         Message::Ping(value) => {
                             last_healthcheck = Instant::now();
-                            #[cfg(debug_assertions)]
+                            #[cfg(all(debug_assertions, feature = "agent-tracing"))]
                             {
                                 pings_received += 1;
                             }
@@ -191,7 +195,7 @@ fn run() -> io::Result<()> {
                 match state.socket.recv_from(&mut recv_buf) {
                     Ok((n, _src)) => {
                         agent_trace!("Received UDP response on port {} ({} bytes)", port, n);
-                        #[cfg(debug_assertions)]
+                        #[cfg(all(debug_assertions, feature = "agent-tracing"))]
                         {
                             packets_received += 1;
                         }
@@ -287,8 +291,8 @@ fn handle_scan_request(
     if flags.tcp {
         match scanner.scan(proto::Protocol::Tcp) {
             Ok(tcp_ports) => ports.extend(tcp_ports),
-            Err(e) => {
-                agent_warn!("TCP scan error: {}", e);
+            Err(_e) => {
+                agent_warn!("TCP scan error: {}", _e);
             }
         }
     }
@@ -296,8 +300,8 @@ fn handle_scan_request(
     if flags.udp {
         match scanner.scan(proto::Protocol::Udp) {
             Ok(udp_ports) => ports.extend(udp_ports),
-            Err(e) => {
-                agent_warn!("UDP scan error: {}", e);
+            Err(_e) => {
+                agent_warn!("UDP scan error: {}", _e);
             }
         }
     }

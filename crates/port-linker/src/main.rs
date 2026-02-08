@@ -62,10 +62,10 @@ fn init_logging(cli: &Cli) {
         base_filter
     } else {
         base_filter
-            .add_directive("russh=info".parse().unwrap())
-            .add_directive("russh_keys=info".parse().unwrap())
-            .add_directive("internal_russh_forked_ssh_key=info".parse().unwrap())
-            .add_directive("ssh_key=info".parse().unwrap())
+            .add_directive("russh=info".parse().expect("valid directive"))
+            .add_directive("russh_keys=info".parse().expect("valid directive"))
+            .add_directive("internal_russh_forked_ssh_key=info".parse().expect("valid directive"))
+            .add_directive("ssh_key=info".parse().expect("valid directive"))
     };
 
     // Always silence noisy HTTP crates unless explicitly enabled
@@ -78,10 +78,10 @@ fn init_logging(cli: &Cli) {
         filter
     } else {
         filter
-            .add_directive("hyper=info".parse().unwrap())
-            .add_directive("reqwest=info".parse().unwrap())
-            .add_directive("h2=info".parse().unwrap())
-            .add_directive("tower=info".parse().unwrap())
+            .add_directive("hyper=info".parse().expect("valid directive"))
+            .add_directive("reqwest=info".parse().expect("valid directive"))
+            .add_directive("h2=info".parse().expect("valid directive"))
+            .add_directive("tower=info".parse().expect("valid directive"))
     };
 
     let use_color = cli.color.should_enable();
@@ -158,7 +158,7 @@ async fn run(cli: Cli) -> error::Result<()> {
     let excluded_ports = cli.excluded_ports();
     let mut manager = ForwardManager::new(
         client.handle(),
-        notifier.clone(),
+        Arc::clone(&notifier),
         cli.auto_kill,
         cli.ports.clone(),
         excluded_ports,

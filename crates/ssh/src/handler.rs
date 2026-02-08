@@ -29,11 +29,12 @@ impl Handler for ClientHandler {
         &mut self,
         server_public_key: &PublicKey,
     ) -> impl std::future::Future<Output = Result<bool, Self::Error>> + Send {
-        let key = self.server_public_key.clone();
+        let key = Arc::clone(&self.server_public_key);
         let server_public_key = server_public_key.clone();
         async move {
             let mut lock = key.lock().await;
             *lock = Some(server_public_key);
+            drop(lock);
             // In production, you'd verify against known_hosts
             // For now, accept all keys (like ssh -o StrictHostKeyChecking=no)
             Ok(true)

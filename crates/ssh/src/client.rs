@@ -36,12 +36,12 @@ impl ParsedHost {
     /// Parse a host string in the format `[user@]host`.
     pub fn parse(host_str: &str) -> Self {
         if let Some((user, host)) = host_str.split_once('@') {
-            ParsedHost {
+            Self {
                 user: Some(user.to_string()),
                 host: host.to_string(),
             }
         } else {
-            ParsedHost {
+            Self {
                 user: None,
                 host: host_str.to_string(),
             }
@@ -175,7 +175,7 @@ impl SshClient {
     }
 
     pub fn handle(&self) -> Arc<Handle<ClientHandler>> {
-        self.handle.clone()
+        Arc::clone(&self.handle)
     }
 
     #[instrument(name = "ssh_exec", skip(self, command), fields(cmd_preview = %command.chars().take(50).collect::<String>()))]
@@ -199,7 +199,7 @@ impl SshClient {
                 Some(russh::ChannelMsg::ExtendedData { data, .. }) => {
                     output.extend_from_slice(&data);
                 }
-                Some(russh::ChannelMsg::Eof) | Some(russh::ChannelMsg::Close) | None => {
+                Some(russh::ChannelMsg::Eof | russh::ChannelMsg::Close) | None => {
                     break;
                 }
                 _ => {}

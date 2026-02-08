@@ -62,31 +62,31 @@ pub enum NotificationEvent {
 impl NotificationEvent {
     pub fn title(&self) -> String {
         match self {
-            NotificationEvent::PortsForwarded { ports } => {
+            Self::PortsForwarded { ports } => {
                 if ports.len() == 1 {
                     "Port Forwarded".to_string()
                 } else {
                     format!("{} Ports Forwarded", ports.len())
                 }
             }
-            NotificationEvent::PortsRemoved { ports } => {
+            Self::PortsRemoved { ports } => {
                 if ports.len() == 1 {
                     "Port Removed".to_string()
                 } else {
                     format!("{} Ports Removed", ports.len())
                 }
             }
-            NotificationEvent::ConnectionLost => "Connection Lost".to_string(),
-            NotificationEvent::ConnectionRestored => "Connection Restored".to_string(),
-            NotificationEvent::ProcessKilled { .. } => "Process Killed".to_string(),
-            NotificationEvent::ConflictDetected { .. } => "Port Conflict".to_string(),
-            NotificationEvent::TunnelRestarted { .. } => "Tunnel Restarted".to_string(),
+            Self::ConnectionLost => "Connection Lost".to_string(),
+            Self::ConnectionRestored => "Connection Restored".to_string(),
+            Self::ProcessKilled { .. } => "Process Killed".to_string(),
+            Self::ConflictDetected { .. } => "Port Conflict".to_string(),
+            Self::TunnelRestarted { .. } => "Tunnel Restarted".to_string(),
         }
     }
 
     pub fn body(&self) -> String {
         match self {
-            NotificationEvent::PortsForwarded { ports } => {
+            Self::PortsForwarded { ports } => {
                 if let [p] = ports.as_slice() {
                     format!("{} :{} ({})", p.protocol, p.port, p.description)
                 } else {
@@ -97,7 +97,7 @@ impl NotificationEvent {
                         .join("\n")
                 }
             }
-            NotificationEvent::PortsRemoved { ports } => {
+            Self::PortsRemoved { ports } => {
                 if let [p] = ports.as_slice() {
                     format!("Port {} stopped", p.port)
                 } else {
@@ -111,24 +111,24 @@ impl NotificationEvent {
                     )
                 }
             }
-            NotificationEvent::ConnectionLost => "SSH connection lost. Reconnecting...".to_string(),
-            NotificationEvent::ConnectionRestored => "SSH connection restored.".to_string(),
-            NotificationEvent::ProcessKilled { port, process_name } => {
+            Self::ConnectionLost => "SSH connection lost. Reconnecting...".to_string(),
+            Self::ConnectionRestored => "SSH connection restored.".to_string(),
+            Self::ProcessKilled { port, process_name } => {
                 format!("Killed {} on port {}", process_name, port)
             }
-            NotificationEvent::ConflictDetected { port } => {
+            Self::ConflictDetected { port } => {
                 format!("Port {} is already in use locally", port)
             }
-            NotificationEvent::TunnelRestarted { port, protocol } => {
+            Self::TunnelRestarted { port, protocol } => {
                 format!("{} tunnel for port {} restarted", protocol, port)
             }
         }
     }
 
-    pub fn is_error(&self) -> bool {
+    pub const fn is_error(&self) -> bool {
         matches!(
             self,
-            NotificationEvent::ConnectionLost | NotificationEvent::ConflictDetected { .. }
+            Self::ConnectionLost | Self::ConflictDetected { .. }
         )
     }
 }
@@ -140,7 +140,7 @@ pub struct Notifier {
 }
 
 impl Notifier {
-    pub fn new(desktop_enabled: bool, sound_enabled: bool, mapping: Arc<PortMapping>) -> Self {
+    pub const fn new(desktop_enabled: bool, sound_enabled: bool, mapping: Arc<PortMapping>) -> Self {
         Self {
             desktop_enabled,
             sound_enabled,
@@ -152,7 +152,7 @@ impl Notifier {
         &self.mapping
     }
 
-    pub async fn notify(&self, event: NotificationEvent) {
+    pub fn notify(&self, event: NotificationEvent) {
         // Always log
         if event.is_error() {
             warn!("{}: {}", event.title(), event.body());
@@ -169,25 +169,24 @@ impl Notifier {
     }
 
     /// Notify about multiple ports being forwarded (batched)
-    pub async fn notify_ports_forwarded(&self, ports: Vec<PortInfo>) {
+    pub fn notify_ports_forwarded(&self, ports: Vec<PortInfo>) {
         if ports.is_empty() {
             return;
         }
-        self.notify(NotificationEvent::PortsForwarded { ports })
-            .await;
+        self.notify(NotificationEvent::PortsForwarded { ports });
     }
 
     /// Notify about multiple ports being removed (batched)
-    pub async fn notify_ports_removed(&self, ports: Vec<PortInfo>) {
+    pub fn notify_ports_removed(&self, ports: Vec<PortInfo>) {
         if ports.is_empty() {
             return;
         }
-        self.notify(NotificationEvent::PortsRemoved { ports }).await;
+        self.notify(NotificationEvent::PortsRemoved { ports });
     }
 
     /// Notify about a single event (connection, conflict, etc.)
-    pub async fn notify_event(&self, event: NotificationEvent) {
-        self.notify(event).await;
+    pub fn notify_event(&self, event: NotificationEvent) {
+        self.notify(event);
     }
 }
 

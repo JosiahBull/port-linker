@@ -19,7 +19,7 @@ pub struct TunnelKey {
 }
 
 impl TunnelKey {
-    pub fn new(port: u16, protocol: Protocol) -> Self {
+    pub const fn new(port: u16, protocol: Protocol) -> Self {
         Self { port, protocol }
     }
 }
@@ -61,12 +61,12 @@ impl ForwardManager {
     }
 
     /// Get a reference to the agent session.
-    pub fn agent_session(&self) -> Option<&AgentSession> {
+    pub const fn agent_session(&self) -> Option<&AgentSession> {
         self.agent_session.as_ref()
     }
 
     /// Get a mutable reference to the agent session (for health checking).
-    pub fn agent_session_mut(&mut self) -> Option<&mut AgentSession> {
+    pub const fn agent_session_mut(&mut self) -> Option<&mut AgentSession> {
         self.agent_session.as_mut()
     }
 
@@ -148,7 +148,7 @@ impl ForwardManager {
             }
         }
 
-        self.notifier.notify_ports_removed(removed_ports).await;
+        self.notifier.notify_ports_removed(removed_ports);
 
         // Add new tunnels
         let to_add: Vec<RemotePort> = desired_ports
@@ -184,7 +184,7 @@ impl ForwardManager {
             }
         }
 
-        self.notifier.notify_ports_forwarded(added_ports).await;
+        self.notifier.notify_ports_forwarded(added_ports);
 
         Ok(())
     }
@@ -244,7 +244,7 @@ impl ForwardManager {
             ));
         }
 
-        self.notifier.notify_ports_removed(removed_ports).await;
+        self.notifier.notify_ports_removed(removed_ports);
 
         // Add new forwards
         let to_add: Vec<RemotePort> = desired_ports
@@ -289,7 +289,7 @@ impl ForwardManager {
             }
         }
 
-        self.notifier.notify_ports_forwarded(added_ports).await;
+        self.notifier.notify_ports_forwarded(added_ports);
 
         Ok(())
     }
@@ -298,7 +298,7 @@ impl ForwardManager {
         let port = remote_port.port;
 
         let handle =
-            TcpTunnel::start(self.ssh_handle.clone(), remote_port.clone(), None).await?;
+            TcpTunnel::start(Arc::clone(&self.ssh_handle), remote_port.clone(), None).await?;
 
         self.tcp_tunnels.insert(port, handle);
         Ok(())
@@ -312,8 +312,7 @@ impl ForwardManager {
         protocol: Protocol,
     ) -> Result<Option<PortInfo>> {
         self.notifier
-            .notify_event(NotificationEvent::ConflictDetected { port })
-            .await;
+            .notify_event(NotificationEvent::ConflictDetected { port });
 
         if let Some(proc_info) = find_process_on_port(port) {
             let should_kill = if self.auto_kill {
@@ -335,8 +334,7 @@ impl ForwardManager {
                     .notify_event(NotificationEvent::ProcessKilled {
                         port,
                         process_name: proc_info.name.clone(),
-                    })
-                    .await;
+                    });
 
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 

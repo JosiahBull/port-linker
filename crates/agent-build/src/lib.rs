@@ -206,7 +206,7 @@ pub enum BuildResult {
 
 impl BuildResult {
     /// Check if the build was successful.
-    pub fn is_success(&self) -> bool {
+    pub const fn is_success(&self) -> bool {
         matches!(self, Self::Success { .. })
     }
 
@@ -244,7 +244,7 @@ impl ToolchainInfo {
     }
 
     /// Check if build-std optimization can be used.
-    pub fn can_use_build_std(&self) -> bool {
+    pub const fn can_use_build_std(&self) -> bool {
         self.has_nightly && self.has_rust_src
     }
 
@@ -300,7 +300,7 @@ pub fn build_for_targets(config: &BuildConfig) -> HashMap<String, BuildResult> {
     for target in &config.targets {
         let dest = config.out_dir.join(output_filename(&config.package, &target.triple));
         if !dest.exists() {
-            let _ = fs::write(&dest, b"");
+            drop(fs::write(&dest, b""));
         }
     }
 

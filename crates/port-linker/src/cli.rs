@@ -28,11 +28,11 @@ pub enum ColorMode {
 
 impl ColorMode {
     /// Determine if colors should be enabled based on mode and terminal detection.
-    pub fn should_enable(&self) -> bool {
+    pub fn should_enable(self) -> bool {
         match self {
-            ColorMode::Always => true,
-            ColorMode::Never => false,
-            ColorMode::Auto => std::io::IsTerminal::is_terminal(&std::io::stderr()),
+            Self::Always => true,
+            Self::Never => false,
+            Self::Auto => std::io::IsTerminal::is_terminal(&std::io::stderr()),
         }
     }
 }
@@ -143,12 +143,12 @@ impl Cli {
     }
 
     /// Check if TCP forwarding is enabled
-    pub fn forward_tcp(&self) -> bool {
+    pub const fn forward_tcp(&self) -> bool {
         matches!(self.protocol, ProtocolFilter::Tcp | ProtocolFilter::Both)
     }
 
     /// Check if UDP forwarding is enabled
-    pub fn forward_udp(&self) -> bool {
+    pub const fn forward_udp(&self) -> bool {
         matches!(self.protocol, ProtocolFilter::Udp | ProtocolFilter::Both)
     }
 }

@@ -75,12 +75,17 @@ impl std::fmt::Debug for UdpTunnelHandle {
 impl UdpTunnelHandle {
     /// Shutdown the UDP tunnel.
     pub fn shutdown(self) {
+        #[allow(
+            clippy::let_underscore_must_use,
+            dropping_copy_types,
+            reason = "receiver may be dropped; nothing to do on send failure"
+        )]
         let _ = self.shutdown_tx.send(());
     }
 
     /// Take the death notification receiver.
     /// This can be used to detect when the tunnel dies unexpectedly.
-    pub fn take_death_receiver(&mut self) -> Option<oneshot::Receiver<TunnelStopReason>> {
+    pub const fn take_death_receiver(&mut self) -> Option<oneshot::Receiver<TunnelStopReason>> {
         self.death_rx.take()
     }
 
@@ -104,7 +109,7 @@ pub struct UdpProxyManager {
 }
 
 impl UdpProxyManager {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             remote_proxy_path: None,
             remote_system: None,
@@ -158,7 +163,7 @@ impl UdpProxyManager {
     /// Clean up the deployed binary.
     pub async fn cleanup(&self, client: &SshClient) {
         if let Some(ref path) = self.remote_proxy_path {
-            let _ = client.exec(&format!("rm -f {}", path)).await;
+            drop(client.exec(&format!("rm -f {}", path)).await);
         }
     }
 }
@@ -244,7 +249,7 @@ async fn udp_forward_loop(
     let mut client_map: HashMap<u32, SocketAddr> = HashMap::new();
     let packet_id = AtomicU32::new(0);
 
-    let mut recv_buf = [0u8; 65535];
+    let mut recv_buf = [0_u8; 65535];
     let mut pending_from_remote = Vec::new();
 
     // Healthcheck state
@@ -265,7 +270,7 @@ async fn udp_forward_loop(
                 // Send ping
                 ping_counter = ping_counter.wrapping_add(1);
                 let ping = Message::Ping(ping_counter);
-                if let Err(e) = channel.data(&ping.encode()[..]).await {
+                if let Err(e) = channel.data(&*ping.encode()).await {
                     debug!("Failed to send healthcheck ping: {}", e);
                 }
             }
@@ -286,7 +291,7 @@ async fn udp_forward_loop(
 
                         // Send to remote via SSH channel using Message wrapper
                         let message = Message::Udp(packet);
-                        if let Err(e) = channel.data(&message.encode()[..]).await {
+                        if let Err(e) = channel.data(&*message.encode()).await {
                             debug!("Failed to send UDP packet to remote: {}", e);
                         }
                     }
@@ -338,7 +343,7 @@ async fn udp_forward_loop(
                             warn!("UDP proxy stderr: {}", msg.trim());
                         }
                     }
-                    Some(russh::ChannelMsg::Eof) | Some(russh::ChannelMsg::Close) | None => {
+                    Some(russh::ChannelMsg::Eof | russh::ChannelMsg::Close) | None => {
                         debug!("UDP proxy channel closed for port {}", remote_port);
                         break TunnelStopReason::ChannelClosed;
                     }
@@ -349,13 +354,18 @@ async fn udp_forward_loop(
             // Handle shutdown signal
             _ = &mut shutdown_rx => {
                 debug!("Shutting down UDP tunnel for port {}", local_port);
-                let _ = channel.close().await;
+                drop(channel.close().await);
                 break TunnelStopReason::Shutdown;
             }
         }
     };
 
     // Notify about tunnel death
+    #[allow(
+        clippy::let_underscore_must_use,
+        dropping_copy_types,
+        reason = "receiver may be dropped; nothing to do on send failure"
+    )]
     let _ = death_tx.send(stop_reason);
 }
 

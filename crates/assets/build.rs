@@ -5,17 +5,17 @@ use std::path::Path;
 fn main() {
     println!("cargo:rerun-if-changed=../../assets/logo.svg");
 
-    let out_dir = env::var("OUT_DIR").unwrap();
+    let out_dir = env::var("OUT_DIR").expect("OUT_DIR not set");
     generate_logos(&out_dir);
 }
 
 fn generate_logos(out_dir: &str) {
-    let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
+    let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
     let svg_path = Path::new(&manifest_dir)
         .parent()
-        .unwrap()
+        .expect("manifest dir has no parent")
         .parent()
-        .unwrap()
+        .expect("manifest dir has no grandparent")
         .join("assets/logo.svg");
 
     // Read and parse the SVG

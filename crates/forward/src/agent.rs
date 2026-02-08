@@ -176,12 +176,12 @@ impl AgentSession {
 
     /// Stop UDP forwarding for a port.
     pub async fn stop_udp_forward(&self, port: u16) {
-        let _ = self.cmd_tx.send(AgentCommand::StopUdpForward { port }).await;
+        drop(self.cmd_tx.send(AgentCommand::StopUdpForward { port }).await);
     }
 
     /// Shutdown the agent session.
     pub async fn shutdown(&self) {
-        let _ = self.cmd_tx.send(AgentCommand::Shutdown).await;
+        drop(self.cmd_tx.send(AgentCommand::Shutdown).await);
     }
 
     /// Check if the agent is still running.
@@ -200,9 +200,9 @@ impl AgentSession {
 
     /// Clean up the deployed binary.
     pub async fn cleanup(&self, client: &SshClient) {
-        let _ = client
+        drop(client
             .exec(&format!("rm -f {}", self.remote_agent_path))
-            .await;
+            .await);
     }
 }
 
@@ -254,7 +254,7 @@ async fn agent_loop(
 
                 ping_counter = ping_counter.wrapping_add(1);
                 let ping = Message::Ping(ping_counter);
-                if let Err(e) = channel.data(&ping.encode()[..]).await {
+                if let Err(e) = channel.data(&*ping.encode()).await {
                     debug!("Failed to send healthcheck ping: {}", e);
                 }
             }
@@ -264,11 +264,11 @@ async fn agent_loop(
                 match cmd {
                     Some(AgentCommand::Scan { flags, reply }) => {
                         let msg = Message::ScanRequest(flags);
-                        if let Err(e) = channel.data(&msg.encode()[..]).await {
-                            let _ = reply.send(Err(ForwardError::PortForward {
+                        if let Err(e) = channel.data(&*msg.encode()).await {
+                            drop(reply.send(Err(ForwardError::PortForward {
                                 port: 0,
                                 message: format!("Failed to send scan request: {}", e),
-                            }));
+                            })));
                         } else {
                             pending_scan_reply = Some(reply);
                         }
@@ -280,11 +280,11 @@ async fn agent_loop(
                             bind_addr_type: addr_type,
                             bind_addr: addr_bytes,
                         };
-                        if let Err(e) = channel.data(&msg.encode()[..]).await {
-                            let _ = reply.send(Err(ForwardError::PortForward {
+                        if let Err(e) = channel.data(&*msg.encode()).await {
+                            drop(reply.send(Err(ForwardError::PortForward {
                                 port,
                                 message: format!("Failed to send StartUdpForward: {}", e),
-                            }));
+                            })));
                             continue;
                         }
 
@@ -296,16 +296,16 @@ async fn agent_loop(
                                     client_map: HashMap::new(),
                                     packet_counter: AtomicU32::new(0),
                                 });
-                                let _ = reply.send(Ok(()));
+                                drop(reply.send(Ok(())));
                             }
                             Err(e) => {
                                 if e.kind() == std::io::ErrorKind::AddrInUse {
-                                    let _ = reply.send(Err(ForwardError::PortInUse(port)));
+                                    drop(reply.send(Err(ForwardError::PortInUse(port))));
                                 } else {
-                                    let _ = reply.send(Err(ForwardError::PortForward {
+                                    drop(reply.send(Err(ForwardError::PortForward {
                                         port,
                                         message: format!("Failed to bind local UDP socket: {}", e),
-                                    }));
+                                    })));
                                 }
                             }
                         }
@@ -313,10 +313,10 @@ async fn agent_loop(
                     Some(AgentCommand::StopUdpForward { port }) => {
                         local_udp.remove(&port);
                         let msg = Message::StopUdpForward(port);
-                        let _ = channel.data(&msg.encode()[..]).await;
+                        drop(channel.data(&*msg.encode()).await);
                     }
                     Some(AgentCommand::Shutdown) | None => {
-                        let _ = channel.close().await;
+                        drop(channel.close().await);
                         break AgentStopReason::Shutdown;
                     }
                 }
@@ -338,7 +338,7 @@ async fn agent_loop(
                                     if let Some(reply) = pending_scan_reply.take() {
                                         let ports = decode_remote_ports(&data)
                                             .unwrap_or_default();
-                                        let _ = reply.send(Ok(ports));
+                                        drop(reply.send(Ok(ports)));
                                     }
                                 }
                                 Message::Udp(packet) => {
@@ -376,7 +376,7 @@ async fn agent_loop(
                             }
                         }
                     }
-                    Some(russh::ChannelMsg::Eof) | Some(russh::ChannelMsg::Close) | None => {
+                    Some(russh::ChannelMsg::Eof | russh::ChannelMsg::Close) | None => {
                         debug!("Agent channel closed");
                         break AgentStopReason::ChannelClosed;
                     }
@@ -409,7 +409,7 @@ async fn agent_loop(
         for (port, id, _src, data) in ports_to_forward {
             let packet = UdpPacket::new(0, port, id, data);
             let msg = Message::Udp(packet);
-            if let Err(e) = channel.data(&msg.encode()[..]).await {
+            if let Err(e) = channel.data(&*msg.encode()).await {
                 debug!("Failed to send UDP packet to agent: {}", e);
             }
         }
@@ -417,11 +417,16 @@ async fn agent_loop(
 
     // If there was a pending scan reply, send an error
     if let Some(reply) = pending_scan_reply.take() {
-        let _ = reply.send(Err(ForwardError::PortForward {
+        drop(reply.send(Err(ForwardError::PortForward {
             port: 0,
             message: "Agent session terminated".to_string(),
-        }));
+        })));
     }
 
+    #[allow(
+        clippy::let_underscore_must_use,
+        dropping_copy_types,
+        reason = "receiver may be dropped; nothing to do on send failure"
+    )]
     let _ = death_tx.send(stop_reason);
 }

@@ -23,6 +23,7 @@
 /// Embedded agent binaries for different target architectures.
 /// Build.rs creates empty placeholder files for targets that fail to compile,
 /// so we can unconditionally include them and check length at runtime.
+#[allow(clippy::large_include_file, reason = "agent binaries are intentionally embedded")]
 mod binaries {
     /// Linux x86_64 (musl static binary)
     pub static X86_64_LINUX_MUSL: &[u8] = include_bytes!(concat!(
@@ -52,7 +53,7 @@ pub struct TargetInfo {
 
 impl TargetInfo {
     /// Create a new TargetInfo.
-    pub fn new(os: impl Into<String>, arch: impl Into<String>) -> Self {
+    pub fn new<S: Into<String>, T: Into<String>>(os: S, arch: T) -> Self {
         Self {
             os: os.into(),
             arch: arch.into(),
@@ -112,7 +113,7 @@ pub fn get_binary(target: &TargetInfo) -> Option<&'static [u8]> {
 ///
 /// Returns a list of (os, arch) tuples for all platforms that this crate
 /// can potentially provide binaries for.
-pub fn supported_targets() -> &'static [(&'static str, &'static str)] {
+pub const fn supported_targets() -> &'static [(&'static str, &'static str)] {
     &[
         ("linux", "x86_64"),
         ("linux", "aarch64"),

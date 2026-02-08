@@ -15,8 +15,12 @@ macro_rules! agent_info {
 
 /// Log at info level (no-op without agent-tracing).
 #[cfg(not(feature = "agent-tracing"))]
+#[allow(
+    unused_macros,
+    reason = "used only when agent-tracing feature is active"
+)]
 macro_rules! agent_info {
-    ($($t:tt)*) => { {} }
+    ($($t:tt)*) => {{}};
 }
 
 /// Log at debug level.
@@ -28,7 +32,7 @@ macro_rules! agent_debug {
 /// Log at debug level (no-op without agent-tracing).
 #[cfg(not(feature = "agent-tracing"))]
 macro_rules! agent_debug {
-    ($($t:tt)*) => { {} }
+    ($($t:tt)*) => {{}};
 }
 
 /// Log at warn level.
@@ -40,7 +44,7 @@ macro_rules! agent_warn {
 /// Log at warn level (no-op without agent-tracing).
 #[cfg(not(feature = "agent-tracing"))]
 macro_rules! agent_warn {
-    ($($t:tt)*) => { {} }
+    ($($t:tt)*) => {{}};
 }
 
 /// Log at error level. Always outputs to stderr even without `agent-tracing`
@@ -66,5 +70,5 @@ macro_rules! agent_trace {
 /// Log at trace level (no-op without agent-tracing + verbose).
 #[cfg(not(all(feature = "agent-tracing", feature = "verbose")))]
 macro_rules! agent_trace {
-    ($($t:tt)*) => { {} }
+    ($($t:tt)*) => {{}};
 }
