@@ -16,6 +16,7 @@ use std::time::Duration;
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{interval, Instant};
+use transport::{NegotiationMessage, TransportAccept, select_transport};
 use tracing::{debug, error, info, trace, warn};
 
 /// Interval between healthcheck pings sent to the remote agent.
@@ -232,6 +233,81 @@ async fn agent_loop(
     death_tx: oneshot::Sender<AgentStopReason>,
 ) {
     let mut pending_from_remote = Vec::new();
+
+    // --- Transport negotiation phase ---
+    debug!("Waiting for transport negotiation from agent");
+    let negotiation_deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let negotiated = loop {
+        match tokio::time::timeout_at(negotiation_deadline, channel.wait()).await {
+            Ok(Some(russh::ChannelMsg::Data { data })) => {
+                debug!(bytes = data.len(), total = pending_from_remote.len() + data.len(), "Read negotiation data from agent");
+                pending_from_remote.extend_from_slice(&data);
+
+                if NegotiationMessage::is_negotiation_type(&pending_from_remote) {
+                    if let Some((msg, consumed)) = NegotiationMessage::decode(&pending_from_remote) {
+                        if let NegotiationMessage::Offer(offer) = msg {
+                            debug!(consumed, "Decoded TransportOffer from agent");
+                            pending_from_remote.drain(..consumed);
+                            break Some(offer);
+                        }
+                        // Unexpected Accept from agent
+                        debug!("Received unexpected TransportAccept from agent");
+                        pending_from_remote.drain(..consumed);
+                        break None;
+                    }
+                    // Incomplete negotiation message, keep reading
+                } else if pending_from_remote.len() >= 5 {
+                    // First byte is not a negotiation type — old agent, no negotiation
+                    debug!("Agent sent proto::Message without negotiation (legacy agent)");
+                    break None;
+                }
+            }
+            Ok(Some(russh::ChannelMsg::ExtendedData { data, .. })) => {
+                // Agent stderr during negotiation, just log it
+                if let Ok(msg) = std::str::from_utf8(&data) {
+                    let trimmed = msg.trim();
+                    if !trimmed.is_empty() {
+                        warn!(source = "agent-stderr", "{}", trimmed);
+                    }
+                }
+            }
+            Ok(Some(russh::ChannelMsg::Eof | russh::ChannelMsg::Close)) | Ok(None) => {
+                debug!("Agent channel closed during negotiation");
+                break None;
+            }
+            Ok(Some(_)) => {}
+            Err(_) => {
+                debug!("Transport negotiation timed out after 2s, using SSH channel");
+                break None;
+            }
+        }
+    };
+
+    if let Some(offer) = negotiated {
+        info!(
+            count = offer.transports.len(),
+            version = offer.version,
+            "Agent offered transports",
+        );
+        for entry in &offer.transports {
+            debug!(kind = ?entry.kind, data_len = entry.data.len(), "  Available transport");
+        }
+
+        // Select best transport (stdio only for now — TCP/QUIC connectors not yet wired)
+        let selected = select_transport(&offer.transports, None);
+        info!(selected = ?selected, "Selected transport");
+
+        // Send TransportAccept back to agent
+        let accept = TransportAccept { kind: selected };
+        let encoded = accept.encode();
+        debug!(accept_bytes = encoded.len(), "Sending TransportAccept to agent");
+        if let Err(e) = channel.data(&*encoded).await {
+            warn!("Failed to send TransportAccept: {}", e);
+        }
+    } else {
+        debug!("No transport negotiation, using SSH channel directly");
+    }
+
     let mut pending_scan_reply: Option<oneshot::Sender<Result<Vec<RemotePort>>>> = None;
 
     // Local UDP sockets: port -> socket + client map

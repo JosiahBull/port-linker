@@ -8,6 +8,7 @@ license.workspace = true
 
 [dependencies]
 proto.workspace = true
+transport = { path = "../transport" }
 ssh = { path = "../ssh" }
 notify = { path = "../notify" }
 agent-embed = { path = "../agent-embed" }

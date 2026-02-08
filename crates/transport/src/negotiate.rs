@@ -43,6 +43,12 @@ where
     F: FnOnce(u16) -> Result<Box<dyn Transport>>,
     G: FnOnce(&[u8]) -> Result<Box<dyn Transport>>,
 {
+    debug!(
+        preferred = ?preferred,
+        timeout_ms = NEGOTIATION_TIMEOUT.as_millis() as u64,
+        "Starting transport negotiation",
+    );
+
     let start = Instant::now();
     let mut buf = Vec::new();
     let mut tmp = [0_u8; 4096];
@@ -56,9 +62,11 @@ where
 
         match reader.read(&mut tmp) {
             Ok(0) => {
+                debug!("Agent closed the channel before sending an offer");
                 return Err(TransportError::Closed);
             }
             Ok(n) => {
+                debug!(bytes = n, total = buf.len() + n, "Read negotiation data from agent");
                 buf.extend_from_slice(tmp.get(..n).unwrap_or(&[]));
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -78,9 +86,14 @@ where
         // Try to decode a negotiation message
         if NegotiationMessage::is_negotiation_type(&buf) {
             if let Some((message, consumed)) = NegotiationMessage::decode(&buf) {
+                debug!(consumed, "Decoded negotiation message from buffer");
                 match message {
                     NegotiationMessage::Offer(offer) => {
                         buf.drain(..consumed);
+                        debug!(
+                            elapsed_ms = start.elapsed().as_millis() as u64,
+                            "Received TransportOffer from agent",
+                        );
                         return handle_offer(
                             offer,
                             reader,
@@ -170,6 +183,11 @@ where
     // Send TransportAccept
     let accept = TransportAccept { kind: selected };
     let encoded = accept.encode();
+    debug!(
+        selected = ?selected,
+        accept_bytes = encoded.len(),
+        "Sending TransportAccept to agent",
+    );
     writer.write_all(&encoded).map_err(|e| {
         TransportError::Negotiation(format!("Failed to send TransportAccept: {}", e))
     })?;
@@ -193,6 +211,8 @@ where
                 let lo = *e.data.get(1)?;
                 Some(u16::from_be_bytes([hi, lo]))
             });
+
+            debug!(port = ?port, has_connector = tcp_connector.is_some(), "TCP transport details");
 
             if let (Some(port), Some(connector)) = (port, tcp_connector) {
                 match connector(port) {
@@ -219,6 +239,19 @@ where
                 .transports
                 .iter()
                 .find(|e| e.kind == TransportKind::Quic);
+
+            if let Some(entry) = &quic_entry {
+                if entry.data.len() >= 34 {
+                    let port = u16::from_be_bytes([entry.data[0], entry.data[1]]);
+                    debug!(
+                        port,
+                        fingerprint = ?&entry.data[2..10],
+                        "QUIC offer data (port + fingerprint prefix)",
+                    );
+                } else {
+                    debug!(data_len = entry.data.len(), "QUIC offer data too short (expected 34 bytes)");
+                }
+            }
 
             if let (Some(entry), Some(connector)) = (quic_entry, quic_connector) {
                 match connector(&entry.data) {
@@ -252,41 +285,57 @@ where
 /// - `Some(Stdio)`: always Stdio
 /// - `Some(Tcp)`: TCP if available, else Stdio
 /// - `Some(Quic)`: QUIC if available, else TCP, else Stdio
-fn select_transport(
+pub fn select_transport(
     available: &[TransportEntry],
     preferred: Option<TransportKind>,
 ) -> TransportKind {
     let has = |kind: TransportKind| available.iter().any(|e| e.kind == kind);
 
-    match preferred {
+    let has_tcp = has(TransportKind::Tcp);
+    let has_quic = has(TransportKind::Quic);
+
+    debug!(
+        preferred = ?preferred,
+        has_quic,
+        has_tcp,
+        "Selecting transport from available options",
+    );
+
+    let selected = match preferred {
         Some(TransportKind::Stdio) => TransportKind::Stdio,
         Some(TransportKind::Tcp) => {
-            if has(TransportKind::Tcp) {
+            if has_tcp {
                 TransportKind::Tcp
             } else {
+                debug!("Preferred TCP not available, falling back to Stdio");
                 TransportKind::Stdio
             }
         }
         Some(TransportKind::Quic) => {
-            if has(TransportKind::Quic) {
+            if has_quic {
                 TransportKind::Quic
-            } else if has(TransportKind::Tcp) {
+            } else if has_tcp {
+                debug!("Preferred QUIC not available, falling back to TCP");
                 TransportKind::Tcp
             } else {
+                debug!("Preferred QUIC not available, falling back to Stdio");
                 TransportKind::Stdio
             }
         }
         // Auto: best available (QUIC > TCP > Stdio)
         None => {
-            if has(TransportKind::Quic) {
+            if has_quic {
                 TransportKind::Quic
-            } else if has(TransportKind::Tcp) {
+            } else if has_tcp {
                 TransportKind::Tcp
             } else {
                 TransportKind::Stdio
             }
         }
-    }
+    };
+
+    debug!(selected = ?selected, "Transport selection complete");
+    selected
 }
 
 #[cfg(test)]

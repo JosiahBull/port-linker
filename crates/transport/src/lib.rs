@@ -18,10 +18,10 @@ pub mod tcp;
 pub mod types;
 
 pub use error::{Result, TransportError};
-pub use negotiate::{negotiate_transport, negotiate_transport_stdio};
+pub use negotiate::{negotiate_transport, negotiate_transport_stdio, select_transport};
 pub use stdio::StdioTransport;
 pub use tcp::TcpTransport;
-pub use types::{TransportAccept, TransportKind, TransportOffer};
+pub use types::{NegotiationMessage, TransportAccept, TransportEntry, TransportKind, TransportOffer};
 
 use proto::Message;
 use std::io::Write;

@@ -28,6 +28,7 @@ use std::io::{self, Read, Write};
 use std::net::UdpSocket;
 use std::os::unix::io::AsRawFd;
 use std::time::{Duration, Instant};
+use transport::{NegotiationMessage, TransportEntry, TransportKind, TransportOffer};
 
 /// Timeout after which the agent shuts down if no healthcheck is received.
 const HEALTHCHECK_TIMEOUT: Duration = Duration::from_secs(60);
@@ -82,13 +83,123 @@ fn run() -> io::Result<()> {
 
     // Set stdin to non-blocking
     set_nonblocking_stdin()?;
-    agent_debug!("Initialized, entering main loop");
 
     let mut stdin = io::stdin();
     let mut stdout = io::stdout();
 
     let mut read_buf = vec![0_u8; 65536];
     let mut pending_buf = Vec::with_capacity(65536);
+
+    // --- Transport negotiation ---
+    agent_debug!("Starting transport negotiation");
+    let mut offer_transports = vec![TransportEntry {
+        kind: TransportKind::Stdio,
+        data: vec![],
+    }];
+
+    // Probe TCP capability
+    match std::net::TcpListener::bind("127.0.0.1:0") {
+        Ok(listener) => {
+            if let Ok(addr) = listener.local_addr() {
+                let port = addr.port();
+                agent_debug!("TCP available on port {}", port);
+                offer_transports.push(TransportEntry {
+                    kind: TransportKind::Tcp,
+                    data: port.to_be_bytes().to_vec(),
+                });
+            }
+            drop(listener);
+        }
+        Err(_e) => {
+            agent_debug!("TCP not available: {}", _e);
+        }
+    }
+
+    // Probe QUIC/UDP capability
+    match std::net::UdpSocket::bind("0.0.0.0:0") {
+        Ok(sock) => {
+            if let Ok(addr) = sock.local_addr() {
+                let port = addr.port();
+                agent_debug!("UDP available on port {} (QUIC candidate)", port);
+                // QUIC offer data = port:2 BE + fingerprint:32
+                // For now just advertise the port; full QUIC setup would generate a cert
+                // and include the fingerprint. Since host doesn't have a QUIC connector
+                // yet, this just signals capability.
+                let mut data = port.to_be_bytes().to_vec();
+                data.extend_from_slice(&[0_u8; 32]); // placeholder fingerprint
+                offer_transports.push(TransportEntry {
+                    kind: TransportKind::Quic,
+                    data,
+                });
+            }
+            drop(sock);
+        }
+        Err(_e) => {
+            agent_debug!("UDP not available (no QUIC): {}", _e);
+        }
+    }
+
+    let offer = TransportOffer {
+        version: 1,
+        transports: offer_transports,
+    };
+    agent_debug!(
+        "Sending TransportOffer: {} transports (v{})",
+        offer.transports.len(),
+        offer.version
+    );
+    let encoded_offer = offer.encode();
+    stdout.write_all(&encoded_offer)?;
+    stdout.flush()?;
+
+    // Wait for TransportAccept from host (poll non-blocking stdin)
+    let accept_start = Instant::now();
+    let accept_timeout = Duration::from_secs(2);
+    let _selected_transport = loop {
+        if accept_start.elapsed() > accept_timeout {
+            agent_debug!("Transport negotiation timed out waiting for accept, falling back to stdio");
+            break TransportKind::Stdio;
+        }
+
+        match stdin.read(&mut read_buf) {
+            Ok(0) => {
+                agent_debug!("SSH channel closed during negotiation");
+                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "channel closed during negotiation"));
+            }
+            Ok(n) => {
+                pending_buf.extend_from_slice(read_buf.get(..n).unwrap_or(&[]));
+
+                if NegotiationMessage::is_negotiation_type(&pending_buf) {
+                    if let Some((msg, consumed)) = NegotiationMessage::decode(&pending_buf) {
+                        if let NegotiationMessage::Accept(accept) = msg {
+                            agent_debug!("Host selected transport: {:?}", accept.kind);
+                            pending_buf.drain(..consumed);
+                            break accept.kind;
+                        }
+                        // Unexpected Offer from host
+                        agent_debug!("Received unexpected TransportOffer from host");
+                        pending_buf.drain(..consumed);
+                        break TransportKind::Stdio;
+                    }
+                    // Incomplete, keep reading
+                } else if pending_buf.len() >= 5 {
+                    // Host sent a proto::Message instead of TransportAccept — legacy host
+                    agent_debug!("Host sent proto::Message without negotiation (legacy host)");
+                    break TransportKind::Stdio;
+                }
+            }
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(e) => {
+                agent_debug!("Read error during negotiation: {}", e);
+                return Err(e);
+            }
+        }
+    };
+    agent_debug!("Transport negotiation complete, selected: {:?}", selected_transport);
+
+    agent_debug!("Initialized, entering main loop");
     let mut recv_buf = [0_u8; 65535];
 
     // UDP forwarding sockets: port -> state

@@ -39,6 +39,7 @@ pub fn build_server_config(
     cert_der: Vec<u8>,
     key_der: Vec<u8>,
 ) -> Result<quinn_proto::ServerConfig, String> {
+    debug!("Building QUIC server TLS config");
     let cert = CertificateDer::from(cert_der);
     let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_der));
 
@@ -69,6 +70,10 @@ pub fn build_server_config(
 pub fn build_client_config(
     expected_fingerprint: [u8; 32],
 ) -> Result<quinn_proto::ClientConfig, String> {
+    debug!(
+        fingerprint_prefix = ?&expected_fingerprint[..8],
+        "Building QUIC client TLS config with fingerprint verification",
+    );
     let mut client_crypto = rustls::ClientConfig::builder()
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(FingerprintVerifier {
@@ -117,6 +122,10 @@ impl rustls::client::danger::ServerCertVerifier for FingerprintVerifier {
         let actual: &[u8] = fingerprint_digest.as_ref();
 
         if actual == self.expected.as_slice() {
+            debug!(
+                fingerprint_prefix = ?&self.expected[..8],
+                "QUIC server certificate fingerprint verified",
+            );
             Ok(rustls::client::danger::ServerCertVerified::assertion())
         } else {
             Err(rustls::Error::General(format!(
