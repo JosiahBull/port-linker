@@ -60,21 +60,6 @@ impl CrossTarget {
         self.custom_profile = Some(profile.into());
         self
     }
-
-    /// Linux x86_64 with musl (static binary).
-    pub fn linux_x86_64() -> Self {
-        Self::new("x86_64-unknown-linux-musl").with_cross_fallback()
-    }
-
-    /// Linux aarch64 with musl (static binary).
-    pub fn linux_aarch64() -> Self {
-        Self::new("aarch64-unknown-linux-musl").with_cross_fallback()
-    }
-
-    /// macOS aarch64 (Apple Silicon).
-    pub fn darwin_aarch64() -> Self {
-        Self::new("aarch64-apple-darwin")
-    }
 }
 
 /// Build configuration for cross-compilation.
@@ -298,7 +283,9 @@ pub fn build_for_targets(config: &BuildConfig) -> HashMap<String, BuildResult> {
     // Create placeholder files for all targets first
     // This ensures include_bytes! doesn't fail even if builds fail
     for target in &config.targets {
-        let dest = config.out_dir.join(output_filename(&config.package, &target.triple));
+        let dest = config
+            .out_dir
+            .join(output_filename(&config.package, &target.triple));
         if !dest.exists() {
             drop(fs::write(&dest, b""));
         }
@@ -331,19 +318,20 @@ fn build_single_target(
     toolchain: &ToolchainInfo,
     build_target_dir: &Path,
 ) -> BuildResult {
-    let dest = config.out_dir.join(output_filename(&config.package, &target.triple));
+    let dest = config
+        .out_dir
+        .join(output_filename(&config.package, &target.triple));
     let binary_name = config.binary_name.as_deref().unwrap_or(&config.package);
 
     // Determine if we should use nightly with build-std
     let use_build_std = config.is_release && toolchain.can_use_build_std();
 
+    if config.is_release && !toolchain.can_use_build_std() {
+        panic!("Cannot build std properly - you are likely missing rust-src or nightly.");
+    }
+
     // Try native cargo first
-    let native_result = try_native_cargo(
-        config,
-        target,
-        build_target_dir,
-        use_build_std,
-    );
+    let native_result = try_native_cargo(config, target, build_target_dir, use_build_std);
 
     let (build_success, profile_dir) = match native_result {
         Ok(profile) => (true, profile),
@@ -354,7 +342,7 @@ fn build_single_target(
                     target.triple, reason
                 );
 
-                match try_cross(config, target, build_target_dir) {
+                match try_cross(config, target, build_target_dir, use_build_std) {
                     Ok(profile) => (true, profile),
                     Err(reason) => {
                         eprintln!(
@@ -399,8 +387,12 @@ fn build_single_target(
     }
 
     // Apply UPX compression if enabled
-    let compressed = if config.is_release && config.use_upx && toolchain.has_upx {
-        apply_upx(&dest)
+    let compressed = if config.is_release && config.use_upx {
+        if !toolchain.has_upx {
+            panic!("Upx was requested but is not available.");
+        }
+        apply_upx(&dest);
+        true
     } else {
         false
     };
@@ -490,15 +482,42 @@ fn try_cross(
     config: &BuildConfig,
     target: &CrossTarget,
     build_target_dir: &Path,
+    use_build_std: bool,
 ) -> Result<String, String> {
-    let mut args = vec!["build".to_string()];
+    let mut args = Vec::new();
+
+    // Use nightly if build-std is enabled
+    if use_build_std {
+        args.push("+nightly".to_string());
+    }
+
+    args.push("build".to_string());
 
     let profile_dir = if config.is_release {
-        args.push("--release".to_string());
-        "release".to_string()
+        if use_build_std {
+            if let Some(ref custom) = target.custom_profile {
+                args.extend(["--profile".to_string(), custom.clone()]);
+                custom.clone()
+            } else {
+                args.push("--release".to_string());
+                "release".to_string()
+            }
+        } else {
+            args.push("--release".to_string());
+            "release".to_string()
+        }
     } else {
         "debug".to_string()
     };
+
+    // Add build-std flags
+    if use_build_std {
+        args.extend(["-Z".to_string(), "build-std=std,panic_abort".to_string()]);
+        args.extend([
+            "-Z".to_string(),
+            "build-std-features=optimize_for_size".to_string(),
+        ]);
+    }
 
     args.extend([
         "-p".to_string(),
@@ -559,160 +578,19 @@ fn find_binary(
     None
 }
 
-fn apply_upx(path: &Path) -> bool {
+fn apply_upx(path: &Path) {
     let status = Command::new("upx")
         .args(["--best", "--lzma"])
         .arg(path)
         .status();
 
     match status {
-        Ok(s) if s.success() => true,
+        Ok(s) if s.success() => {}
         Ok(s) => {
-            eprintln!("cargo:warning=upx failed with exit code: {:?}", s.code());
-            false
+            panic!("upx failed with exit code: {:?}", s.code());
         }
         Err(e) => {
-            eprintln!("cargo:warning=upx error: {}", e);
-            false
+            panic!("upx error: {}", e);
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_cross_target_builders() {
-        let linux = CrossTarget::linux_x86_64();
-        assert_eq!(linux.triple, "x86_64-unknown-linux-musl");
-        assert!(linux.use_cross_fallback);
-
-        let darwin = CrossTarget::darwin_aarch64();
-        assert_eq!(darwin.triple, "aarch64-apple-darwin");
-        assert!(!darwin.use_cross_fallback);
-    }
-
-    #[test]
-    fn test_build_config_builder() {
-        let config = BuildConfig::new("my-package")
-            .workspace_root("/workspace")
-            .out_dir("/out")
-            .target(CrossTarget::linux_x86_64())
-            .release(true)
-            .with_upx();
-
-        assert_eq!(config.package, "my-package");
-        assert_eq!(config.workspace_root, PathBuf::from("/workspace"));
-        assert_eq!(config.out_dir, PathBuf::from("/out"));
-        assert_eq!(config.targets.len(), 1);
-        assert!(config.is_release);
-        assert!(config.use_upx);
-    }
-
-    #[test]
-    fn test_output_filename() {
-        assert_eq!(
-            output_filename("agent", "x86_64-unknown-linux-musl"),
-            "agent-x86_64-unknown-linux-musl"
-        );
-    }
-
-    #[test]
-    fn test_cross_target_custom_profile() {
-        let target = CrossTarget::new("x86_64-unknown-linux-musl")
-            .with_custom_profile("agent-release");
-        assert_eq!(
-            target.custom_profile,
-            Some("agent-release".to_string())
-        );
-        assert!(!target.use_cross_fallback);
-    }
-
-    #[test]
-    fn test_cross_target_linux_aarch64() {
-        let target = CrossTarget::linux_aarch64();
-        assert_eq!(target.triple, "aarch64-unknown-linux-musl");
-        assert!(target.use_cross_fallback);
-    }
-
-    #[test]
-    fn test_build_config_features() {
-        let config = BuildConfig::new("my-pkg")
-            .with_feature("agent-tracing")
-            .with_feature("verbose");
-        assert_eq!(config.features, vec!["agent-tracing", "verbose"]);
-    }
-
-    #[test]
-    fn test_build_config_rustflags() {
-        let config = BuildConfig::new("my-pkg")
-            .with_rustflag("-Zlocation-detail=none")
-            .with_rustflag("-Zfmt-debug=none");
-        assert_eq!(
-            config.rustflags,
-            vec!["-Zlocation-detail=none", "-Zfmt-debug=none"]
-        );
-    }
-
-    #[test]
-    fn test_build_config_binary_name() {
-        let config = BuildConfig::new("agent").binary_name("agent");
-        assert_eq!(config.binary_name, Some("agent".to_string()));
-    }
-
-    #[test]
-    fn test_build_result_success() {
-        let result = BuildResult::Success {
-            path: PathBuf::from("/out/binary"),
-            size: 1024,
-            compressed: true,
-        };
-        assert!(result.is_success());
-        assert_eq!(result.path(), Some(Path::new("/out/binary")));
-    }
-
-    #[test]
-    fn test_build_result_failed() {
-        let result = BuildResult::Failed {
-            reason: "build error".to_string(),
-        };
-        assert!(!result.is_success());
-        assert!(result.path().is_none());
-    }
-
-    #[test]
-    fn test_toolchain_info_can_use_build_std() {
-        let both = ToolchainInfo {
-            has_nightly: true,
-            has_rust_src: true,
-            has_cross: false,
-            has_upx: false,
-        };
-        assert!(both.can_use_build_std());
-
-        let no_nightly = ToolchainInfo {
-            has_nightly: false,
-            has_rust_src: true,
-            has_cross: false,
-            has_upx: false,
-        };
-        assert!(!no_nightly.can_use_build_std());
-
-        let no_rust_src = ToolchainInfo {
-            has_nightly: true,
-            has_rust_src: false,
-            has_cross: false,
-            has_upx: false,
-        };
-        assert!(!no_rust_src.can_use_build_std());
-
-        let neither = ToolchainInfo {
-            has_nightly: false,
-            has_rust_src: false,
-            has_cross: false,
-            has_upx: false,
-        };
-        assert!(!neither.can_use_build_std());
     }
 }

@@ -11,9 +11,23 @@ pub mod mapping;
 pub use error::{NotifyError, Result};
 pub use mapping::PortMapping;
 
-use proto::Protocol;
-use std::sync::Arc;
+use std::{fmt::Display, sync::Arc};
 use tracing::{info, warn};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Protocol {
+    Udp,
+    Tcp,
+}
+
+impl Display for Protocol {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Protocol::Udp => write!(f, "udp"),
+            Protocol::Tcp => write!(f, "tcp"),
+        }
+    }
+}
 
 /// Information about a forwarded port
 #[derive(Debug, Clone)]
@@ -24,16 +38,7 @@ pub struct PortInfo {
 }
 
 impl PortInfo {
-    pub fn new(port: u16, process_name: Option<&str>, mapping: &PortMapping) -> Self {
-        let description = mapping.describe(port, process_name);
-        Self {
-            port,
-            description,
-            protocol: Protocol::Tcp,
-        }
-    }
-
-    pub fn new_with_protocol(
+    pub fn new(
         port: u16,
         process_name: Option<&str>,
         protocol: Protocol,
@@ -126,10 +131,7 @@ impl NotificationEvent {
     }
 
     pub const fn is_error(&self) -> bool {
-        matches!(
-            self,
-            Self::ConnectionLost | Self::ConflictDetected { .. }
-        )
+        matches!(self, Self::ConnectionLost | Self::ConflictDetected { .. })
     }
 }
 
@@ -140,7 +142,11 @@ pub struct Notifier {
 }
 
 impl Notifier {
-    pub const fn new(desktop_enabled: bool, sound_enabled: bool, mapping: Arc<PortMapping>) -> Self {
+    pub const fn new(
+        desktop_enabled: bool,
+        sound_enabled: bool,
+        mapping: Arc<PortMapping>,
+    ) -> Self {
         Self {
             desktop_enabled,
             sound_enabled,
@@ -205,7 +211,7 @@ mod tests {
     #[test]
     fn test_port_info_new() {
         let mapping = PortMapping::default();
-        let info = PortInfo::new(8080, Some("nginx"), &mapping);
+        let info = PortInfo::new(8080, Some("nginx"), Protocol::Tcp, &mapping);
         assert_eq!(info.port, 8080);
         assert_eq!(info.description, "nginx");
         assert_eq!(info.protocol, Protocol::Tcp);
@@ -214,7 +220,7 @@ mod tests {
     #[test]
     fn test_port_info_new_with_protocol() {
         let mapping = PortMapping::default();
-        let info = PortInfo::new_with_protocol(53, Some("dnsmasq"), Protocol::Udp, &mapping);
+        let info = PortInfo::new(53, Some("dnsmasq"), Protocol::Udp, &mapping);
         assert_eq!(info.port, 53);
         assert_eq!(info.description, "dnsmasq");
         assert_eq!(info.protocol, Protocol::Udp);
@@ -223,7 +229,7 @@ mod tests {
     #[test]
     fn test_port_info_no_process_name() {
         let mapping = PortMapping::default();
-        let info = PortInfo::new(9999, None, &mapping);
+        let info = PortInfo::new(9999, None, Protocol::Tcp, &mapping);
         assert_eq!(info.description, "port 9999");
     }
 

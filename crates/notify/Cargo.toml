@@ -7,12 +7,8 @@ repository.workspace = true
 license.workspace = true
 
 [dependencies]
-proto.workspace = true
 assets = { workspace = true }
 notify-rust.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
 dirs.workspace = true
-
-[lints]
-workspace = true
