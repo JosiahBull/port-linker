@@ -8,7 +8,7 @@ license.workspace = true
 
 [dependencies]
 proto.workspace = true
-scanner = { path = "../scanner" }
+scanner = { workspace = true }
 russh.workspace = true
 ssh2-config-rs.workspace = true
 tokio.workspace = true
@@ -19,7 +19,7 @@ dirs.workspace = true
 shellexpand.workspace = true
 whoami.workspace = true
 sysinfo.workspace = true
-base64 = "0.22"
+base64 = { workspace = true }
 
 [lints]
 workspace = true

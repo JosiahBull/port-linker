@@ -9,7 +9,9 @@
 //!
 //! # Protocol
 //!
-//! Communication uses the proto crate's Message format over stdin/stdout.
+//! Communication uses the proto crate's Message format. The transport layer is
+//! negotiated at startup: Stdio (SSH exec channel), TCP (SSH direct-tcpip), or
+//! QUIC (direct UDP, bypassing SSH for data).
 //!
 //! # Healthcheck
 //!
@@ -25,13 +27,21 @@ use proto::{Message, ScanFlags, UdpPacket};
 use scanner::{encode_remote_ports, pick_scanner, Platform, PortScanner};
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
-use std::net::UdpSocket;
+use std::net::{TcpListener, UdpSocket};
 use std::os::unix::io::AsRawFd;
 use std::time::{Duration, Instant};
-use transport::{NegotiationMessage, TransportEntry, TransportKind, TransportOffer};
+use transport::{
+    NegotiationMessage, StdioTransport, TcpTransport, Transport, TransportEntry, TransportKind,
+    TransportOffer,
+};
 
 /// Timeout after which the agent shuts down if no healthcheck is received.
 const HEALTHCHECK_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Timeout for accepting a connection after transport negotiation.
+/// Kept short so that failed QUIC/TCP attempts fall back quickly to stdio.
+/// Real QUIC/TCP connections complete in <100ms; 1s is generous.
+const TRANSPORT_ACCEPT_TIMEOUT: Duration = Duration::from_secs(1);
 
 fn main() {
     #[cfg(feature = "agent-tracing")]
@@ -97,8 +107,9 @@ fn run() -> io::Result<()> {
         data: vec![],
     }];
 
-    // Probe TCP capability
-    match std::net::TcpListener::bind("127.0.0.1:0") {
+    // Probe TCP capability — keep listener alive for later use
+    let mut tcp_listener: Option<TcpListener> = None;
+    match TcpListener::bind("127.0.0.1:0") {
         Ok(listener) => {
             if let Ok(addr) = listener.local_addr() {
                 let port = addr.port();
@@ -107,35 +118,46 @@ fn run() -> io::Result<()> {
                     kind: TransportKind::Tcp,
                     data: port.to_be_bytes().to_vec(),
                 });
+                tcp_listener = Some(listener);
             }
-            drop(listener);
         }
         Err(_e) => {
             agent_debug!("TCP not available: {}", _e);
         }
     }
 
-    // Probe QUIC/UDP capability
-    match std::net::UdpSocket::bind("0.0.0.0:0") {
-        Ok(sock) => {
-            if let Ok(addr) = sock.local_addr() {
-                let port = addr.port();
-                agent_debug!("UDP available on port {} (QUIC candidate)", port);
-                // QUIC offer data = port:2 BE + fingerprint:32
-                // For now just advertise the port; full QUIC setup would generate a cert
-                // and include the fingerprint. Since host doesn't have a QUIC connector
-                // yet, this just signals capability.
-                let mut data = port.to_be_bytes().to_vec();
-                data.extend_from_slice(&[0_u8; 32]); // placeholder fingerprint
-                offer_transports.push(TransportEntry {
-                    kind: TransportKind::Quic,
-                    data,
-                });
+    // Probe QUIC/UDP capability — generate real cert and set up server endpoint
+    let mut quic_server: Option<(
+        transport::quic::QuicEndpoint,
+        UdpSocket,
+        std::net::SocketAddr,
+    )> = None;
+    match transport::quic_config::generate_self_signed_cert() {
+        Ok((cert_der, key_der, fingerprint)) => {
+            match transport::quic_config::build_server_config(cert_der, key_der) {
+                Ok(server_config) => match transport::quic::setup_quic_server(server_config) {
+                    Ok((endpoint, socket, addr)) => {
+                        let port = addr.port();
+                        agent_debug!("QUIC server listening on port {}", port);
+                        let mut data = port.to_be_bytes().to_vec();
+                        data.extend_from_slice(&fingerprint);
+                        offer_transports.push(TransportEntry {
+                            kind: TransportKind::Quic,
+                            data,
+                        });
+                        quic_server = Some((endpoint, socket, addr));
+                    }
+                    Err(_e) => {
+                        agent_debug!("QUIC server setup failed: {}", _e);
+                    }
+                },
+                Err(_e) => {
+                    agent_debug!("QUIC server config failed: {}", _e);
+                }
             }
-            drop(sock);
         }
         Err(_e) => {
-            agent_debug!("UDP not available (no QUIC): {}", _e);
+            agent_debug!("QUIC cert generation failed: {}", _e);
         }
     }
 
@@ -155,16 +177,21 @@ fn run() -> io::Result<()> {
     // Wait for TransportAccept from host (poll non-blocking stdin)
     let accept_start = Instant::now();
     let accept_timeout = Duration::from_secs(2);
-    let _selected_transport = loop {
+    let selected_transport = loop {
         if accept_start.elapsed() > accept_timeout {
-            agent_debug!("Transport negotiation timed out waiting for accept, falling back to stdio");
+            agent_debug!(
+                "Transport negotiation timed out waiting for accept, falling back to stdio"
+            );
             break TransportKind::Stdio;
         }
 
         match stdin.read(&mut read_buf) {
             Ok(0) => {
                 agent_debug!("SSH channel closed during negotiation");
-                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "channel closed during negotiation"));
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "channel closed during negotiation",
+                ));
             }
             Ok(n) => {
                 pending_buf.extend_from_slice(read_buf.get(..n).unwrap_or(&[]));
@@ -184,7 +211,9 @@ fn run() -> io::Result<()> {
                     // Incomplete, keep reading
                 } else if pending_buf.len() >= 5 {
                     // Host sent a proto::Message instead of TransportAccept — legacy host
-                    agent_debug!("Host sent proto::Message without negotiation (legacy host)");
+                    agent_debug!(
+                        "Host sent proto::Message without negotiation (legacy host)"
+                    );
                     break TransportKind::Stdio;
                 }
             }
@@ -197,9 +226,112 @@ fn run() -> io::Result<()> {
             }
         }
     };
-    agent_debug!("Transport negotiation complete, selected: {:?}", selected_transport);
+    agent_debug!(
+        "Transport negotiation complete, selected: {:?}",
+        selected_transport
+    );
 
-    agent_debug!("Initialized, entering main loop");
+    // --- Create the transport based on negotiation result ---
+    let mut transport: Box<dyn Transport> = match selected_transport {
+        TransportKind::Stdio => {
+            // Drop resources we won't use
+            drop(tcp_listener.take());
+            drop(quic_server.take());
+
+            let t = StdioTransport::with_leftover(stdin, stdout, pending_buf);
+            Box::new(t)
+        }
+        TransportKind::Tcp => {
+            drop(quic_server.take());
+
+            if let Some(listener) = tcp_listener.take() {
+                agent_debug!("Waiting for TCP connection from host...");
+                listener.set_nonblocking(false).map_err(|e| {
+                    io::Error::new(e.kind(), format!("Failed to set TCP listener blocking: {}", e))
+                })?;
+
+                // Set a timeout so we don't block forever
+                let timeout_result = unsafe {
+                    let tv = libc::timeval {
+                        tv_sec: TRANSPORT_ACCEPT_TIMEOUT.as_secs() as libc::time_t,
+                        tv_usec: 0,
+                    };
+                    libc::setsockopt(
+                        listener.as_raw_fd(),
+                        libc::SOL_SOCKET,
+                        libc::SO_RCVTIMEO,
+                        &tv as *const libc::timeval as *const libc::c_void,
+                        std::mem::size_of::<libc::timeval>() as libc::socklen_t,
+                    )
+                };
+                if timeout_result != 0 {
+                    agent_warn!("Failed to set TCP accept timeout, falling back to stdio");
+                    let t = StdioTransport::with_leftover(stdin, stdout, pending_buf);
+                    Box::new(t)
+                } else {
+                    match listener.accept() {
+                        Ok((stream, _addr)) => {
+                            agent_debug!("TCP connection accepted from {}", _addr);
+                            stream.set_nonblocking(true).map_err(|e| {
+                                io::Error::new(
+                                    e.kind(),
+                                    format!("Failed to set TCP stream nonblocking: {}", e),
+                                )
+                            })?;
+                            let read_half = stream.try_clone().map_err(|e| {
+                                io::Error::new(
+                                    e.kind(),
+                                    format!("Failed to clone TCP stream: {}", e),
+                                )
+                            })?;
+                            let write_half = stream;
+                            Box::new(TcpTransport::new(read_half, write_half))
+                        }
+                        Err(_e) => {
+                            agent_warn!("TCP accept failed: {}, falling back to stdio", _e);
+                            let t = StdioTransport::with_leftover(stdin, stdout, pending_buf);
+                            Box::new(t)
+                        }
+                    }
+                }
+            } else {
+                agent_warn!("TCP selected but no listener available, falling back to stdio");
+                let t = StdioTransport::with_leftover(stdin, stdout, pending_buf);
+                Box::new(t)
+            }
+        }
+        TransportKind::Quic => {
+            drop(tcp_listener.take());
+
+            if let Some((endpoint, socket, _addr)) = quic_server.take() {
+                agent_debug!("Waiting for QUIC connection from host...");
+                match transport::quic::accept_quic_server(
+                    endpoint,
+                    socket,
+                    TRANSPORT_ACCEPT_TIMEOUT,
+                ) {
+                    Ok(qt) => {
+                        agent_debug!("QUIC transport connected");
+                        Box::new(qt)
+                    }
+                    Err(_e) => {
+                        agent_warn!("QUIC accept failed: {}, falling back to stdio", _e);
+                        let t = StdioTransport::with_leftover(stdin, stdout, pending_buf);
+                        Box::new(t)
+                    }
+                }
+            } else {
+                agent_warn!("QUIC selected but no server available, falling back to stdio");
+                let t = StdioTransport::with_leftover(stdin, stdout, pending_buf);
+                Box::new(t)
+            }
+        }
+    };
+
+    agent_debug!(
+        "Initialized with {} transport, entering main loop",
+        transport.transport_name()
+    );
     let mut recv_buf = [0_u8; 65535];
 
     // UDP forwarding sockets: port -> state
@@ -224,18 +356,16 @@ fn run() -> io::Result<()> {
             break;
         }
 
-        // Try to read from stdin (SSH channel)
-        match stdin.read(&mut read_buf) {
-            Ok(0) => {
-                agent_debug!("SSH channel closed (EOF)");
-                break;
-            }
-            Ok(n) => {
-                agent_trace!("Read {} bytes from SSH channel", n);
-                pending_buf.extend_from_slice(read_buf.get(..n).unwrap_or(&[]));
+        // Drive transport state machine (QUIC timers/retransmits; no-op for others)
+        if let Err(_e) = transport.poll() {
+            agent_debug!("Transport poll error: {}", _e);
+            break;
+        }
 
-                // Process all complete messages in the buffer
-                while let Some((message, consumed)) = Message::decode(&pending_buf) {
+        // Try to receive messages from the transport
+        loop {
+            match transport.try_recv() {
+                Ok(Some(message)) => {
                     match message {
                         Message::Udp(packet) => {
                             handle_udp_packet(&packet, &mut udp_sockets);
@@ -252,17 +382,15 @@ fn run() -> io::Result<()> {
                             }
                             agent_trace!("Received ping {}, sending pong", value);
                             let pong = Message::Pong(value);
-                            let encoded = pong.encode();
-                            if let Err(e) = stdout.write_all(&encoded) {
-                                agent_error!("Failed to send Pong: {}", e);
+                            if let Err(_e) = transport.send(&pong) {
+                                agent_error!("Failed to send Pong: {}", _e);
                             }
-                            drop(stdout.flush());
                         }
                         Message::Pong(_) => {
                             agent_debug!("Received unexpected Pong message");
                         }
                         Message::ScanRequest(flags) => {
-                            handle_scan_request(flags, scanner.as_deref(), &mut stdout);
+                            handle_scan_request(flags, scanner.as_deref(), &mut *transport);
                         }
                         Message::StartUdpForward {
                             port,
@@ -282,21 +410,18 @@ fn run() -> io::Result<()> {
                         }
                     }
 
-                    pending_buf.drain(..consumed);
-
                     // Size-triggered flush inside message decode loop (burst protection)
                     #[cfg(feature = "agent-tracing")]
                     if subscriber::should_flush() {
-                        subscriber::flush_log_buffer(&mut stdout);
+                        flush_logs_via_transport(&mut *transport);
                     }
                 }
-            }
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                // No data available, continue
-            }
-            Err(e) => {
-                agent_error!("Stdin read error: {}", e);
-                return Err(e);
+                Ok(None) => break,
+                Err(_e) => {
+                    agent_debug!("Transport recv error: {}", _e);
+                    // Transport closed or errored — exit main loop
+                    return Ok(());
+                }
             }
         }
 
@@ -318,11 +443,9 @@ fn run() -> io::Result<()> {
                             recv_buf.get(..n).unwrap_or(&[]).to_vec(),
                         );
                         let message = Message::Udp(response);
-                        let encoded = message.encode();
-                        if let Err(e) = stdout.write_all(&encoded) {
-                            agent_error!("Failed to send UDP response: {}", e);
+                        if let Err(_e) = transport.send(&message) {
+                            agent_error!("Failed to send UDP response: {}", _e);
                         }
-                        drop(stdout.flush());
                     }
                     Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => break,
                     Err(ref e) if e.kind() == io::ErrorKind::TimedOut => break,
@@ -336,7 +459,7 @@ fn run() -> io::Result<()> {
 
         // Flush log buffer at end of each main loop iteration
         #[cfg(feature = "agent-tracing")]
-        subscriber::flush_log_buffer(&mut stdout);
+        flush_logs_via_transport(&mut *transport);
 
         // Small sleep to avoid busy-waiting
         std::thread::sleep(Duration::from_micros(100));
@@ -355,9 +478,23 @@ fn run() -> io::Result<()> {
 
     // Final flush before exit
     #[cfg(feature = "agent-tracing")]
-    subscriber::flush_log_buffer(&mut stdout);
+    flush_logs_via_transport(&mut *transport);
+
+    drop(transport.close());
 
     Ok(())
+}
+
+/// Drain buffered log events and send them via the transport.
+#[cfg(feature = "agent-tracing")]
+fn flush_logs_via_transport(transport: &mut dyn Transport) {
+    let events = subscriber::drain_log_buffer();
+    if events.is_empty() {
+        return;
+    }
+    let msg = Message::LogBatch(events);
+    // Best-effort send; if transport is broken we can't log about it
+    drop(transport.send(&msg));
 }
 
 fn handle_udp_packet(packet: &UdpPacket, udp_sockets: &mut HashMap<u16, UdpForwardState>) {
@@ -381,18 +518,15 @@ fn handle_udp_packet(packet: &UdpPacket, udp_sockets: &mut HashMap<u16, UdpForwa
 fn handle_scan_request(
     flags: ScanFlags,
     scanner: Option<&dyn PortScanner>,
-    stdout: &mut io::Stdout,
+    transport: &mut dyn Transport,
 ) {
     agent_debug!("Scan request: tcp={}, udp={}", flags.tcp, flags.udp);
 
     let scanner = match scanner {
         Some(s) => s,
         None => {
-            // Send empty response
             let resp = Message::ScanResponse(encode_remote_ports(&[]));
-            let encoded = resp.encode();
-            drop(stdout.write_all(&encoded));
-            drop(stdout.flush());
+            drop(transport.send(&resp));
             return;
         }
     };
@@ -421,11 +555,9 @@ fn handle_scan_request(
 
     let data = encode_remote_ports(&ports);
     let resp = Message::ScanResponse(data);
-    let encoded = resp.encode();
-    if let Err(e) = stdout.write_all(&encoded) {
-        agent_error!("Failed to send scan response: {}", e);
+    if let Err(_e) = transport.send(&resp) {
+        agent_error!("Failed to send scan response: {}", _e);
     }
-    drop(stdout.flush());
 }
 
 fn handle_start_udp_forward(

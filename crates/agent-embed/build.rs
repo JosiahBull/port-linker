@@ -8,6 +8,7 @@ fn main() {
         "../agent/src",
         "../proto/src",
         "../scanner/src",
+        "../transport/src",
     ]);
 
     // Configure the build

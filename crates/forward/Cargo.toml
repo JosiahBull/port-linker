@@ -8,11 +8,11 @@ license.workspace = true
 
 [dependencies]
 proto.workspace = true
-transport = { path = "../transport" }
-ssh = { path = "../ssh" }
-notify = { path = "../notify" }
-agent-embed = { path = "../agent-embed" }
-scanner = { path = "../scanner" }
+transport = { workspace = true }
+ssh = { workspace = true }
+notify = { workspace = true }
+agent-embed = { workspace = true }
+scanner = { workspace = true }
 russh.workspace = true
 tokio.workspace = true
 tracing.workspace = true

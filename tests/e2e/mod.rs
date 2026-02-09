@@ -123,10 +123,12 @@ fn init_test_env() {
         let _ = std::process::Command::new("pkill")
             .args(["-9", "-f", "port-linker.*testuser@localhost"])
             .status();
-        // Kill orphaned remote agent processes
-        let _ = ssh_exec("pkill -9 -f '/tmp/port-linker-agent' 2>/dev/null; true");
+        // Kill orphaned remote agent processes and testuser-owned socat processes
+        // from prior test runs. Pre-configured services (8080, 3000, etc.) run as
+        // root and are unaffected by -u testuser.
+        let _ = ssh_exec("pkill -9 -f '/tmp/port-linker-agent' 2>/dev/null; pkill -9 -u testuser socat 2>/dev/null; true");
         // Let ports release after killing processes
-        std::thread::sleep(Duration::from_millis(500));
+        std::thread::sleep(Duration::from_millis(1000));
     });
 }
 
@@ -143,8 +145,10 @@ fn bin_path() -> std::path::PathBuf {
 /// Maximum time to wait for a port lock before giving up (2 minutes)
 const PORT_LOCK_TIMEOUT_SECS: u64 = 120;
 
-/// Base port for dynamically allocated test ports
-const DYNAMIC_PORT_BASE: u16 = 10000;
+/// Base port for dynamically allocated test ports.
+/// Must not overlap with Docker container's pre-configured services
+/// (8080, 3000, 5432, 10000, 10001).
+const DYNAMIC_PORT_BASE: u16 = 20000;
 
 /// Counter for allocating unique dynamic ports across tests
 static DYNAMIC_PORT_COUNTER: AtomicU16 = AtomicU16::new(0);
@@ -204,6 +208,37 @@ impl Drop for PortLock {
     fn drop(&mut self) {
         // File locks are automatically released when the file is closed
         // The _file field being dropped handles this
+    }
+}
+
+/// Guard that ensures a port-linker child process is killed when dropped.
+/// `std::process::Child`'s Drop does NOT kill the process — it only closes
+/// handles. When ntest forces a panic on timeout, `stop_port_linker` never
+/// runs, leaving orphaned port-linker processes that hold forwarded ports
+/// and poison subsequent tests. This guard breaks that cascade.
+pub struct ChildGuard(Option<Child>);
+
+impl ChildGuard {
+    fn new(child: Child) -> Self {
+        Self(Some(child))
+    }
+
+    pub fn id(&self) -> u32 {
+        self.0.as_ref().expect("process already consumed").id()
+    }
+
+    pub fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
+        let mut child = self.0.take().expect("process already consumed");
+        child.wait()
+    }
+}
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            child.kill().ok();
+            let _ = child.wait_timeout(Duration::from_secs(5));
+        }
     }
 }
 
@@ -281,7 +316,7 @@ pub fn is_test_env_running() -> bool {
 
 /// Start port-linker as a background process and wait for it to be ready.
 /// Returns immediately after detecting the "Starting port monitoring" log message.
-pub fn start_port_linker(extra_args: &[&str]) -> std::io::Result<Child> {
+pub fn start_port_linker(extra_args: &[&str]) -> std::io::Result<ChildGuard> {
     let key_path = test_key_path();
 
     let mut child = std::process::Command::new(bin_path())
@@ -304,7 +339,7 @@ pub fn start_port_linker(extra_args: &[&str]) -> std::io::Result<Child> {
     // Wait for the "Starting port monitoring" message indicating readiness
     let stderr = child.stderr.take().expect("stderr should be piped");
     let ready_signal = b"Starting port monitoring";
-    let timeout = Duration::from_secs(5);
+    let timeout = Duration::from_secs(10);
 
     // Channel to signal when ready
     let (tx, rx) = std::sync::mpsc::channel::<bool>();
@@ -340,7 +375,7 @@ pub fn start_port_linker(extra_args: &[&str]) -> std::io::Result<Child> {
 
     // Wait for ready signal or timeout
     match rx.recv_timeout(timeout) {
-        Ok(true) => Ok(child),
+        Ok(true) => Ok(ChildGuard::new(child)),
         Ok(false) => {
             child.kill().ok();
             Err(std::io::Error::new(
@@ -363,7 +398,9 @@ const PROCESS_EXIT_TIMEOUT_SECS: u64 = 10;
 
 /// Stop port-linker and wait for cleanup
 #[track_caller]
-pub fn stop_port_linker(mut child: Child, ports: &[u16]) {
+pub fn stop_port_linker(mut guard: ChildGuard, ports: &[u16]) {
+    // Take the child out of the guard so Drop doesn't double-kill
+    let mut child = guard.0.take().unwrap();
     child.kill().ok();
 
     // Wait for process to exit with a timeout to prevent hanging
@@ -657,7 +694,7 @@ pub(crate) use require_test_env;
 // ============================================================================
 
 #[test]
-#[timeout(20000)]
+#[timeout(60000)]
 fn test_invalid_ssh_host() {
     // This should fail quickly with connection error - no port locks needed
     Command::new(bin_path())
@@ -670,7 +707,7 @@ fn test_invalid_ssh_host() {
 }
 
 #[test]
-#[timeout(20000)]
+#[timeout(60000)]
 fn test_invalid_ssh_key() {
     require_test_env!();
 

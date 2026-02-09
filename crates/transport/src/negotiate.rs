@@ -281,7 +281,7 @@ where
 /// Select the best transport from the available options, respecting user preference.
 ///
 /// Preference logic:
-/// - `None` (Auto): QUIC > TCP > Stdio (best available)
+/// - `None` (Auto): TCP > Stdio (best available; QUIC requires explicit opt-in)
 /// - `Some(Stdio)`: always Stdio
 /// - `Some(Tcp)`: TCP if available, else Stdio
 /// - `Some(Quic)`: QUIC if available, else TCP, else Stdio
@@ -322,11 +322,13 @@ pub fn select_transport(
                 TransportKind::Stdio
             }
         }
-        // Auto: best available (QUIC > TCP > Stdio)
+        // Auto: best available (TCP > Stdio).
+        // QUIC is not auto-selected because the quinn-proto data path has
+        // unresolved issues (stream data stops flowing while the QUIC-level
+        // connection stays alive, causing healthcheck timeouts). Use
+        // `Some(TransportKind::Quic)` to explicitly opt in.
         None => {
-            if has_quic {
-                TransportKind::Quic
-            } else if has_tcp {
+            if has_tcp {
                 TransportKind::Tcp
             } else {
                 TransportKind::Stdio
@@ -389,7 +391,9 @@ mod tests {
     }
 
     #[test]
-    fn test_select_transport_auto_prefers_quic_over_tcp() {
+    fn test_select_transport_auto_prefers_tcp_over_quic() {
+        // Auto mode selects TCP even when QUIC is available (QUIC requires
+        // explicit opt-in due to unresolved stream reliability issues).
         let entries = vec![
             TransportEntry {
                 kind: TransportKind::Stdio,
@@ -404,7 +408,7 @@ mod tests {
                 data: vec![0; 34],
             },
         ];
-        assert_eq!(select_transport(&entries, None), TransportKind::Quic);
+        assert_eq!(select_transport(&entries, None), TransportKind::Tcp);
     }
 
     #[test]

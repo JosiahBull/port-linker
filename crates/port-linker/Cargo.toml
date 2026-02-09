@@ -8,9 +8,9 @@ license.workspace = true
 
 [dependencies]
 # Library crates
-ssh = { path = "../ssh" }
-forward = { path = "../forward" }
-notify = { path = "../notify" }
+ssh = { workspace = true }
+forward = { workspace = true }
+notify = { workspace = true }
 proto.workspace = true
 
 # Async runtime
@@ -27,11 +27,11 @@ tracing-subscriber.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
-assert_cmd = "2"
-insta = "1"
-libc = "0.2"
-ntest = "0.9"
-wait-timeout = "0.2"
+assert_cmd = { workspace = true }
+insta = { workspace = true }
+libc = { workspace = true }
+ntest = { workspace = true }
+wait-timeout = { workspace = true }
 
 [package.metadata.binstall]
 pkg-url = "{ repo }/releases/download/v{ version }/port-linker-{ target }{ archive-suffix }"

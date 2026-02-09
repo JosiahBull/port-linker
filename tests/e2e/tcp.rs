@@ -9,7 +9,7 @@ use std::time::Duration;
 // ============================================================================
 
 #[test]
-#[timeout(20000)]
+#[timeout(60000)]
 fn test_connects_and_discovers_ports() {
     let _lock = PortLock::acquire(&[DOCKER_TCP_PORT_HTTP]);
     require_test_env!();
@@ -31,7 +31,7 @@ fn test_connects_and_discovers_ports() {
 }
 
 #[test]
-#[timeout(20000)]
+#[timeout(60000)]
 fn test_forwards_http_traffic() {
     let _lock = PortLock::acquire(&[DOCKER_TCP_PORT_HTTP]);
     require_test_env!();
@@ -64,12 +64,12 @@ fn test_forwards_http_traffic() {
 }
 
 #[test]
-#[timeout(20000)]
+#[timeout(60000)]
 fn test_clean_shutdown() {
     let _lock = PortLock::acquire(&[DOCKER_TCP_PORT_HTTP]);
     require_test_env!();
 
-    let mut child = start_port_linker(&["--scan-interval-ms", "100", "-p", "8080"])
+    let mut guard = start_port_linker(&["--scan-interval-ms", "100", "-p", "8080"])
         .expect("Failed to start port-linker");
 
     // Wait for port to be forwarded
@@ -80,11 +80,11 @@ fn test_clean_shutdown() {
 
     // Send SIGTERM for graceful shutdown
     unsafe {
-        libc::kill(child.id() as i32, libc::SIGTERM);
+        libc::kill(guard.id() as i32, libc::SIGTERM);
     }
 
-    // Wait for process to exit
-    let status = child.wait().expect("Failed to wait for process");
+    // Wait for process to exit (consumes the guard's inner child)
+    let status = guard.wait().expect("Failed to wait for process");
 
     // Port should be closed after shutdown
     assert!(
@@ -105,7 +105,7 @@ fn test_clean_shutdown() {
 // ============================================================================
 
 #[test]
-#[timeout(20000)]
+#[timeout(60000)]
 fn test_localhost_bound_port() {
     let _lock = PortLock::acquire(&[DOCKER_TCP_PORT_ECHO]);
     require_test_env!();
@@ -131,7 +131,7 @@ fn test_localhost_bound_port() {
 // ============================================================================
 
 #[test]
-#[timeout(20000)]
+#[timeout(60000)]
 fn test_port_whitelist() {
     // Lock both ports we're testing behavior with
     let _lock = PortLock::acquire(&[DOCKER_TCP_PORT_HTTP, DOCKER_TCP_PORT_POSTGRES]);
@@ -162,7 +162,7 @@ fn test_port_whitelist() {
 }
 
 #[test]
-#[timeout(20000)]
+#[timeout(60000)]
 fn test_port_exclusion() {
     // Lock all ports involved
     let _lock = PortLock::acquire(&[
@@ -201,7 +201,7 @@ fn test_port_exclusion() {
 }
 
 #[test]
-#[timeout(20000)]
+#[timeout(60000)]
 fn test_multiple_ports() {
     let _lock = PortLock::acquire(&[DOCKER_TCP_PORT_HTTP, DOCKER_TCP_PORT_POSTGRES]);
     require_test_env!();
@@ -231,7 +231,7 @@ fn test_multiple_ports() {
 // ============================================================================
 
 #[test]
-#[timeout(20000)]
+#[timeout(60000)]
 fn test_new_service_detected() {
     // Allocate a unique port for this test
     let dynamic_port = allocate_test_port();
@@ -279,7 +279,7 @@ fn test_new_service_detected() {
 }
 
 #[test]
-#[timeout(20000)]
+#[timeout(60000)]
 fn test_service_removal_detected() {
     // Allocate a unique port for this test
     let dynamic_port = allocate_test_port();

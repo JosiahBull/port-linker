@@ -158,6 +158,14 @@ pub fn flush_log_buffer(writer: &mut dyn Write) -> usize {
     count
 }
 
+/// Drain the log buffer and return the events without writing them anywhere.
+///
+/// This is used when the main loop sends logs via a `Transport` instead of raw stdout.
+pub fn drain_log_buffer() -> Vec<LogEvent> {
+    LOG_BUFFER_BYTES.with(|bytes| bytes.set(0));
+    LOG_BUFFER.with(|buf| buf.borrow_mut().drain(..).collect())
+}
+
 /// Returns `true` when the buffer exceeds the flush threshold.
 pub fn should_flush() -> bool {
     LOG_BUFFER_BYTES.with(|bytes| bytes.get() >= FLUSH_THRESHOLD_BYTES)

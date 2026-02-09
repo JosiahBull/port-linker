@@ -9,7 +9,7 @@ license.workspace = true
 [dependencies]
 
 [build-dependencies]
-agent-build = { path = "../agent-build" }
+agent-build = { workspace = true }
 
 [lints]
 workspace = true

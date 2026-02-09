@@ -36,6 +36,16 @@ impl<R: Read + Send, W: Write + Send> StdioTransport<R, W> {
             tmp_buf: vec![0_u8; 65536],
         }
     }
+
+    /// Create a new `StdioTransport` with pre-buffered leftover bytes from negotiation.
+    pub fn with_leftover(reader: R, writer: W, leftover: Vec<u8>) -> Self {
+        Self {
+            reader,
+            writer,
+            read_buf: leftover,
+            tmp_buf: vec![0_u8; 65536],
+        }
+    }
 }
 
 impl<R: Read + Send, W: Write + Send> Transport for StdioTransport<R, W> {

@@ -7,7 +7,7 @@ repository.workspace = true
 license.workspace = true
 
 [dependencies]
-proto = { path = "../proto" }
+proto = { workspace = true }
 
 [lints]
 workspace = true

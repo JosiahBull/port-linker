@@ -178,6 +178,10 @@ impl SshClient {
         Arc::clone(&self.handle)
     }
 
+    pub fn host(&self) -> &str {
+        &self.config.host
+    }
+
     #[instrument(name = "ssh_exec", skip(self, command), fields(cmd_preview = %command.chars().take(50).collect::<String>()))]
     pub async fn exec(&self, command: &str) -> Result<String> {
         let mut channel = self.handle.channel_open_session().await.map_err(|e| {
