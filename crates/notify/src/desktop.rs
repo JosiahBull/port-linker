@@ -1,5 +1,5 @@
-use crate::error::{NotifyError, Result};
 use crate::NotificationEvent;
+use crate::error::{NotifyError, Result};
 use assets::LOGO_128;
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -61,8 +61,8 @@ fn show_notification_macos(event: &NotificationEvent, with_sound: bool) -> Resul
     let body = event.body();
 
     // Try terminal-notifier first (it supports custom icons)
-    if let Some(icon_path) = get_logo_path() {
-        if let Ok(output) = Command::new("terminal-notifier")
+    if let Some(icon_path) = get_logo_path()
+        && let Ok(output) = Command::new("terminal-notifier")
             .arg("-title")
             .arg(&title)
             .arg("-message")
@@ -75,12 +75,11 @@ fn show_notification_macos(event: &NotificationEvent, with_sound: bool) -> Resul
                 vec![]
             })
             .output()
-        {
-            if output.status.success() {
-                return Ok(());
-            }
-            // Fall through to osascript if terminal-notifier failed
-        }
+        && output.status.success()
+    {
+        return Ok(());
+
+        // Fall through to osascript if terminal-notifier failed
     }
 
     // Fallback to osascript (no icon support, but always available)

@@ -187,10 +187,10 @@ mod platform {
             let fd_dir = format!("/proc/{}/fd", pid);
             if let Ok(fds) = std::fs::read_dir(&fd_dir) {
                 for fd_entry in fds.flatten() {
-                    if let Ok(link) = std::fs::read_link(fd_entry.path()) {
-                        if link.to_string_lossy() == target {
-                            return Some(pid);
-                        }
+                    if let Ok(link) = std::fs::read_link(fd_entry.path())
+                        && link.to_string_lossy() == target
+                    {
+                        return Some(pid);
                     }
                 }
             }

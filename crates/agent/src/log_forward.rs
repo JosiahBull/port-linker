@@ -13,8 +13,8 @@ use std::fmt;
 
 use tokio::sync::mpsc;
 use tracing_core::{Event, Subscriber};
-use tracing_subscriber::layer::Context;
 use tracing_subscriber::Layer;
+use tracing_subscriber::layer::Context;
 
 use protocol::{AgentLogEvent, LogLevel};
 

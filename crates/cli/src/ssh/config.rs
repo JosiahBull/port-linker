@@ -156,11 +156,7 @@ fn parse_ssh_config(reader: impl BufRead, target_host: &str) -> Option<ParsedHos
         }
     }
 
-    if found_match {
-        Some(result)
-    } else {
-        None
-    }
+    if found_match { Some(result) } else { None }
 }
 
 /// Split an SSH config line into (keyword, argument).
@@ -232,10 +228,10 @@ fn glob_match(pattern: &[u8], text: &[u8]) -> bool {
 
 /// Expand `~` at the start of a path to the user's home directory.
 fn expand_tilde(path: &str) -> String {
-    if let Some(rest) = path.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
-            return home.join(rest).to_string_lossy().into_owned();
-        }
+    if let Some(rest) = path.strip_prefix("~/")
+        && let Some(home) = dirs::home_dir()
+    {
+        return home.join(rest).to_string_lossy().into_owned();
     }
     path.to_string()
 }

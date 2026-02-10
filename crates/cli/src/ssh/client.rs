@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use russh::keys::{PrivateKeyWithHashAlg, PublicKey};
-use russh::{client, ChannelMsg};
+use russh::{ChannelMsg, client};
 use tracing::{debug, info};
 
 use common::{Error, Result};

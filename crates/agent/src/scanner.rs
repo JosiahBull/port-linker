@@ -311,10 +311,10 @@ mod tests {
             if line.is_empty() {
                 continue;
             }
-            if let Some((port, state)) = parse_proc_net_line(line) {
-                if state == 0x0A {
-                    listeners.insert((port, Protocol::Tcp));
-                }
+            if let Some((port, state)) = parse_proc_net_line(line)
+                && state == 0x0A
+            {
+                listeners.insert((port, Protocol::Tcp));
             }
         }
         listeners
@@ -463,8 +463,7 @@ mod tests {
 
     #[test]
     fn parse_line_extracts_correct_port_and_state() {
-        let line =
-            "   0: 00000000:0050 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 12345 1 0000000000000000";
+        let line = "   0: 00000000:0050 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 12345 1 0000000000000000";
         let (port, state) = parse_proc_net_line(line).expect("should parse successfully");
         assert_eq!(port, 80);
         assert_eq!(state, 0x0A);

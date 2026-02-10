@@ -1,11 +1,11 @@
 use bytes::Bytes;
 use rkyv::{
+    Archive, Deserialize, Serialize,
     api::high::{HighSerializer, HighValidator},
     bytecheck::CheckBytes,
     de::Pool,
     ser::allocator::ArenaHandle,
     util::AlignedVec,
-    Archive, Deserialize, Serialize,
 };
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
@@ -33,7 +33,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AgentLogEvent, ControlMsg, LogLevel, Packet, Protocol, PROTOCOL_VERSION};
+    use crate::{AgentLogEvent, ControlMsg, LogLevel, PROTOCOL_VERSION, Packet, Protocol};
 
     /// Helper: encode then decode, assert equality.
     fn roundtrip<T>(value: &T) -> T

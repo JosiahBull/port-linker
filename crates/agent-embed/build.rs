@@ -1,7 +1,7 @@
 use std::fs;
 use std::io::Write;
 
-use agent_build::{build_for_targets, watch_sources, BuildConfig, CrossTarget};
+use agent_build::{BuildConfig, CrossTarget, build_for_targets, watch_sources};
 
 fn main() {
     let config = BuildConfig::from_env("agent")
@@ -20,23 +20,21 @@ fn main() {
         ));
         let gz_path = config.out_dir.join(format!("agent-{}.gz", target.triple));
 
-        if let Some(result) = results.get(&target.triple) {
-            if result.is_success() {
-                if let Ok(data) = fs::read(&raw_path) {
-                    if !data.is_empty() {
-                        let compressed = gzip_compress(&data);
-                        fs::write(&gz_path, &compressed).unwrap();
-                        eprintln!(
-                            "cargo:warning=Embedded agent for {} ({} -> {} bytes, {:.0}% reduction)",
-                            target.triple,
-                            data.len(),
-                            compressed.len(),
-                            (1.0 - compressed.len() as f64 / data.len() as f64) * 100.0,
-                        );
-                        continue;
-                    }
-                }
-            }
+        if let Some(result) = results.get(&target.triple)
+            && result.is_success()
+            && let Ok(data) = fs::read(&raw_path)
+            && !data.is_empty()
+        {
+            let compressed = gzip_compress(&data);
+            fs::write(&gz_path, &compressed).unwrap();
+            eprintln!(
+                "cargo:warning=Embedded agent for {} ({} -> {} bytes, {:.0}% reduction)",
+                target.triple,
+                data.len(),
+                compressed.len(),
+                (1.0 - compressed.len() as f64 / data.len() as f64) * 100.0,
+            );
+            continue;
         }
 
         // Failed or empty build — write empty placeholder.

@@ -6,7 +6,7 @@
 //! for TUI output.
 
 use tracing_appender::non_blocking::WorkerGuard;
-use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
 /// The directory under `~/.local/state/` where logs are stored.
 const LOG_DIR_NAME: &str = "port-linker";

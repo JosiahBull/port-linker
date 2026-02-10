@@ -167,10 +167,10 @@ impl Notifier {
         }
 
         // Desktop notification
-        if self.desktop_enabled {
-            if let Err(e) = desktop::show_notification(&event, self.sound_enabled) {
-                warn!("Failed to show desktop notification: {}", e);
-            }
+        if self.desktop_enabled
+            && let Err(e) = desktop::show_notification(&event, self.sound_enabled)
+        {
+            warn!("Failed to show desktop notification: {}", e);
         }
     }
 
@@ -391,15 +391,19 @@ mod tests {
         assert!(!NotificationEvent::ConnectionRestored.is_error());
         assert!(!NotificationEvent::PortsForwarded { ports: vec![] }.is_error());
         assert!(!NotificationEvent::PortsRemoved { ports: vec![] }.is_error());
-        assert!(!NotificationEvent::ProcessKilled {
-            port: 80,
-            process_name: "x".to_string()
-        }
-        .is_error());
-        assert!(!NotificationEvent::TunnelRestarted {
-            port: 53,
-            protocol: Protocol::Tcp
-        }
-        .is_error());
+        assert!(
+            !NotificationEvent::ProcessKilled {
+                port: 80,
+                process_name: "x".to_string()
+            }
+            .is_error()
+        );
+        assert!(
+            !NotificationEvent::TunnelRestarted {
+                port: 53,
+                protocol: Protocol::Tcp
+            }
+            .is_error()
+        );
     }
 }

@@ -44,11 +44,7 @@ pub fn get_binary_for_system(os: &str, arch: &str) -> Option<&'static [u8]> {
         _ => return None,
     };
 
-    if data.is_empty() {
-        None
-    } else {
-        Some(data)
-    }
+    if data.is_empty() { None } else { Some(data) }
 }
 
 /// Return the list of targets that have non-empty embedded binaries.

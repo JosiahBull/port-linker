@@ -7,7 +7,7 @@ use bytes::Bytes;
 use quinn::Endpoint;
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use tokio::net::UdpSocket;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{RwLock, mpsc};
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
