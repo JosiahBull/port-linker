@@ -159,9 +159,7 @@ mod platform {
                             listeners.insert((port, Protocol::Tcp));
                         }
                     }
-                    Err(ScanError::Io(ref e))
-                        if e.kind() == std::io::ErrorKind::NotFound =>
-                    {
+                    Err(ScanError::Io(ref e)) if e.kind() == std::io::ErrorKind::NotFound => {
                         warn!(?path, "proc net file not found, skipping");
                     }
                     Err(e) => return Err(e),
@@ -177,9 +175,7 @@ mod platform {
                             listeners.insert((port, Protocol::Udp));
                         }
                     }
-                    Err(ScanError::Io(ref e))
-                        if e.kind() == std::io::ErrorKind::NotFound =>
-                    {
+                    Err(ScanError::Io(ref e)) if e.kind() == std::io::ErrorKind::NotFound => {
                         warn!(?path, "proc net file not found, skipping");
                     }
                     Err(e) => return Err(e),
@@ -346,9 +342,18 @@ mod tests {
 
         let listeners = parse_tcp_listeners(contents);
 
-        assert!(listeners.contains(&(80, Protocol::Tcp)), "should contain port 80 (0x0050)");
-        assert!(listeners.contains(&(53, Protocol::Tcp)), "should contain port 53 (0x0035)");
-        assert!(listeners.contains(&(443, Protocol::Tcp)), "should contain port 443 (0x01BB)");
+        assert!(
+            listeners.contains(&(80, Protocol::Tcp)),
+            "should contain port 80 (0x0050)"
+        );
+        assert!(
+            listeners.contains(&(53, Protocol::Tcp)),
+            "should contain port 53 (0x0035)"
+        );
+        assert!(
+            listeners.contains(&(443, Protocol::Tcp)),
+            "should contain port 443 (0x01BB)"
+        );
         assert_eq!(listeners.len(), 3);
     }
 
@@ -363,7 +368,10 @@ mod tests {
 
         let listeners = parse_tcp_listeners(contents);
 
-        assert!(listeners.contains(&(80, Protocol::Tcp)), "should contain port 80 (LISTEN)");
+        assert!(
+            listeners.contains(&(80, Protocol::Tcp)),
+            "should contain port 80 (LISTEN)"
+        );
         assert!(
             !listeners.contains(&(50000, Protocol::Tcp)),
             "should NOT contain port 50000 (ESTABLISHED)"
@@ -385,7 +393,10 @@ mod tests {
 
         let listeners = parse_udp_listeners(contents);
 
-        assert!(listeners.contains(&(53, Protocol::Udp)), "should contain port 53 (0x0035)");
+        assert!(
+            listeners.contains(&(53, Protocol::Udp)),
+            "should contain port 53 (0x0035)"
+        );
         assert!(
             listeners.contains(&(5353, Protocol::Udp)),
             "should contain port 5353 (0x14E9)"

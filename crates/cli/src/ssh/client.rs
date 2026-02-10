@@ -83,10 +83,7 @@ impl SshSession {
     ///
     /// `remote` is either `host` or `user@host`. The port and identity files
     /// are resolved from ~/.ssh/config.
-    pub async fn connect(
-        remote: &str,
-        host_key_policy: HostKeyPolicy,
-    ) -> Result<Self> {
+    pub async fn connect(remote: &str, host_key_policy: HostKeyPolicy) -> Result<Self> {
         // Parse user@host format.
         let (user_override, host) = if let Some(idx) = remote.find('@') {
             (Some(&remote[..idx]), &remote[idx + 1..])
@@ -114,15 +111,13 @@ impl SshSession {
         let addr_str = format!("{}:{}", ssh_config.hostname, ssh_config.port);
         let addr: SocketAddr = tokio::net::lookup_host(&addr_str)
             .await
-            .map_err(|e| Error::Protocol(format!(
-                "failed to resolve SSH host '{}': {e}",
-                addr_str
-            )))?
+            .map_err(|e| {
+                Error::Protocol(format!("failed to resolve SSH host '{}': {e}", addr_str))
+            })?
             .next()
-            .ok_or_else(|| Error::Protocol(format!(
-                "no addresses found for SSH host '{}'",
-                addr_str
-            )))?;
+            .ok_or_else(|| {
+                Error::Protocol(format!("no addresses found for SSH host '{}'", addr_str))
+            })?;
 
         let handler = Handler {
             policy: host_key_policy,
@@ -311,12 +306,7 @@ impl SshSession {
             let mut exit_code = None;
 
             loop {
-                match tokio::time::timeout(
-                    Duration::from_secs(120),
-                    read_half.wait(),
-                )
-                .await
-                {
+                match tokio::time::timeout(Duration::from_secs(120), read_half.wait()).await {
                     Ok(Some(msg)) => match msg {
                         ChannelMsg::Data { data } => stdout.extend_from_slice(&data),
                         ChannelMsg::ExtendedData { data, ext } => {

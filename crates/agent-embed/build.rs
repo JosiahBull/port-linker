@@ -14,12 +14,11 @@ fn main() {
 
     // Gzip-compress successful builds, write empty placeholders for failures.
     for target in &config.targets {
-        let raw_path = config
-            .out_dir
-            .join(agent_build::output_filename(&config.package, &target.triple));
-        let gz_path = config
-            .out_dir
-            .join(format!("agent-{}.gz", target.triple));
+        let raw_path = config.out_dir.join(agent_build::output_filename(
+            &config.package,
+            &target.triple,
+        ));
+        let gz_path = config.out_dir.join(format!("agent-{}.gz", target.triple));
 
         if let Some(result) = results.get(&target.triple) {
             if result.is_success() {

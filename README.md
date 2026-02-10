@@ -4,7 +4,9 @@
 
 # port-linker
 
-A CLI tool that connects to remote systems via SSH and automatically forwards discovered ports to localhost.
+Automatically forward every listening port from a remote machine to localhost over SSH. No configuration required.
+
+port-linker deploys a lightweight agent to the remote host via SSH, establishes a QUIC tunnel, and continuously scans for new listening ports. When a service starts on the remote, it appears on your local machine within seconds. Desktop notifications keep you informed.
 
 ## Installation
 
@@ -15,67 +17,67 @@ cargo install --path .
 ## Usage
 
 ```bash
-# Basic usage - connect and forward all discovered ports
-port-linker user@remote-host
+# Connect to a remote host — all discovered ports are forwarded automatically
+port-linker --remote user@host
 
-# Forward only specific ports
-port-linker user@host -p 8080,3000,5432
+# Connect to an already-running agent directly (manual/debug mode)
+port-linker --agent 192.168.1.50:12345
 
 # Auto-kill local processes that conflict with forwarded ports
-port-linker user@host --auto-kill
+port-linker --remote user@host --conflict-resolution auto-kill
 
-# Use a specific SSH key
-port-linker user@host -i ~/.ssh/my_key
+# Silently skip ports that conflict locally
+port-linker --remote user@host --conflict-resolution auto-skip
 
-# Connect on a non-standard SSH port
-port-linker user@host -P 2222
+# Limit the number of forwarded ports
+port-linker --remote user@host --fd-limit 64
 
-# Exclude additional ports from forwarding
-port-linker user@host -x 9000,9001
+# Disable desktop notifications
+port-linker --remote user@host --notifications false
 
-# Disable notifications
-port-linker user@host --no-notifications --no-sound
-
-# Verbose logging
-port-linker user@host --log-level debug
+# Use a custom agent binary instead of the embedded one
+port-linker --remote user@host --agent-binary ./my-agent
 ```
 
 ## Options
 
-| Option | Description |
-|--------|-------------|
-| `-p, --ports <PORTS>` | Only forward specific ports (comma-separated) |
-| `-x, --exclude <PORTS>` | Exclude additional ports from forwarding |
-| `--no-default-excludes` | Don't exclude default system ports |
-| `--auto-kill` | Automatically kill conflicting local processes |
-| `--no-notifications` | Disable desktop notifications |
-| `--no-sound` | Disable notification sounds |
-| `--log-level <LEVEL>` | Log level: trace, debug, info, warn, error (default: info) |
-| `--scan-interval <SECONDS>` | Port scan interval (default: 3) |
-| `-i, --identity <PATH>` | Path to SSH identity file |
-| `-P, --port <PORT>` | SSH port (default: 22) |
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--remote <USER@HOST>` | Remote host to connect to via SSH | |
+| `--agent <ADDR:PORT>` | Connect to an already-running agent directly | |
+| `--conflict-resolution <POLICY>` | How to handle local port conflicts: `interactive`, `auto-skip`, or `auto-kill` | `interactive` |
+| `--fd-limit <N>` | Maximum number of forwarded ports (FD safety limit) | unlimited |
+| `--notifications <BOOL>` | Enable desktop notifications for port events | `true` |
+| `--notification-sound <BOOL>` | Enable notification sounds | `true` |
+| `--ssh-host-key-verification <POLICY>` | SSH host key policy: `strict`, `accept-new`, or `accept-all` | `accept-new` |
+| `--agent-binary <PATH>` | Path to a custom agent binary to deploy | embedded |
+| `--echo-only` | Run the echo connectivity test and exit | `false` |
 
-## Default Excluded Ports
+## How It Works
 
-The following ports are excluded by default (use `--no-default-excludes` to forward them):
+1. **SSH Bootstrap** — Connects via SSH using your existing keys/agent, transfers a small agent binary (~2 MB), and starts it on the remote host.
+2. **QUIC Tunnel** — The agent binds a random UDP port and prints its address. The CLI connects over QUIC with a one-time token for authentication.
+3. **Port Scanning** — The agent continuously scans `/proc/net/{tcp,tcp6,udp,udp6}` (every 1s) and diffs against the previous snapshot. New listeners are reported to the CLI along with their process name.
+4. **Port Forwarding** — TCP ports are forwarded via per-connection QUIC streams. UDP ports use QUIC datagrams.
+5. **Desktop Notifications** — Port events are batched over a 2-second window and displayed as a single notification.
+6. **Phoenix Restart** — If the QUIC connection drops, the CLI automatically redeploys the agent and resumes forwarding.
 
-| Port | Service |
-|------|---------|
-| 22 | SSH |
-| 53 | DNS |
-| 111 | RPC/portmapper |
-| 631 | CUPS printing |
-| 5353 | mDNS |
-| 41641 | Tailscale |
+## Filtered Ports
+
+The agent automatically filters out:
+
+- **Privileged ports** (< 1024) — system services like DHCP, DNS, NTP
+- **Ephemeral ports** (32768-60999 on Linux) — transient outbound sockets
+- **SSH** (22/TCP), **DNS** (53/UDP), **Tailscale** (41641/UDP)
+- The agent's own QUIC endpoint
 
 ## SSH Authentication
 
-port-linker attempts authentication in this order:
+port-linker uses your existing SSH configuration (`~/.ssh/config`) and attempts authentication in this order:
 
 1. SSH agent (`SSH_AUTH_SOCK`)
-2. Explicit identity file (`-i` flag)
-3. Default key files (`~/.ssh/id_rsa`, `~/.ssh/id_ed25519`, etc.)
-4. Password prompt (if key auth fails)
+2. Identity files from SSH config
+3. Default key files (`~/.ssh/id_ed25519`, `~/.ssh/id_rsa`, `~/.ssh/id_ecdsa`)
 
 ## License
 

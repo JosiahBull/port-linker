@@ -19,10 +19,8 @@ const AGENT_AARCH64_LINUX_GZ: &[u8] = include_bytes!(concat!(
     "/agent-aarch64-unknown-linux-musl.gz"
 ));
 
-const AGENT_AARCH64_DARWIN_GZ: &[u8] = include_bytes!(concat!(
-    env!("OUT_DIR"),
-    "/agent-aarch64-apple-darwin.gz"
-));
+const AGENT_AARCH64_DARWIN_GZ: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/agent-aarch64-apple-darwin.gz"));
 
 /// All target triples that this crate can potentially embed.
 pub const SUPPORTED_TARGETS: &[&str] = &[

@@ -82,18 +82,17 @@ impl Drop for AgentProcess {
 /// Spawn the agent binary and parse its stdout for AGENT_READY/PORT/TOKEN.
 fn spawn_agent() -> Result<AgentProcess> {
     // Try environment variable first, then fall back to workspace-relative path.
-    let agent_bin = std::env::var("CARGO_BIN_EXE_port-linker-agent")
-        .unwrap_or_else(|_| {
-            // Resolve relative to workspace root.
-            let manifest_dir = env!("CARGO_MANIFEST_DIR");
-            let workspace_root = std::path::Path::new(manifest_dir)
-                .parent()
-                .expect("tests dir should have a parent");
-            workspace_root
-                .join("target/debug/port-linker-agent")
-                .to_string_lossy()
-                .to_string()
-        });
+    let agent_bin = std::env::var("CARGO_BIN_EXE_port-linker-agent").unwrap_or_else(|_| {
+        // Resolve relative to workspace root.
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let workspace_root = std::path::Path::new(manifest_dir)
+            .parent()
+            .expect("tests dir should have a parent");
+        workspace_root
+            .join("target/debug/port-linker-agent")
+            .to_string_lossy()
+            .to_string()
+    });
 
     let mut child = Command::new(agent_bin)
         .stdout(Stdio::piped())
@@ -123,9 +122,7 @@ fn spawn_agent() -> Result<AgentProcess> {
         }
 
         let mut line = String::new();
-        reader
-            .read_line(&mut line)
-            .map_err(Error::Io)?;
+        reader.read_line(&mut line).map_err(Error::Io)?;
 
         let line = line.trim();
         if line.is_empty() {
@@ -217,8 +214,8 @@ fn build_client_endpoint() -> Result<quinn::Endpoint> {
     let bind_addr: SocketAddr = "0.0.0.0:0"
         .parse()
         .map_err(|e| Error::Protocol(format!("invalid bind address: {e}")))?;
-    let mut endpoint = quinn::Endpoint::client(bind_addr)
-        .map_err(|e| Error::QuicConnection(e.to_string()))?;
+    let mut endpoint =
+        quinn::Endpoint::client(bind_addr).map_err(|e| Error::QuicConnection(e.to_string()))?;
     endpoint.set_default_client_config(client_config);
 
     Ok(endpoint)
@@ -289,13 +286,19 @@ async fn test_process_lifecycle() {
         .expect("failed to accept bi stream");
 
     // Receive handshake.
-    let handshake = recv_msg(&mut recv).await.expect("failed to receive handshake");
+    let handshake = recv_msg(&mut recv)
+        .await
+        .expect("failed to receive handshake");
     match handshake {
         ControlMsg::Handshake {
             protocol_version,
             token,
         } => {
-            assert_eq!(protocol_version, protocol::PROTOCOL_VERSION, "protocol version mismatch");
+            assert_eq!(
+                protocol_version,
+                protocol::PROTOCOL_VERSION,
+                "protocol version mismatch"
+            );
             assert_eq!(token, agent.info.token, "token mismatch");
         }
         other => panic!("expected Handshake, got {:?}", other),
@@ -311,7 +314,9 @@ async fn test_process_lifecycle() {
         .expect("failed to send echo request");
 
     // Receive echo response.
-    let echo_resp = recv_msg(&mut recv).await.expect("failed to receive echo response");
+    let echo_resp = recv_msg(&mut recv)
+        .await
+        .expect("failed to receive echo response");
     match echo_resp {
         ControlMsg::EchoResponse { payload } => {
             assert_eq!(payload, echo_payload, "echo payload mismatch");
@@ -333,7 +338,10 @@ async fn test_process_lifecycle() {
         .expect("failed to wait on agent")
     {
         Some(status) => {
-            assert!(status.success() || status.code() == Some(0), "agent exited with non-zero status");
+            assert!(
+                status.success() || status.code() == Some(0),
+                "agent exited with non-zero status"
+            );
         }
         None => {
             // Agent didn't exit, kill it.
@@ -348,9 +356,7 @@ async fn test_process_lifecycle() {
 async fn test_echo_empty_payload() {
     let mut agent = spawn_agent().expect("failed to spawn agent");
 
-    let agent_addr: SocketAddr = format!("127.0.0.1:{}", agent.info.port)
-        .parse()
-        .unwrap();
+    let agent_addr: SocketAddr = format!("127.0.0.1:{}", agent.info.port).parse().unwrap();
 
     let endpoint = build_client_endpoint().unwrap();
     let connection = endpoint
@@ -386,9 +392,7 @@ async fn test_echo_empty_payload() {
 async fn test_echo_one_byte_payload() {
     let mut agent = spawn_agent().expect("failed to spawn agent");
 
-    let agent_addr: SocketAddr = format!("127.0.0.1:{}", agent.info.port)
-        .parse()
-        .unwrap();
+    let agent_addr: SocketAddr = format!("127.0.0.1:{}", agent.info.port).parse().unwrap();
 
     let endpoint = build_client_endpoint().unwrap();
     let connection = endpoint
@@ -403,7 +407,9 @@ async fn test_echo_one_byte_payload() {
     let _ = recv_msg(&mut recv).await.unwrap();
 
     // Send echo with 1-byte payload.
-    let echo_req = ControlMsg::EchoRequest { payload: vec![0x42] };
+    let echo_req = ControlMsg::EchoRequest {
+        payload: vec![0x42],
+    };
     send_msg(&mut send, &echo_req).await.unwrap();
 
     let echo_resp = recv_msg(&mut recv).await.unwrap();
@@ -424,9 +430,7 @@ async fn test_echo_one_byte_payload() {
 async fn test_echo_1kb_payload() {
     let mut agent = spawn_agent().expect("failed to spawn agent");
 
-    let agent_addr: SocketAddr = format!("127.0.0.1:{}", agent.info.port)
-        .parse()
-        .unwrap();
+    let agent_addr: SocketAddr = format!("127.0.0.1:{}", agent.info.port).parse().unwrap();
 
     let endpoint = build_client_endpoint().unwrap();
     let connection = endpoint
@@ -465,9 +469,7 @@ async fn test_echo_1kb_payload() {
 async fn test_echo_near_1mb_payload() {
     let mut agent = spawn_agent().expect("failed to spawn agent");
 
-    let agent_addr: SocketAddr = format!("127.0.0.1:{}", agent.info.port)
-        .parse()
-        .unwrap();
+    let agent_addr: SocketAddr = format!("127.0.0.1:{}", agent.info.port).parse().unwrap();
 
     let endpoint = build_client_endpoint().unwrap();
     let connection = endpoint
@@ -493,7 +495,11 @@ async fn test_echo_near_1mb_payload() {
     let echo_resp = recv_msg(&mut recv).await.unwrap();
     match echo_resp {
         ControlMsg::EchoResponse { payload } => {
-            assert_eq!(payload.len(), payload_900kb.len(), "payload length mismatch");
+            assert_eq!(
+                payload.len(),
+                payload_900kb.len(),
+                "payload length mismatch"
+            );
             assert_eq!(payload, payload_900kb, "payload content mismatch");
         }
         other => panic!("expected EchoResponse, got {:?}", other),
@@ -509,9 +515,7 @@ async fn test_echo_near_1mb_payload() {
 async fn test_multiple_echo_roundtrips() {
     let mut agent = spawn_agent().expect("failed to spawn agent");
 
-    let agent_addr: SocketAddr = format!("127.0.0.1:{}", agent.info.port)
-        .parse()
-        .unwrap();
+    let agent_addr: SocketAddr = format!("127.0.0.1:{}", agent.info.port).parse().unwrap();
 
     let endpoint = build_client_endpoint().unwrap();
     let connection = endpoint
@@ -538,11 +542,7 @@ async fn test_multiple_echo_roundtrips() {
             ControlMsg::EchoResponse {
                 payload: resp_payload,
             } => {
-                assert_eq!(
-                    resp_payload, payload,
-                    "payload mismatch on echo {}",
-                    i
-                );
+                assert_eq!(resp_payload, payload, "payload mismatch on echo {}", i);
             }
             other => panic!("expected EchoResponse for echo {}, got {:?}", i, other),
         }
@@ -558,9 +558,7 @@ async fn test_multiple_echo_roundtrips() {
 async fn test_heartbeat() {
     let mut agent = spawn_agent().expect("failed to spawn agent");
 
-    let agent_addr: SocketAddr = format!("127.0.0.1:{}", agent.info.port)
-        .parse()
-        .unwrap();
+    let agent_addr: SocketAddr = format!("127.0.0.1:{}", agent.info.port).parse().unwrap();
 
     let endpoint = build_client_endpoint().unwrap();
     let connection = endpoint
@@ -575,9 +573,7 @@ async fn test_heartbeat() {
     let _ = recv_msg(&mut recv).await.unwrap();
 
     // Send heartbeat.
-    send_msg(&mut send, &ControlMsg::Heartbeat)
-        .await
-        .unwrap();
+    send_msg(&mut send, &ControlMsg::Heartbeat).await.unwrap();
 
     // Expect heartbeat back.
     let response = recv_msg(&mut recv).await.unwrap();
@@ -619,7 +615,8 @@ fn test_protocol_version_validation() {
         } => {
             // The CLI would reject this.
             assert_ne!(
-                protocol_version, protocol::PROTOCOL_VERSION,
+                protocol_version,
+                protocol::PROTOCOL_VERSION,
                 "version should be mismatched"
             );
         }
@@ -662,9 +659,7 @@ async fn test_agent_no_connection_timeout() {
 async fn test_mixed_echo_and_heartbeat() {
     let mut agent = spawn_agent().expect("failed to spawn agent");
 
-    let agent_addr: SocketAddr = format!("127.0.0.1:{}", agent.info.port)
-        .parse()
-        .unwrap();
+    let agent_addr: SocketAddr = format!("127.0.0.1:{}", agent.info.port).parse().unwrap();
 
     let endpoint = build_client_endpoint().unwrap();
     let connection = endpoint
@@ -698,9 +693,7 @@ async fn test_mixed_echo_and_heartbeat() {
         }
 
         // Heartbeat.
-        send_msg(&mut send, &ControlMsg::Heartbeat)
-            .await
-            .unwrap();
+        send_msg(&mut send, &ControlMsg::Heartbeat).await.unwrap();
 
         let hb_resp = recv_msg(&mut recv).await.unwrap();
         match hb_resp {
@@ -773,9 +766,7 @@ fn test_tcp_stream_error_codec() {
 async fn test_tcp_connection_refused() {
     let mut agent = spawn_agent().expect("failed to spawn agent");
 
-    let agent_addr: SocketAddr = format!("127.0.0.1:{}", agent.info.port)
-        .parse()
-        .unwrap();
+    let agent_addr: SocketAddr = format!("127.0.0.1:{}", agent.info.port).parse().unwrap();
 
     let endpoint = build_client_endpoint().unwrap();
     let connection = endpoint
@@ -816,7 +807,9 @@ async fn test_tcp_connection_refused() {
     );
 
     // Read the TcpStreamError message.
-    let error_msg = recv_msg(&mut tcp_recv).await.expect("failed to receive TcpStreamError");
+    let error_msg = recv_msg(&mut tcp_recv)
+        .await
+        .expect("failed to receive TcpStreamError");
 
     match error_msg {
         ControlMsg::TcpStreamError { port, error } => {
@@ -824,7 +817,8 @@ async fn test_tcp_connection_refused() {
             // The error message should mention connection failure.
             // Common errors: "Connection refused" (Linux/macOS) or "actively refused" (Windows).
             assert!(
-                error.to_lowercase().contains("refused") || error.to_lowercase().contains("connection"),
+                error.to_lowercase().contains("refused")
+                    || error.to_lowercase().contains("connection"),
                 "error message should indicate connection failure: {}",
                 error
             );
@@ -837,7 +831,10 @@ async fn test_tcp_connection_refused() {
     let remaining = tcp_recv.read_to_end(1024).await;
     match remaining {
         Ok(buf) => {
-            assert!(buf.is_empty(), "expected stream to be closed, but got more data");
+            assert!(
+                buf.is_empty(),
+                "expected stream to be closed, but got more data"
+            );
         }
         Err(e) => {
             // Stream closed is also acceptable.
@@ -867,9 +864,7 @@ async fn test_tcp_connection_refused() {
 async fn test_tcp_bidirectional_forwarding() {
     let mut agent = spawn_agent().expect("failed to spawn agent");
 
-    let agent_addr: SocketAddr = format!("127.0.0.1:{}", agent.info.port)
-        .parse()
-        .unwrap();
+    let agent_addr: SocketAddr = format!("127.0.0.1:{}", agent.info.port).parse().unwrap();
 
     // Start a local TCP echo server.
     // Bind to port 0 to get a random available port.
@@ -883,16 +878,11 @@ async fn test_tcp_bidirectional_forwarding() {
 
     // Spawn the echo server task.
     tokio::spawn(async move {
-        loop {
-            match echo_listener.accept().await {
-                Ok((mut socket, _)) => {
-                    tokio::spawn(async move {
-                        let (mut reader, mut writer) = socket.split();
-                        let _ = tokio::io::copy(&mut reader, &mut writer).await;
-                    });
-                }
-                Err(_) => break,
-            }
+        while let Ok((mut socket, _)) = echo_listener.accept().await {
+            tokio::spawn(async move {
+                let (mut reader, mut writer) = socket.split();
+                let _ = tokio::io::copy(&mut reader, &mut writer).await;
+            });
         }
     });
 
@@ -1017,9 +1007,7 @@ async fn test_tcp_bidirectional_forwarding() {
 async fn test_tcp_forwarding_large_payload() {
     let mut agent = spawn_agent().expect("failed to spawn agent");
 
-    let agent_addr: SocketAddr = format!("127.0.0.1:{}", agent.info.port)
-        .parse()
-        .unwrap();
+    let agent_addr: SocketAddr = format!("127.0.0.1:{}", agent.info.port).parse().unwrap();
 
     // Start a local TCP echo server.
     let echo_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -1031,16 +1019,11 @@ async fn test_tcp_forwarding_large_payload() {
         .port();
 
     tokio::spawn(async move {
-        loop {
-            match echo_listener.accept().await {
-                Ok((mut socket, _)) => {
-                    tokio::spawn(async move {
-                        let (mut reader, mut writer) = socket.split();
-                        let _ = tokio::io::copy(&mut reader, &mut writer).await;
-                    });
-                }
-                Err(_) => break,
-            }
+        while let Ok((mut socket, _)) = echo_listener.accept().await {
+            tokio::spawn(async move {
+                let (mut reader, mut writer) = socket.split();
+                let _ = tokio::io::copy(&mut reader, &mut writer).await;
+            });
         }
     });
 
@@ -1108,9 +1091,7 @@ async fn test_tcp_forwarding_large_payload() {
 async fn test_tcp_multiple_concurrent_streams() {
     let mut agent = spawn_agent().expect("failed to spawn agent");
 
-    let agent_addr: SocketAddr = format!("127.0.0.1:{}", agent.info.port)
-        .parse()
-        .unwrap();
+    let agent_addr: SocketAddr = format!("127.0.0.1:{}", agent.info.port).parse().unwrap();
 
     // Start two echo servers on different ports.
     let echo_listener_1 = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -1126,16 +1107,11 @@ async fn test_tcp_multiple_concurrent_streams() {
     // Spawn echo server tasks.
     for listener in [echo_listener_1, echo_listener_2] {
         tokio::spawn(async move {
-            loop {
-                match listener.accept().await {
-                    Ok((mut socket, _)) => {
-                        tokio::spawn(async move {
-                            let (mut reader, mut writer) = socket.split();
-                            let _ = tokio::io::copy(&mut reader, &mut writer).await;
-                        });
-                    }
-                    Err(_) => break,
-                }
+            while let Ok((mut socket, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let (mut reader, mut writer) = socket.split();
+                    let _ = tokio::io::copy(&mut reader, &mut writer).await;
+                });
             }
         });
     }
@@ -1157,17 +1133,23 @@ async fn test_tcp_multiple_concurrent_streams() {
     let (mut tcp_send_2, mut tcp_recv_2) = connection.open_bi().await.unwrap();
 
     // Initialize stream 1.
-    send_msg(&mut tcp_send_1, &ControlMsg::TcpStreamInit { port: echo_port_1 })
-        .await
-        .unwrap();
+    send_msg(
+        &mut tcp_send_1,
+        &ControlMsg::TcpStreamInit { port: echo_port_1 },
+    )
+    .await
+    .unwrap();
     let mut status_buf = [0u8; 1];
     tcp_recv_1.read_exact(&mut status_buf).await.unwrap();
     assert_eq!(status_buf[0], 0x00);
 
     // Initialize stream 2.
-    send_msg(&mut tcp_send_2, &ControlMsg::TcpStreamInit { port: echo_port_2 })
-        .await
-        .unwrap();
+    send_msg(
+        &mut tcp_send_2,
+        &ControlMsg::TcpStreamInit { port: echo_port_2 },
+    )
+    .await
+    .unwrap();
     tcp_recv_2.read_exact(&mut status_buf).await.unwrap();
     assert_eq!(status_buf[0], 0x00);
 
@@ -1313,7 +1295,10 @@ fn test_process_info_display() {
     };
 
     let display = format!("{}", info);
-    assert_eq!(display, "nginx (PID: 12345)", "ProcessInfo Display format incorrect");
+    assert_eq!(
+        display, "nginx (PID: 12345)",
+        "ProcessInfo Display format incorrect"
+    );
 }
 
 /// Test 21: Find listener on an active port.
@@ -1328,13 +1313,16 @@ async fn test_find_listener_on_active_port() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("failed to bind listener");
-    let port = listener.local_addr().expect("failed to get local addr").port();
+    let port = listener
+        .local_addr()
+        .expect("failed to get local addr")
+        .port();
 
     // Give the OS a moment to register the listener.
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // Try to find the listener.
-    let result = common::process::find_listener(port);
+    let result = common::process::find_listener(port, common::process::TransportProto::Tcp);
 
     // On macOS and Linux, we should get a result.
     // On other platforms, the function returns None (which is acceptable).
@@ -1350,7 +1338,10 @@ async fn test_find_listener_on_active_port() {
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         // On unsupported platforms, None is expected.
-        assert!(result.is_none(), "find_listener should return None on unsupported platforms");
+        assert!(
+            result.is_none(),
+            "find_listener should return None on unsupported platforms"
+        );
     }
 
     // Clean up.
@@ -1396,7 +1387,10 @@ async fn test_kill_process_terminates_child() {
 
     // The process should have been killed (exit code will be non-zero due to signal).
     // We don't assert the exact exit code since it depends on which signal was effective.
-    assert!(!status.success(), "process should have been killed by signal");
+    assert!(
+        !status.success(),
+        "process should have been killed by signal"
+    );
 }
 
 /// Test 23: ConflictPolicy Display trait implementation.
@@ -1451,8 +1445,11 @@ fn test_conflict_policy_value_enum() {
 #[test]
 fn test_find_listener_nonexistent_port() {
     // Query a port that's almost certainly not in use (port 1 requires root).
-    let result = common::process::find_listener(1);
-    assert!(result.is_none(), "find_listener should return None for unused port");
+    let result = common::process::find_listener(1, common::process::TransportProto::Tcp);
+    assert!(
+        result.is_none(),
+        "find_listener should return None for unused port"
+    );
 }
 
 /// Test 26: Kill process with invalid PID returns error.
@@ -1468,7 +1465,10 @@ fn test_kill_process_invalid_pid() {
     let invalid_pid = 999999u32;
 
     let result = common::process::kill_process(invalid_pid);
-    assert!(result.is_err(), "kill_process should return error for invalid PID");
+    assert!(
+        result.is_err(),
+        "kill_process should return error for invalid PID"
+    );
 
     let err_msg = result.unwrap_err();
     assert!(
@@ -1496,8 +1496,14 @@ fn test_process_info_traits() {
 
     // Test Debug (should not panic).
     let debug_str = format!("{:?}", info);
-    assert!(debug_str.contains("9999"), "Debug output should contain PID");
-    assert!(debug_str.contains("test-process"), "Debug output should contain process name");
+    assert!(
+        debug_str.contains("9999"),
+        "Debug output should contain PID"
+    );
+    assert!(
+        debug_str.contains("test-process"),
+        "Debug output should contain process name"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1589,7 +1595,11 @@ fn test_handshake_parsing_out_of_order() {
 
     assert!(got_ready, "should have parsed AGENT_READY");
     assert_eq!(port, Some(9999), "should have parsed port");
-    assert_eq!(token.as_deref(), Some("plk-token-123"), "should have parsed token");
+    assert_eq!(
+        token.as_deref(),
+        Some("plk-token-123"),
+        "should have parsed token"
+    );
 }
 
 /// Test 31: Handshake parsing with extra whitespace.
@@ -1620,7 +1630,11 @@ fn test_handshake_parsing_with_whitespace() {
 
     assert!(got_ready);
     assert_eq!(port, Some(8080), "should trim whitespace from port");
-    assert_eq!(token.as_deref(), Some("plk-abc-def"), "should trim whitespace from token");
+    assert_eq!(
+        token.as_deref(),
+        Some("plk-abc-def"),
+        "should trim whitespace from token"
+    );
 }
 
 /// Test 32: Handshake parsing with invalid port.
@@ -1698,7 +1712,11 @@ fn test_handshake_parsing_empty_token() {
 
     assert!(got_ready);
     assert_eq!(port, Some(7777));
-    assert_eq!(token.as_deref(), Some(""), "empty token should be parsed as empty string");
+    assert_eq!(
+        token.as_deref(),
+        Some(""),
+        "empty token should be parsed as empty string"
+    );
 }
 
 /// Test 34: Handshake parsing with only partial data.
@@ -1708,10 +1726,7 @@ fn test_handshake_parsing_empty_token() {
 #[test]
 fn test_handshake_parsing_partial_data() {
     // Case 1: Missing PORT.
-    let lines_no_port = vec![
-        "AGENT_READY".to_string(),
-        "TOKEN=plk-test".to_string(),
-    ];
+    let lines_no_port = vec!["AGENT_READY".to_string(), "TOKEN=plk-test".to_string()];
 
     let mut port: Option<u16> = None;
     let mut token: Option<String> = None;
@@ -1732,10 +1747,7 @@ fn test_handshake_parsing_partial_data() {
     assert_eq!(token.as_deref(), Some("plk-test"));
 
     // Case 2: Missing TOKEN.
-    let lines_no_token = vec![
-        "AGENT_READY".to_string(),
-        "PORT=8888".to_string(),
-    ];
+    let lines_no_token = vec!["AGENT_READY".to_string(), "PORT=8888".to_string()];
 
     port = None;
     token = None;
@@ -1756,10 +1768,7 @@ fn test_handshake_parsing_partial_data() {
     assert_eq!(token, None, "missing TOKEN should result in None");
 
     // Case 3: Missing AGENT_READY.
-    let lines_no_ready = vec![
-        "PORT=6666".to_string(),
-        "TOKEN=plk-xyz".to_string(),
-    ];
+    let lines_no_ready = vec!["PORT=6666".to_string(), "TOKEN=plk-xyz".to_string()];
 
     port = None;
     token = None;
@@ -1811,7 +1820,11 @@ fn test_handshake_parsing_duplicate_lines() {
     assert!(got_ready);
     // The parser overwrites on duplicate lines, so we get the last values.
     assert_eq!(port, Some(2222), "duplicate PORT should use last value");
-    assert_eq!(token.as_deref(), Some("second-token"), "duplicate TOKEN should use last value");
+    assert_eq!(
+        token.as_deref(),
+        Some("second-token"),
+        "duplicate TOKEN should use last value"
+    );
 }
 
 /// Test 36: Handshake parsing with very long token.
@@ -1843,7 +1856,11 @@ fn test_handshake_parsing_long_token() {
 
     assert!(got_ready);
     assert_eq!(port, Some(5555));
-    assert_eq!(token.as_deref(), Some(long_token.as_str()), "long token should be fully parsed");
+    assert_eq!(
+        token.as_deref(),
+        Some(long_token.as_str()),
+        "long token should be fully parsed"
+    );
 }
 
 /// Test 37: Handshake parsing with special characters in token.
@@ -1875,7 +1892,11 @@ fn test_handshake_parsing_token_special_chars() {
 
     assert!(got_ready);
     assert_eq!(port, Some(4444));
-    assert_eq!(token.as_deref(), Some(special_token), "token with special chars should be preserved");
+    assert_eq!(
+        token.as_deref(),
+        Some(special_token),
+        "token with special chars should be preserved"
+    );
 }
 
 /// Test 38: Architecture detection parsing.
@@ -1889,7 +1910,11 @@ fn test_architecture_detection_mapping() {
     // Test valid architectures.
     assert_eq!(map_arch("x86_64"), Some("x86_64"));
     assert_eq!(map_arch("aarch64"), Some("aarch64"));
-    assert_eq!(map_arch("arm64"), Some("aarch64"), "arm64 should map to aarch64");
+    assert_eq!(
+        map_arch("arm64"),
+        Some("aarch64"),
+        "arm64 should map to aarch64"
+    );
 
     // Test unsupported architectures.
     assert_eq!(map_arch("armv7l"), None, "armv7l is unsupported");
@@ -2030,7 +2055,10 @@ fn test_transfer_command_construction() {
 
     // Verify that single quotes are used for path quoting (safe against injection).
     assert!(transfer_cmd.contains("'"));
-    assert!(!transfer_cmd.contains("\""), "should use single quotes, not double quotes");
+    assert!(
+        !transfer_cmd.contains("\""),
+        "should use single quotes, not double quotes"
+    );
 }
 
 /// Test 44: Handshake timeout scenario.
@@ -2069,14 +2097,25 @@ fn test_user_host_parsing() {
     }
 
     assert_eq!(parse_remote("user@host"), (Some("user"), "host"));
-    assert_eq!(parse_remote("admin@192.168.1.1"), (Some("admin"), "192.168.1.1"));
+    assert_eq!(
+        parse_remote("admin@192.168.1.1"),
+        (Some("admin"), "192.168.1.1")
+    );
     assert_eq!(parse_remote("host"), (None, "host"));
     assert_eq!(parse_remote("192.168.1.1"), (None, "192.168.1.1"));
 
     // Edge cases.
     assert_eq!(parse_remote(""), (None, ""));
-    assert_eq!(parse_remote("@host"), (Some(""), "host"), "empty user is valid");
-    assert_eq!(parse_remote("user@"), (Some("user"), ""), "empty host is parsed");
+    assert_eq!(
+        parse_remote("@host"),
+        (Some(""), "host"),
+        "empty user is valid"
+    );
+    assert_eq!(
+        parse_remote("user@"),
+        (Some("user"), ""),
+        "empty host is parsed"
+    );
     assert_eq!(
         parse_remote("user@host@extra"),
         (Some("user"), "host@extra"),
@@ -2102,7 +2141,10 @@ fn test_resolve_agent_address_direct_mode() {
         }
     }
 
-    assert_eq!(resolve_direct(Some("127.0.0.1:12345")), (Some("127.0.0.1:12345"), false));
+    assert_eq!(
+        resolve_direct(Some("127.0.0.1:12345")),
+        (Some("127.0.0.1:12345"), false)
+    );
     assert_eq!(resolve_direct(None), (None, true));
 }
 
@@ -2136,7 +2178,9 @@ fn test_resolve_agent_address_missing_flags() {
         } else if remote.is_some() {
             Ok("remote-mode")
         } else {
-            Err(Error::Protocol("either --remote or --agent must be specified".into()))
+            Err(Error::Protocol(
+                "either --remote or --agent must be specified".into(),
+            ))
         }
     }
 
@@ -2249,7 +2293,11 @@ fn test_log_level_enum_completeness() {
         assert!(!description.is_empty(), "level should have description");
     }
 
-    assert_eq!(all_levels.len(), 5, "LogLevel should have exactly 5 variants");
+    assert_eq!(
+        all_levels.len(),
+        5,
+        "LogLevel should have exactly 5 variants"
+    );
 }
 
 /// Test 52: LogLevel equality and ordering semantics.
@@ -2280,12 +2328,16 @@ fn test_log_level_clone_copy() {
     use protocol::LogLevel;
 
     let level = LogLevel::Info;
-    let cloned = level.clone();
-    let copied = level;
+    let copied1 = level;
+    let copied2 = level;
 
-    assert_eq!(cloned, LogLevel::Info);
-    assert_eq!(copied, LogLevel::Info);
-    assert_eq!(level, LogLevel::Info, "original should still be usable after copy");
+    assert_eq!(copied1, LogLevel::Info);
+    assert_eq!(copied2, LogLevel::Info);
+    assert_eq!(
+        level,
+        LogLevel::Info,
+        "original should still be usable after copy"
+    );
 }
 
 /// Test 54: AgentLogEvent with Unicode characters.
@@ -2341,7 +2393,8 @@ fn test_agent_log_event_special_chars() {
 fn test_agent_log_event_long_target() {
     use protocol::{AgentLogEvent, LogLevel};
 
-    let long_target = "agent::module::submodule::nested::very::deeply::somewhere::else::".repeat(10);
+    let long_target =
+        "agent::module::submodule::nested::very::deeply::somewhere::else::".repeat(10);
     let event = AgentLogEvent {
         level: LogLevel::Debug,
         target: long_target.clone(),
@@ -2371,7 +2424,10 @@ fn test_agent_log_event_encoded_size() {
     };
     let small_encoded = protocol::encode(&small_event).expect("encode failed");
     // rkyv encoding overhead is minimal, expect < 100 bytes for this tiny message.
-    assert!(small_encoded.len() < 100, "small event should have minimal encoding overhead");
+    assert!(
+        small_encoded.len() < 100,
+        "small event should have minimal encoding overhead"
+    );
 
     // Medium event.
     let medium_event = AgentLogEvent {
@@ -2381,7 +2437,10 @@ fn test_agent_log_event_encoded_size() {
     };
     let medium_encoded = protocol::encode(&medium_event).expect("encode failed");
     // Should be roughly the size of the strings plus overhead.
-    assert!(medium_encoded.len() < 200, "medium event should be < 200 bytes");
+    assert!(
+        medium_encoded.len() < 200,
+        "medium event should be < 200 bytes"
+    );
 
     // Large event.
     let large_event = AgentLogEvent {
@@ -2433,9 +2492,18 @@ fn test_agent_log_event_debug() {
     };
 
     let debug_str = format!("{:?}", event);
-    assert!(debug_str.contains("test_target"), "Debug output should contain target");
-    assert!(debug_str.contains("test message"), "Debug output should contain message");
-    assert!(debug_str.contains("Warn"), "Debug output should contain level");
+    assert!(
+        debug_str.contains("test_target"),
+        "Debug output should contain target"
+    );
+    assert!(
+        debug_str.contains("test message"),
+        "Debug output should contain message"
+    );
+    assert!(
+        debug_str.contains("Warn"),
+        "Debug output should contain level"
+    );
 }
 
 /// Test 60: Phoenix restart constants validation.
@@ -2450,13 +2518,13 @@ fn test_phoenix_restart_constants() {
     const RESTART_DELAY_SECS: u64 = 3;
 
     // MAX_RESTART_ATTEMPTS should be > 0 and < 100 (reasonable retry limit).
-    assert!(MAX_RESTART_ATTEMPTS > 0, "should allow at least one restart");
-    assert!(MAX_RESTART_ATTEMPTS < 100, "should not retry excessively");
+    const { assert!(MAX_RESTART_ATTEMPTS > 0) };
+    const { assert!(MAX_RESTART_ATTEMPTS < 100) };
     assert_eq!(MAX_RESTART_ATTEMPTS, 5, "expected value is 5");
 
     // RESTART_DELAY_SECS should be > 0 and < 60 (reasonable delay).
-    assert!(RESTART_DELAY_SECS > 0, "should have non-zero delay");
-    assert!(RESTART_DELAY_SECS < 60, "should not delay too long");
+    const { assert!(RESTART_DELAY_SECS > 0) };
+    const { assert!(RESTART_DELAY_SECS < 60) };
     assert_eq!(RESTART_DELAY_SECS, 3, "expected value is 3 seconds");
 
     // Total maximum retry time should be reasonable.
@@ -2477,8 +2545,8 @@ fn test_max_log_frame_constant() {
     const MAX_LOG_FRAME: u32 = 65_536;
 
     assert_eq!(MAX_LOG_FRAME, 65_536, "MAX_LOG_FRAME should be 64 KB");
-    assert!(MAX_LOG_FRAME > 0, "MAX_LOG_FRAME should be positive");
-    assert!(MAX_LOG_FRAME < 1_048_576, "MAX_LOG_FRAME should be < 1 MB");
+    const { assert!(MAX_LOG_FRAME > 0) };
+    const { assert!(MAX_LOG_FRAME < 1_048_576) };
 
     // Verify it's a power of 2 (good for performance).
     assert_eq!(
@@ -2516,8 +2584,7 @@ fn test_log_frame_format() {
     assert_eq!(frame_len, len, "decoded length should match encoded length");
 
     let decoded_payload = &frame[4..];
-    let decoded_event: AgentLogEvent =
-        protocol::decode(decoded_payload).expect("decode failed");
+    let decoded_event: AgentLogEvent = protocol::decode(decoded_payload).expect("decode failed");
 
     assert_eq!(decoded_event, event);
 }
@@ -2580,10 +2647,9 @@ fn test_log_frame_empty_message() {
     frame.extend_from_slice(&len.to_be_bytes());
     frame.extend_from_slice(&payload);
 
-    let frame_len = u32::from_be_bytes([frame[0], frame[1], frame[2], frame[3]]);
+    let _frame_len = u32::from_be_bytes([frame[0], frame[1], frame[2], frame[3]]);
     let decoded_payload = &frame[4..];
-    let decoded_event: AgentLogEvent =
-        protocol::decode(decoded_payload).expect("decode failed");
+    let decoded_event: AgentLogEvent = protocol::decode(decoded_payload).expect("decode failed");
 
     assert_eq!(decoded_event, event);
 }
@@ -2615,7 +2681,11 @@ fn test_log_level_to_tracing_level_mapping() {
             LogLevel::Debug => tracing::Level::DEBUG,
             LogLevel::Trace => tracing::Level::TRACE,
         };
-        assert_eq!(mapped, tracing_level, "mapping should be correct for {:?}", proto_level);
+        assert_eq!(
+            mapped, tracing_level,
+            "mapping should be correct for {:?}",
+            proto_level
+        );
     }
 }
 
@@ -2693,17 +2763,11 @@ fn test_log_directory_fallback_chain() {
     }
 
     // Case 1: state_dir available.
-    let result = fallback_with_mocked_dirs(
-        Some(std::path::PathBuf::from("/mock/state")),
-        None,
-    );
+    let result = fallback_with_mocked_dirs(Some(std::path::PathBuf::from("/mock/state")), None);
     assert_eq!(result, std::path::PathBuf::from("/mock/state/port-linker"));
 
     // Case 2: state_dir unavailable, home_dir available.
-    let result = fallback_with_mocked_dirs(
-        None,
-        Some(std::path::PathBuf::from("/home/user")),
-    );
+    let result = fallback_with_mocked_dirs(None, Some(std::path::PathBuf::from("/home/user")));
     assert_eq!(
         result,
         std::path::PathBuf::from("/home/user/.local/state/port-linker")
@@ -2723,8 +2787,14 @@ fn test_log_file_name_constant() {
     const LOG_FILE_NAME: &str = "debug.log";
 
     assert_eq!(LOG_FILE_NAME, "debug.log");
-    assert!(!LOG_FILE_NAME.is_empty(), "log file name should not be empty");
-    assert!(LOG_FILE_NAME.ends_with(".log"), "log file name should end with .log");
+    assert!(
+        !LOG_FILE_NAME.is_empty(),
+        "log file name should not be empty"
+    );
+    assert!(
+        LOG_FILE_NAME.ends_with(".log"),
+        "log file name should end with .log"
+    );
 }
 
 /// Test 69: AgentLogEvent with all levels in sequence.
@@ -2735,7 +2805,7 @@ fn test_log_file_name_constant() {
 fn test_agent_log_event_level_sequence() {
     use protocol::{AgentLogEvent, LogLevel};
 
-    let levels = vec![
+    let levels = [
         LogLevel::Trace,
         LogLevel::Debug,
         LogLevel::Info,
@@ -2772,8 +2842,12 @@ fn test_agent_log_event_level_sequence() {
 /// Validates that PROTOCOL_VERSION is accessible and has a reasonable value.
 #[test]
 fn test_protocol_version_constant() {
-    assert_eq!(protocol::PROTOCOL_VERSION, 1, "PROTOCOL_VERSION should be 1");
-    assert!(protocol::PROTOCOL_VERSION > 0, "version should be positive");
+    assert_eq!(
+        protocol::PROTOCOL_VERSION,
+        1,
+        "PROTOCOL_VERSION should be 1"
+    );
+    const { assert!(protocol::PROTOCOL_VERSION > 0) };
 }
 
 /// Test 71: AgentLogEvent with maximum target and message lengths.

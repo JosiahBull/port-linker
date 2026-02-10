@@ -34,11 +34,7 @@ mod platform {
     }
 
     fn sysctl_u16(key: &str) -> Option<u16> {
-        let output = Command::new("sysctl")
-            .arg("-n")
-            .arg(key)
-            .output()
-            .ok()?;
+        let output = Command::new("sysctl").arg("-n").arg(key).output().ok()?;
         if !output.status.success() {
             return None;
         }
@@ -109,8 +105,14 @@ mod tests {
     #[test]
     fn ephemeral_range_returns_valid_range() {
         let (start, end) = ephemeral_range();
-        assert!(start < end, "start ({start}) should be less than end ({end})");
-        assert!(start >= 1024, "ephemeral range should not include well-known ports");
+        assert!(
+            start < end,
+            "start ({start}) should be less than end ({end})"
+        );
+        assert!(
+            start >= 1024,
+            "ephemeral range should not include well-known ports"
+        );
     }
 
     #[test]

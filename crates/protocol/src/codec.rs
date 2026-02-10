@@ -258,9 +258,9 @@ mod tests {
     #[test]
     fn log_level_clone_copy() {
         let level = LogLevel::Info;
-        let cloned = level.clone();
         let copied = level;
-        assert_eq!(cloned, LogLevel::Info);
+        let copied2 = level;
         assert_eq!(copied, LogLevel::Info);
+        assert_eq!(copied2, LogLevel::Info);
     }
 }

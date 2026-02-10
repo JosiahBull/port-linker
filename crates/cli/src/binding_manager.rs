@@ -80,11 +80,7 @@ pub struct BindingManager {
 }
 
 impl BindingManager {
-    pub fn new(
-        connection: Connection,
-        fd_limit: Option<usize>,
-        policy: ConflictPolicy,
-    ) -> Self {
+    pub fn new(connection: Connection, fd_limit: Option<usize>, policy: ConflictPolicy) -> Self {
         let (ephemeral_start, ephemeral_end) = common::ephemeral::ephemeral_range();
         info!(
             ephemeral_start,
@@ -248,11 +244,7 @@ impl BindingManager {
 // ---------------------------------------------------------------------------
 
 /// Try to bind a TCP listener, resolving conflicts according to the policy.
-async fn try_bind_tcp(
-    addr: SocketAddr,
-    port: u16,
-    policy: ConflictPolicy,
-) -> Option<TcpListener> {
+async fn try_bind_tcp(addr: SocketAddr, port: u16, policy: ConflictPolicy) -> Option<TcpListener> {
     // First attempt.
     match TcpListener::bind(addr).await {
         Ok(l) => return Some(l),
@@ -314,11 +306,10 @@ async fn resolve_conflict(
     // Look up who owns the port. This shells out to `lsof` on macOS (can take
     // 200-500ms), so run on the blocking threadpool to avoid starving the
     // async runtime.
-    let process_info =
-        tokio::task::spawn_blocking(move || process::find_listener(port, transport))
-            .await
-            .ok()
-            .flatten();
+    let process_info = tokio::task::spawn_blocking(move || process::find_listener(port, transport))
+        .await
+        .ok()
+        .flatten();
 
     match policy {
         ConflictPolicy::AutoSkip => {
@@ -363,9 +354,7 @@ async fn resolve_conflict(
                 false
             }
         }
-        ConflictPolicy::Interactive => {
-            interactive_resolve(port, proto_name, process_info).await
-        }
+        ConflictPolicy::Interactive => interactive_resolve(port, proto_name, process_info).await,
     }
 }
 

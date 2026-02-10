@@ -121,12 +121,8 @@ impl rustls::client::danger::ServerCertVerifier for SkipServerVerification {
 // ---------------------------------------------------------------------------
 
 /// Send a `ControlMsg` with a 4-byte big-endian length prefix.
-async fn send_msg(
-    send: &mut quinn::SendStream,
-    msg: &ControlMsg,
-) -> Result<()> {
-    let payload: Bytes =
-        protocol::encode(msg).map_err(|e| Error::Codec(e.to_string()))?;
+async fn send_msg(send: &mut quinn::SendStream, msg: &ControlMsg) -> Result<()> {
+    let payload: Bytes = protocol::encode(msg).map_err(|e| Error::Codec(e.to_string()))?;
     let len = payload.len() as u32;
     send.write_all(&len.to_be_bytes())
         .await
@@ -230,18 +226,14 @@ async fn run_with_phoenix_restart(args: &Args) -> Result<()> {
                         "gave up after {MAX_RESTART_ATTEMPTS} consecutive restart failures: {e}"
                     )));
                 }
-                warn!(
-                    delay = RESTART_DELAY_SECS,
-                    "waiting before retry"
-                );
+                warn!(delay = RESTART_DELAY_SECS, "waiting before retry");
                 tokio::time::sleep(std::time::Duration::from_secs(RESTART_DELAY_SECS)).await;
                 continue;
             }
         };
 
         // Step 2: Run the session.
-        let session_result =
-            run_single_session(args, agent_addr, Some(&remote_agent)).await;
+        let session_result = run_single_session(args, agent_addr, Some(&remote_agent)).await;
 
         // Step 3: Cleanup the old agent.
         remote_agent.cleanup().await;
@@ -267,10 +259,7 @@ async fn run_with_phoenix_restart(args: &Args) -> Result<()> {
                     )));
                 }
 
-                warn!(
-                    delay = RESTART_DELAY_SECS,
-                    "waiting before restart"
-                );
+                warn!(delay = RESTART_DELAY_SECS, "waiting before restart");
                 tokio::time::sleep(std::time::Duration::from_secs(RESTART_DELAY_SECS)).await;
             }
         }
@@ -282,8 +271,7 @@ async fn bootstrap_remote(
     args: &Args,
     remote: &str,
 ) -> Result<(SocketAddr, bootstrap::RemoteAgent)> {
-    let ssh_session =
-        ssh::SshSession::connect(remote, args.ssh_host_key_verification).await?;
+    let ssh_session = ssh::SshSession::connect(remote, args.ssh_host_key_verification).await?;
 
     let peer_ip = ssh_session.peer_ip();
 
@@ -334,8 +322,8 @@ async fn run_single_session(
     let bind_addr: SocketAddr = "0.0.0.0:0"
         .parse()
         .map_err(|e| Error::Protocol(format!("invalid bind address: {e}")))?;
-    let mut endpoint = quinn::Endpoint::client(bind_addr)
-        .map_err(|e| Error::QuicConnection(e.to_string()))?;
+    let mut endpoint =
+        quinn::Endpoint::client(bind_addr).map_err(|e| Error::QuicConnection(e.to_string()))?;
     endpoint.set_default_client_config(client_config);
 
     // Connect to the agent.
@@ -448,11 +436,8 @@ async fn run_single_session(
     }
 
     // Initialize the binding manager for port forwarding.
-    let mut manager = BindingManager::new(
-        connection.clone(),
-        args.fd_limit,
-        args.conflict_resolution,
-    );
+    let mut manager =
+        BindingManager::new(connection.clone(), args.fd_limit, args.conflict_resolution);
 
     // Initialize desktop notifications with 2-second accumulation.
     let mapping = Arc::new(notify::PortMapping::load_default());
@@ -524,4 +509,3 @@ async fn run_single_session(
     // Phoenix mode: return error to trigger restart.
     Err(session_error)
 }
-

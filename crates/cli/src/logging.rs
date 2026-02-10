@@ -23,7 +23,10 @@ pub fn init_logging() -> WorkerGuard {
 
     // Ensure the log directory exists.
     if let Err(e) = std::fs::create_dir_all(&log_dir) {
-        eprintln!("warning: could not create log directory {}: {e}", log_dir.display());
+        eprintln!(
+            "warning: could not create log directory {}: {e}",
+            log_dir.display()
+        );
     }
 
     // Daily rolling file appender.
@@ -205,8 +208,8 @@ mod tests {
     #[test]
     fn max_log_frame_constant() {
         assert_eq!(MAX_LOG_FRAME, 65_536);
-        assert!(MAX_LOG_FRAME > 0);
-        assert!(MAX_LOG_FRAME < 1_048_576);
+        const { assert!(MAX_LOG_FRAME > 0) };
+        const { assert!(MAX_LOG_FRAME < 1_048_576) };
         assert!(MAX_LOG_FRAME.is_power_of_two());
     }
 
@@ -237,7 +240,7 @@ mod tests {
     #[tokio::test]
     async fn receive_agent_logs_handles_empty_stream() {
         // Create a mock QUIC stream that closes immediately.
-        let (mut send, recv) = tokio::io::duplex(1024);
+        let (send, _recv) = tokio::io::duplex(1024);
 
         // Close the send side immediately.
         drop(send);

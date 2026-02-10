@@ -39,12 +39,7 @@ impl NotificationAccumulator {
 
     /// Record a port-added event. Starts the accumulation timer if this is the
     /// first pending event.
-    pub fn port_added(
-        &mut self,
-        port: u16,
-        proto: protocol::Protocol,
-        process_name: Option<&str>,
-    ) {
+    pub fn port_added(&mut self, port: u16, proto: protocol::Protocol, process_name: Option<&str>) {
         let info = PortInfo::new(port, process_name, proto_to_notify(proto), &self.mapping);
         self.pending_added.push(info);
         self.ensure_deadline();

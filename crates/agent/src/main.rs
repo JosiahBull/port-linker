@@ -43,10 +43,7 @@ async fn main() {
     // Initialize tracing: stderr for pre-QUIC output + forwarding layer.
     // Architecture Section 7.1: stdout is reserved for the handshake protocol.
     tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::fmt::layer()
-                .with_writer(std::io::stderr),
-        )
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
         .with(fwd_layer)
         .with(level)
         .init();
@@ -78,12 +75,9 @@ async fn run(log_rx: tokio::sync::mpsc::Receiver<protocol::AgentLogEvent>) -> Re
 
     // 3. Bind on 0.0.0.0:0 to get a random port.
     let bind_addr: SocketAddr = "0.0.0.0:0".parse().unwrap();
-    let endpoint = Endpoint::server(server_config, bind_addr)
-        .map_err(Error::Io)?;
+    let endpoint = Endpoint::server(server_config, bind_addr).map_err(Error::Io)?;
 
-    let local_addr = endpoint
-        .local_addr()
-        .map_err(Error::Io)?;
+    let local_addr = endpoint.local_addr().map_err(Error::Io)?;
     let port = local_addr.port();
 
     // 4. Generate a one-time connection token.
@@ -240,10 +234,7 @@ async fn run(log_rx: tokio::sync::mpsc::Receiver<protocol::AgentLogEvent>) -> Re
 /// 3. Send 1-byte status: 0x00 = OK, 0x01 = error
 /// 4. On error: send framed `TcpStreamError`, close stream
 /// 5. On success: bidirectional raw byte copy
-async fn handle_tcp_stream(
-    mut quic_send: quinn::SendStream,
-    mut quic_recv: quinn::RecvStream,
-) {
+async fn handle_tcp_stream(mut quic_send: quinn::SendStream, mut quic_recv: quinn::RecvStream) {
     // Read the TcpStreamInit message.
     let init = match recv_framed(&mut quic_recv).await {
         Ok(msg) => msg,
@@ -290,7 +281,10 @@ async fn handle_tcp_stream(
         }
     };
 
-    debug!(port, "connected to local service, starting bidirectional copy");
+    debug!(
+        port,
+        "connected to local service, starting bidirectional copy"
+    );
 
     // Bidirectional copy - use join to respect TCP half-close semantics.
     let (mut tcp_read, mut tcp_write) = tcp_stream.into_split();
@@ -315,10 +309,7 @@ async fn handle_tcp_stream(
 
 /// Handle a single incoming UDP datagram, forwarding it to the local service.
 /// Uses a shared socket cache to avoid creating a new socket per datagram.
-async fn handle_udp_datagram(
-    datagram: Bytes,
-    cache: Arc<RwLock<HashMap<u16, Arc<UdpSocket>>>>,
-) {
+async fn handle_udp_datagram(datagram: Bytes, cache: Arc<RwLock<HashMap<u16, Arc<UdpSocket>>>>) {
     let packet = match protocol::decode::<protocol::Packet>(&datagram) {
         Ok(p) => p,
         Err(e) => {
@@ -349,7 +340,9 @@ async fn handle_udp_datagram(
                         }
                     };
                     let mut write_guard = cache.write().await;
-                    write_guard.entry(port).or_insert_with(|| new_socket.clone());
+                    write_guard
+                        .entry(port)
+                        .or_insert_with(|| new_socket.clone());
                     new_socket
                 }
             };
@@ -369,12 +362,9 @@ async fn handle_udp_datagram(
 // ---------------------------------------------------------------------------
 
 /// Send a length-prefixed, rkyv-encoded control message on a QUIC stream.
-async fn send_msg(
-    send: &mut quinn::SendStream,
-    msg: &ControlMsg,
-) -> Result<()> {
-    let payload: Bytes = protocol::encode(msg)
-        .map_err(|e| Error::Codec(format!("encode error: {e}")))?;
+async fn send_msg(send: &mut quinn::SendStream, msg: &ControlMsg) -> Result<()> {
+    let payload: Bytes =
+        protocol::encode(msg).map_err(|e| Error::Codec(format!("encode error: {e}")))?;
 
     let len = payload.len() as u32;
     send.write_all(&len.to_be_bytes())
@@ -389,9 +379,7 @@ async fn send_msg(
 }
 
 /// Receive a length-prefixed, rkyv-encoded control message from a QUIC stream.
-async fn recv_msg(
-    recv: &mut quinn::RecvStream,
-) -> Result<ControlMsg> {
+async fn recv_msg(recv: &mut quinn::RecvStream) -> Result<ControlMsg> {
     let mut len_buf = [0u8; 4];
     recv.read_exact(&mut len_buf)
         .await
@@ -409,8 +397,8 @@ async fn recv_msg(
         .await
         .map_err(|e| Error::QuicStream(format!("failed to read frame payload: {e}")))?;
 
-    let msg: ControlMsg = protocol::decode(&payload)
-        .map_err(|e| Error::Codec(format!("decode error: {e}")))?;
+    let msg: ControlMsg =
+        protocol::decode(&payload).map_err(|e| Error::Codec(format!("decode error: {e}")))?;
 
     Ok(msg)
 }

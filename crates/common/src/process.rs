@@ -70,12 +70,9 @@ mod platform {
                 "-n".into(),
                 "-P".into(),
             ],
-            TransportProto::Udp => vec![
-                "-i".into(),
-                format!("UDP:{port}"),
-                "-n".into(),
-                "-P".into(),
-            ],
+            TransportProto::Udp => {
+                vec!["-i".into(), format!("UDP:{port}"), "-n".into(), "-P".into()]
+            }
         }
     }
 

@@ -156,7 +156,11 @@ fn parse_ssh_config(reader: impl BufRead, target_host: &str) -> Option<ParsedHos
         }
     }
 
-    if found_match { Some(result) } else { None }
+    if found_match {
+        Some(result)
+    } else {
+        None
+    }
 }
 
 /// Split an SSH config line into (keyword, argument).
@@ -309,10 +313,16 @@ mod tests {
             .collect();
 
         if filenames.len() > 1 {
-            let expected_order = vec!["id_ed25519", "id_rsa", "id_ecdsa"];
+            let expected_order = ["id_ed25519", "id_rsa", "id_ecdsa"];
             for i in 0..filenames.len().saturating_sub(1) {
-                let pos1 = expected_order.iter().position(|&x| x == filenames[i]).unwrap();
-                let pos2 = expected_order.iter().position(|&x| x == filenames[i + 1]).unwrap();
+                let pos1 = expected_order
+                    .iter()
+                    .position(|&x| x == filenames[i])
+                    .unwrap();
+                let pos2 = expected_order
+                    .iter()
+                    .position(|&x| x == filenames[i + 1])
+                    .unwrap();
                 assert!(pos1 < pos2, "keys should be in preference order");
             }
         }
@@ -486,7 +496,10 @@ host myserver
     #[test]
     fn expand_tilde_with_home() {
         let expanded = expand_tilde("~/.ssh/id_rsa");
-        assert!(!expanded.starts_with('~'), "tilde should be expanded: {expanded}");
+        assert!(
+            !expanded.starts_with('~'),
+            "tilde should be expanded: {expanded}"
+        );
         assert!(expanded.ends_with(".ssh/id_rsa"));
     }
 

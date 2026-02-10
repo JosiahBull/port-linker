@@ -13,10 +13,7 @@ pub enum PortEvent {
 
 /// Compare `previous` and `current` port snapshots, returning the events that
 /// describe the transition and the new state (which is just `current`).
-pub fn diff(
-    previous: &HashSet<Listener>,
-    current: &HashSet<Listener>,
-) -> Vec<PortEvent> {
+pub fn diff(previous: &HashSet<Listener>, current: &HashSet<Listener>) -> Vec<PortEvent> {
     let mut events = Vec::new();
 
     // Ports in current but not in previous → Added
@@ -47,11 +44,8 @@ mod tests {
 
     #[test]
     fn no_change_produces_no_events() {
-        let state: HashSet<Listener> = [
-            listener(80, Protocol::Tcp),
-            listener(443, Protocol::Tcp),
-        ]
-        .into();
+        let state: HashSet<Listener> =
+            [listener(80, Protocol::Tcp), listener(443, Protocol::Tcp)].into();
 
         let events = diff(&state, &state);
         assert!(events.is_empty());
@@ -60,11 +54,8 @@ mod tests {
     #[test]
     fn added_ports() {
         let prev: HashSet<Listener> = HashSet::new();
-        let curr: HashSet<Listener> = [
-            listener(80, Protocol::Tcp),
-            listener(53, Protocol::Udp),
-        ]
-        .into();
+        let curr: HashSet<Listener> =
+            [listener(80, Protocol::Tcp), listener(53, Protocol::Udp)].into();
 
         let events = diff(&prev, &curr);
         assert_eq!(events.len(), 2);
@@ -74,11 +65,8 @@ mod tests {
 
     #[test]
     fn removed_ports() {
-        let prev: HashSet<Listener> = [
-            listener(80, Protocol::Tcp),
-            listener(53, Protocol::Udp),
-        ]
-        .into();
+        let prev: HashSet<Listener> =
+            [listener(80, Protocol::Tcp), listener(53, Protocol::Udp)].into();
         let curr: HashSet<Listener> = HashSet::new();
 
         let events = diff(&prev, &curr);
@@ -89,16 +77,10 @@ mod tests {
 
     #[test]
     fn mixed_add_and_remove() {
-        let prev: HashSet<Listener> = [
-            listener(80, Protocol::Tcp),
-            listener(443, Protocol::Tcp),
-        ]
-        .into();
-        let curr: HashSet<Listener> = [
-            listener(443, Protocol::Tcp),
-            listener(8080, Protocol::Tcp),
-        ]
-        .into();
+        let prev: HashSet<Listener> =
+            [listener(80, Protocol::Tcp), listener(443, Protocol::Tcp)].into();
+        let curr: HashSet<Listener> =
+            [listener(443, Protocol::Tcp), listener(8080, Protocol::Tcp)].into();
 
         let events = diff(&prev, &curr);
         assert_eq!(events.len(), 2);

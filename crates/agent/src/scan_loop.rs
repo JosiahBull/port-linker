@@ -23,9 +23,9 @@ pub async fn run_scan_loop<S: PortScanner>(
 ) {
     let excluded: HashSet<Listener> = HashSet::from([
         (self_port, protocol::Protocol::Udp), // agent's own QUIC endpoint
-        (22, protocol::Protocol::Tcp),         // SSH
-        (53, protocol::Protocol::Udp),         // DNS
-        (41641, protocol::Protocol::Udp),      // Tailscale WireGuard
+        (22, protocol::Protocol::Tcp),        // SSH
+        (53, protocol::Protocol::Udp),        // DNS
+        (41641, protocol::Protocol::Udp),     // Tailscale WireGuard
     ]);
     let mut previous: HashSet<Listener> = HashSet::new();
 
@@ -64,7 +64,11 @@ pub async fn run_scan_loop<S: PortScanner>(
                     if let Some(ref name) = process_name {
                         debug!(port, ?proto, process = %name, "port change detected (added)");
                     } else {
-                        debug!(port, ?proto, "port change detected (added, unknown process)");
+                        debug!(
+                            port,
+                            ?proto,
+                            "port change detected (added, unknown process)"
+                        );
                     }
                     PortEvent::Added(port, proto, process_name)
                 }

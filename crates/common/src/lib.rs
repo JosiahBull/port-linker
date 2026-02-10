@@ -1,6 +1,6 @@
 pub mod ephemeral;
-pub mod process;
 mod error;
+pub mod process;
 
 pub use error::Error;
 pub type Result<T> = std::result::Result<T, Error>;
@@ -39,7 +39,10 @@ mod tests {
     #[test]
     fn token_has_prefix() {
         let tok = generate_token();
-        assert!(tok.starts_with("plk-"), "token should start with plk-: {tok}");
+        assert!(
+            tok.starts_with("plk-"),
+            "token should start with plk-: {tok}"
+        );
     }
 
     #[test]

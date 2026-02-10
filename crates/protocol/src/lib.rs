@@ -6,15 +6,7 @@ pub const PROTOCOL_VERSION: u32 = 1;
 
 /// Transport protocol for a forwarded port.
 #[derive(
-    rkyv::Archive,
-    rkyv::Serialize,
-    rkyv::Deserialize,
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Hash,
+    rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash,
 )]
 #[rkyv(compare(PartialEq), derive(Debug))]
 pub enum Protocol {
@@ -23,16 +15,7 @@ pub enum Protocol {
 }
 
 /// Log severity level for agent log forwarding (Architecture Section 7.1).
-#[derive(
-    rkyv::Archive,
-    rkyv::Serialize,
-    rkyv::Deserialize,
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[rkyv(compare(PartialEq), derive(Debug))]
 pub enum LogLevel {
     Error,
@@ -44,14 +27,7 @@ pub enum LogLevel {
 
 /// A structured log event from the agent, sent over a dedicated QUIC
 /// unidirectional stream (Architecture Section 7.1).
-#[derive(
-    rkyv::Archive,
-    rkyv::Serialize,
-    rkyv::Deserialize,
-    Debug,
-    Clone,
-    PartialEq,
-)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Debug, Clone, PartialEq)]
 #[rkyv(compare(PartialEq), derive(Debug))]
 pub struct AgentLogEvent {
     pub level: LogLevel,
@@ -60,14 +36,7 @@ pub struct AgentLogEvent {
 }
 
 /// Messages sent on the QUIC control stream (stream 0).
-#[derive(
-    rkyv::Archive,
-    rkyv::Serialize,
-    rkyv::Deserialize,
-    Debug,
-    Clone,
-    PartialEq,
-)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Debug, Clone, PartialEq)]
 #[rkyv(compare(PartialEq), derive(Debug))]
 pub enum ControlMsg {
     /// Initial handshake. Must be the first message on a new connection.
@@ -96,14 +65,7 @@ pub enum ControlMsg {
 }
 
 /// Top-level packet that wraps either a control message or raw UDP data.
-#[derive(
-    rkyv::Archive,
-    rkyv::Serialize,
-    rkyv::Deserialize,
-    Debug,
-    Clone,
-    PartialEq,
-)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Debug, Clone, PartialEq)]
 #[rkyv(compare(PartialEq), derive(Debug))]
 pub enum Packet {
     /// A control-plane message.

@@ -87,7 +87,3 @@ codegen-units = 1         # Single codegen unit for maximum optimization
 panic = "abort"           # No unwinding = smaller binary
 strip = true              # Strip all symbols
 overflow-checks = false   # Remove overflow check panic paths
-
-[workspace.package.metadata.docs.rs]
-all-features = true
-rustdoc-args = ["--cfg", "docsrs"]

@@ -1,10 +1,10 @@
 //! Agent log forwarding layer (Architecture Section 7.1).
 //!
-//! Provides a [`tracing::Layer`] that captures log events and sends them
+//! Provides a tracing `Layer` that captures log events and sends them
 //! over a QUIC unidirectional stream to the host in real-time. The events
 //! are serialized using the protocol crate's `AgentLogEvent` type.
 //!
-//! The internal channel is bounded to [`CHANNEL_CAPACITY`] to provide
+//! The internal channel is bounded to `CHANNEL_CAPACITY` to provide
 //! backpressure. When the channel is full (e.g. the QUIC stream is
 //! congested), log events are silently dropped rather than blocking the
 //! calling task.
@@ -193,11 +193,20 @@ mod tests {
 
     #[test]
     fn to_tracing_level_roundtrip() {
-        assert_eq!(to_tracing_level(&LogLevel::Error), tracing_core::Level::ERROR);
+        assert_eq!(
+            to_tracing_level(&LogLevel::Error),
+            tracing_core::Level::ERROR
+        );
         assert_eq!(to_tracing_level(&LogLevel::Warn), tracing_core::Level::WARN);
         assert_eq!(to_tracing_level(&LogLevel::Info), tracing_core::Level::INFO);
-        assert_eq!(to_tracing_level(&LogLevel::Debug), tracing_core::Level::DEBUG);
-        assert_eq!(to_tracing_level(&LogLevel::Trace), tracing_core::Level::TRACE);
+        assert_eq!(
+            to_tracing_level(&LogLevel::Debug),
+            tracing_core::Level::DEBUG
+        );
+        assert_eq!(
+            to_tracing_level(&LogLevel::Trace),
+            tracing_core::Level::TRACE
+        );
     }
 
     #[test]
@@ -225,7 +234,11 @@ mod tests {
         let event = rx.try_recv().expect("should have received a log event");
         assert_eq!(event.level, LogLevel::Info);
         assert_eq!(event.target, "test_target");
-        assert!(event.message.contains("hello from test"), "message: {}", event.message);
+        assert!(
+            event.message.contains("hello from test"),
+            "message: {}",
+            event.message
+        );
     }
 
     #[tokio::test]
@@ -252,7 +265,13 @@ mod tests {
 
         assert_eq!(
             levels,
-            vec![LogLevel::Error, LogLevel::Warn, LogLevel::Info, LogLevel::Debug, LogLevel::Trace]
+            vec![
+                LogLevel::Error,
+                LogLevel::Warn,
+                LogLevel::Info,
+                LogLevel::Debug,
+                LogLevel::Trace
+            ]
         );
     }
 
@@ -311,7 +330,7 @@ mod tests {
     #[test]
     fn max_log_frame_constant() {
         assert_eq!(MAX_LOG_FRAME, 65_536);
-        assert!(MAX_LOG_FRAME > 0);
+        const { assert!(MAX_LOG_FRAME > 0) };
         assert!(MAX_LOG_FRAME.is_power_of_two());
     }
 

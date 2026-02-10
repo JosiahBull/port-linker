@@ -7,3 +7,6 @@ tests/docker/test_key.pub
 # cargo-mutants
 mutants.out
 mutants.out.old
+
+# Mermaid cache
+.mermaid/
