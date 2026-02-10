@@ -65,6 +65,12 @@ mod platform {
         proc_root: PathBuf,
     }
 
+    impl Default for LinuxProcScanner {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
     impl LinuxProcScanner {
         /// Create a scanner that reads from the real `/proc` filesystem.
         pub fn new() -> Self {
