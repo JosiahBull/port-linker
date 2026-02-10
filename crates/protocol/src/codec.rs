@@ -68,6 +68,16 @@ mod tests {
         roundtrip(&ControlMsg::PortAdded {
             port: 8080,
             proto: Protocol::Tcp,
+            process_name: Some("nginx".into()),
+        });
+    }
+
+    #[test]
+    fn roundtrip_port_added_no_process() {
+        roundtrip(&ControlMsg::PortAdded {
+            port: 3000,
+            proto: Protocol::Tcp,
+            process_name: None,
         });
     }
 

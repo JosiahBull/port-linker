@@ -7,7 +7,7 @@ use crate::scanner::Listener;
 /// An event emitted when the set of listening ports changes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PortEvent {
-    Added(u16, Protocol),
+    Added(u16, Protocol, Option<String>),
     Removed(u16, Protocol),
 }
 
@@ -20,9 +20,10 @@ pub fn diff(
     let mut events = Vec::new();
 
     // Ports in current but not in previous → Added
+    // Process name is initially None; the scan loop enriches it after diffing.
     for &(port, proto) in current {
         if !previous.contains(&(port, proto)) {
-            events.push(PortEvent::Added(port, proto));
+            events.push(PortEvent::Added(port, proto, None));
         }
     }
 
@@ -67,8 +68,8 @@ mod tests {
 
         let events = diff(&prev, &curr);
         assert_eq!(events.len(), 2);
-        assert!(events.contains(&PortEvent::Added(80, Protocol::Tcp)));
-        assert!(events.contains(&PortEvent::Added(53, Protocol::Udp)));
+        assert!(events.contains(&PortEvent::Added(80, Protocol::Tcp, None)));
+        assert!(events.contains(&PortEvent::Added(53, Protocol::Udp, None)));
     }
 
     #[test]
@@ -101,7 +102,7 @@ mod tests {
 
         let events = diff(&prev, &curr);
         assert_eq!(events.len(), 2);
-        assert!(events.contains(&PortEvent::Added(8080, Protocol::Tcp)));
+        assert!(events.contains(&PortEvent::Added(8080, Protocol::Tcp, None)));
         assert!(events.contains(&PortEvent::Removed(80, Protocol::Tcp)));
     }
 
@@ -113,7 +114,7 @@ mod tests {
 
         let events = diff(&prev, &curr);
         assert_eq!(events.len(), 2);
-        assert!(events.contains(&PortEvent::Added(53, Protocol::Udp)));
+        assert!(events.contains(&PortEvent::Added(53, Protocol::Udp, None)));
         assert!(events.contains(&PortEvent::Removed(53, Protocol::Tcp)));
     }
 

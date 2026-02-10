@@ -76,7 +76,11 @@ pub enum ControlMsg {
         token: String,
     },
     /// The remote agent discovered a new listening port.
-    PortAdded { port: u16, proto: Protocol },
+    PortAdded {
+        port: u16,
+        proto: Protocol,
+        process_name: Option<String>,
+    },
     /// A previously-reported port is no longer listening.
     PortRemoved { port: u16, proto: Protocol },
     /// Keep-alive ping.

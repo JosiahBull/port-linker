@@ -470,10 +470,10 @@ async fn run_single_session(
         tokio::select! {
             msg = recv_msg(&mut recv) => {
                 match msg {
-                    Ok(ControlMsg::PortAdded { port, proto }) => {
-                        info!(port, ?proto, "remote port added");
+                    Ok(ControlMsg::PortAdded { port, proto, process_name }) => {
+                        info!(port, ?proto, process = ?process_name, "remote port added");
                         manager.handle_port_added(port, proto);
-                        accumulator.port_added(port, proto);
+                        accumulator.port_added(port, proto, process_name.as_deref());
                         info!(active = manager.active_count(), "active bindings");
                     }
                     Ok(ControlMsg::PortRemoved { port, proto }) => {

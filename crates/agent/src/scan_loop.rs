@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use tokio::sync::mpsc;
-use tracing::{debug, error};
+use tracing::{debug, error, trace};
 
 use crate::diff::{self, PortEvent};
 use crate::scanner::{Listener, PortScanner};
@@ -25,6 +25,7 @@ pub async fn run_scan_loop<S: PortScanner>(
         (self_port, protocol::Protocol::Udp), // agent's own QUIC endpoint
         (22, protocol::Protocol::Tcp),         // SSH
         (53, protocol::Protocol::Udp),         // DNS
+        (41641, protocol::Protocol::Udp),      // Tailscale WireGuard
     ]);
     let mut previous: HashSet<Listener> = HashSet::new();
 
@@ -44,16 +45,58 @@ pub async fn run_scan_loop<S: PortScanner>(
             current.remove(listener);
         }
 
+        // Filter out privileged ports (< 1024) — these are system services
+        // (DHCP, NTP, etc.) that should not be forwarded.
+        current.retain(|&(port, _)| port >= 1024);
+
+        // Filter out ephemeral ports — these are transient outbound sockets,
+        // not real services.
+        current.retain(|&(port, _)| !common::ephemeral::is_ephemeral(port));
+
         let events = diff::diff(&previous, &current);
         previous = current;
 
         for event in events {
-            debug!(?event, "port change detected");
+            // Enrich Added events with process name lookup.
+            let event = match event {
+                PortEvent::Added(port, proto, _) => {
+                    let process_name = lookup_process_name(port, proto);
+                    if let Some(ref name) = process_name {
+                        debug!(port, ?proto, process = %name, "port change detected (added)");
+                    } else {
+                        debug!(port, ?proto, "port change detected (added, unknown process)");
+                    }
+                    PortEvent::Added(port, proto, process_name)
+                }
+                other => {
+                    debug!(?other, "port change detected");
+                    other
+                }
+            };
+
             if tx.send(event).is_err() {
                 // Receiver dropped, host disconnected.
                 debug!("scan loop stopping: channel closed");
                 return;
             }
+        }
+    }
+}
+
+/// Look up the process name for a listening port using the `common::process` module.
+fn lookup_process_name(port: u16, proto: protocol::Protocol) -> Option<String> {
+    let transport = match proto {
+        protocol::Protocol::Tcp => common::process::TransportProto::Tcp,
+        protocol::Protocol::Udp => common::process::TransportProto::Udp,
+    };
+    match common::process::find_listener(port, transport) {
+        Some(info) => {
+            trace!(port, process = %info.name, pid = info.pid, "identified process");
+            Some(info.name)
+        }
+        None => {
+            trace!(port, "could not identify process");
+            None
         }
     }
 }

@@ -44,31 +44,69 @@ mod platform {
     use super::{ProcessInfo, TransportProto};
 
     /// Use `lsof` to find which process owns a port.
+    ///
+    /// First tries as the current user, then falls back to `sudo -n lsof`
+    /// (non-interactive sudo) to find system-owned sockets. The `-n` flag
+    /// means sudo will succeed silently if credentials are cached, and fail
+    /// silently if not — no password prompts.
     pub fn find_listener(port: u16, proto: TransportProto) -> Option<ProcessInfo> {
-        // Output format: COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME
-        let output = match proto {
-            TransportProto::Tcp => std::process::Command::new("lsof")
-                .args(["-i", &format!("TCP:{port}"), "-sTCP:LISTEN", "-n", "-P"])
-                .output()
-                .ok()?,
-            TransportProto::Udp => std::process::Command::new("lsof")
-                .args(["-i", &format!("UDP:{port}"), "-n", "-P"])
-                .output()
-                .ok()?,
-        };
+        let lsof_args = build_lsof_args(port, proto);
 
-        if !output.status.success() {
-            return None;
+        // Try as current user first.
+        if let Some(info) = run_lsof(&lsof_args) {
+            return Some(info);
         }
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        // Skip header line, parse first result.
+        // Fallback: try with sudo -n (non-interactive, uses cached credentials).
+        run_sudo_lsof(&lsof_args)
+    }
+
+    fn build_lsof_args(port: u16, proto: TransportProto) -> Vec<String> {
+        match proto {
+            TransportProto::Tcp => vec![
+                "-i".into(),
+                format!("TCP:{port}"),
+                "-sTCP:LISTEN".into(),
+                "-n".into(),
+                "-P".into(),
+            ],
+            TransportProto::Udp => vec![
+                "-i".into(),
+                format!("UDP:{port}"),
+                "-n".into(),
+                "-P".into(),
+            ],
+        }
+    }
+
+    fn run_lsof(args: &[String]) -> Option<ProcessInfo> {
+        let output = std::process::Command::new("lsof")
+            .args(args)
+            .output()
+            .ok()?;
+        parse_lsof_output(&output.stdout)
+    }
+
+    fn run_sudo_lsof(args: &[String]) -> Option<ProcessInfo> {
+        let mut cmd_args = vec!["-n".to_string(), "lsof".to_string()];
+        cmd_args.extend_from_slice(args);
+        let output = std::process::Command::new("sudo")
+            .args(&cmd_args)
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()?;
+        parse_lsof_output(&output.stdout)
+    }
+
+    /// Parse lsof output to extract the first process info.
+    /// Output format: COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME
+    fn parse_lsof_output(stdout: &[u8]) -> Option<ProcessInfo> {
+        let stdout = String::from_utf8_lossy(stdout);
         let line = stdout.lines().nth(1)?;
         let fields: Vec<&str> = line.split_whitespace().collect();
         if fields.len() < 2 {
             return None;
         }
-
         let name = fields[0].to_string();
         let pid: u32 = fields[1].parse().ok()?;
         Some(ProcessInfo { pid, name })

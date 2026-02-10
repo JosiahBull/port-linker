@@ -39,8 +39,13 @@ impl NotificationAccumulator {
 
     /// Record a port-added event. Starts the accumulation timer if this is the
     /// first pending event.
-    pub fn port_added(&mut self, port: u16, proto: protocol::Protocol) {
-        let info = PortInfo::new(port, None, proto_to_notify(proto), &self.mapping);
+    pub fn port_added(
+        &mut self,
+        port: u16,
+        proto: protocol::Protocol,
+        process_name: Option<&str>,
+    ) {
+        let info = PortInfo::new(port, process_name, proto_to_notify(proto), &self.mapping);
         self.pending_added.push(info);
         self.ensure_deadline();
     }
@@ -98,7 +103,7 @@ mod tests {
     #[test]
     fn deadline_set_on_first_add() {
         let mut acc = make_accumulator();
-        acc.port_added(8080, protocol::Protocol::Tcp);
+        acc.port_added(8080, protocol::Protocol::Tcp, None);
         assert!(acc.deadline.is_some());
         assert_eq!(acc.pending_added.len(), 1);
     }
@@ -114,16 +119,16 @@ mod tests {
     #[test]
     fn multiple_adds_accumulate() {
         let mut acc = make_accumulator();
-        acc.port_added(8080, protocol::Protocol::Tcp);
-        acc.port_added(3000, protocol::Protocol::Tcp);
-        acc.port_added(5432, protocol::Protocol::Tcp);
+        acc.port_added(8080, protocol::Protocol::Tcp, Some("nginx"));
+        acc.port_added(3000, protocol::Protocol::Tcp, Some("node"));
+        acc.port_added(5432, protocol::Protocol::Tcp, None);
         assert_eq!(acc.pending_added.len(), 3);
     }
 
     #[test]
     fn flush_clears_pending() {
         let mut acc = make_accumulator();
-        acc.port_added(8080, protocol::Protocol::Tcp);
+        acc.port_added(8080, protocol::Protocol::Tcp, None);
         acc.port_removed(3000, protocol::Protocol::Tcp);
         acc.flush();
         assert!(acc.pending_added.is_empty());

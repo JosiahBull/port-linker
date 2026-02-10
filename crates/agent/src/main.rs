@@ -187,8 +187,8 @@ async fn run(log_rx: tokio::sync::mpsc::Receiver<protocol::AgentLogEvent>) -> Re
             // Port scan events from the background scanner.
             Some(event) = rx.recv() => {
                 match event {
-                    PortEvent::Added(port, proto) => {
-                        let msg = ControlMsg::PortAdded { port, proto };
+                    PortEvent::Added(port, proto, process_name) => {
+                        let msg = ControlMsg::PortAdded { port, proto, process_name };
                         send_msg(&mut send, &msg).await?;
                     }
                     PortEvent::Removed(port, proto) => {
