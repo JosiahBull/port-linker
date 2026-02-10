@@ -56,7 +56,7 @@ mod platform {
     }
 
     fn parse_port_range(contents: &str) -> Option<(u16, u16)> {
-        let mut parts = contents.trim().split_whitespace();
+        let mut parts = contents.split_whitespace();
         let start: u16 = parts.next()?.parse().ok()?;
         let end: u16 = parts.next()?.parse().ok()?;
         Some((start, end))

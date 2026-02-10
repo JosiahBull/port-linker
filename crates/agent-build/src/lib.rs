@@ -342,7 +342,15 @@ fn build_single_target(
     let use_build_std = config.is_release && toolchain.can_use_build_std();
 
     if config.is_release && !toolchain.can_use_build_std() {
-        panic!("Cannot build std properly - you are likely missing rust-src or nightly.");
+        eprintln!(
+            "cargo:warning=Nightly toolchain with rust-src not available for {}, \
+             agent binary will be an empty placeholder. Install nightly and rust-src \
+             for embedded agent support.",
+            target.triple
+        );
+        return BuildResult::Failed {
+            reason: "Nightly toolchain with rust-src not available".to_string(),
+        };
     }
 
     // Try native cargo first
