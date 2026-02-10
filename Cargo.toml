@@ -61,7 +61,7 @@ libc = "0.2"
 wait-timeout = "0.2"
 
 # Build
-resvg = "0.46"
+resvg = "0.47"
 
 [profile.release]
 lto = true
