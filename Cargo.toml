@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/*", "tests"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 description = "A CLI tool that connects to remote systems via SSH and automatically forwards discovered ports to localhost"
 repository = "https://github.com/JosiahParry/port-linker"

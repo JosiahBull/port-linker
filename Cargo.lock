@@ -45,7 +45,7 @@ dependencies = [
 
 [[package]]
 name = "agent"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bytes",
  "common",
@@ -62,11 +62,11 @@ dependencies = [
 
 [[package]]
 name = "agent-build"
-version = "0.2.0"
+version = "0.3.0"
 
 [[package]]
 name = "agent-embed"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "agent-build",
  "flate2",
@@ -205,7 +205,7 @@ dependencies = [
 
 [[package]]
 name = "assets"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "resvg",
 ]
@@ -653,7 +653,7 @@ checksum = "c3e64b0cc0439b12df2fa678eae89a1c56a529fd067a9115f7827f1fffd22b32"
 
 [[package]]
 name = "cli"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "agent-embed",
  "bytes",
@@ -713,7 +713,7 @@ dependencies = [
 
 [[package]]
 name = "common"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "libc",
  "thiserror 2.0.18",
@@ -1665,7 +1665,7 @@ dependencies = [
 
 [[package]]
 name = "integration-tests"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bytes",
  "common",
@@ -2011,7 +2011,7 @@ dependencies = [
 
 [[package]]
 name = "notify"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "assets",
  "dirs",
@@ -2493,7 +2493,7 @@ dependencies = [
 
 [[package]]
 name = "protocol"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bytes",
  "rkyv",
