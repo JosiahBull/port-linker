@@ -17,10 +17,6 @@ rustls.workspace = true
 rustls-pki-types.workspace = true
 bytes.workspace = true
 tracing.workspace = true
-tracing-subscriber.workspace = true
-
-# Testing dependencies
-assert_cmd.workspace = true
 wait-timeout.workspace = true
 
 [dev-dependencies]

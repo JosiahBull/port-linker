@@ -20,10 +20,7 @@ clap = { version = "4", features = ["derive"] }
 russh = "0.57"
 
 # System
-sysinfo = "0.38"
 dirs = "6"
-shellexpand = "3"
-whoami = "2"
 
 # Notifications
 notify-rust = "4"
@@ -49,11 +46,9 @@ assets = { path = "crates/assets" }
 # Serialization
 rkyv = { version = "0.8", features = ["bytecheck"] }
 bytes = "1"
-base64 = "0.22"
 
 # QUIC transport
 quinn = { version = "0.11", default-features = false, features = ["rustls-ring", "runtime-tokio"] }
-quinn-proto = { version = "0.11", default-features = false }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rustls-pki-types = "1"
 rcgen = { version = "0.14", default-features = false, features = ["ring"] }
@@ -63,9 +58,6 @@ ring = "0.17"
 libc = "0.2"
 
 # Testing
-assert_cmd = "2"
-insta = "1"
-ntest = "0.9"
 wait-timeout = "0.2"
 
 # Build
