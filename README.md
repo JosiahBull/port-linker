@@ -53,15 +53,6 @@ port-linker --remote user@host --agent-binary ./my-agent
 | `--agent-binary <PATH>` | Path to a custom agent binary to deploy | embedded |
 | `--echo-only` | Run the echo connectivity test and exit | `false` |
 
-## How It Works
-
-1. **SSH Bootstrap** — Connects via SSH using your existing keys/agent, transfers a small agent binary (~2 MB), and starts it on the remote host.
-2. **QUIC Tunnel** — The agent binds a random UDP port and prints its address. The CLI connects over QUIC with a one-time token for authentication.
-3. **Port Scanning** — The agent continuously scans `/proc/net/{tcp,tcp6,udp,udp6}` (every 1s) and diffs against the previous snapshot. New listeners are reported to the CLI along with their process name.
-4. **Port Forwarding** — TCP ports are forwarded via per-connection QUIC streams. UDP ports use QUIC datagrams.
-5. **Desktop Notifications** — Port events are batched over a 2-second window and displayed as a single notification.
-6. **Phoenix Restart** — If the QUIC connection drops, the CLI automatically redeploys the agent and resumes forwarding.
-
 ## Filtered Ports
 
 The agent automatically filters out:
