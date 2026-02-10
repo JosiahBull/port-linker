@@ -31,6 +31,139 @@ While a synchronous, zero-dependency agent is attractive for size, it is incompa
 5.  **Handshake:** The agent prints its listening UDP port and a generated one-time connection token to stdout.
 6.  **Tunnel Up:** Host reads the token from SSH stdout, establishes a direct QUIC connection to the Target's UDP port, and begins the session.
 
+### 3.1 Agent Binary Distribution & Caching
+
+The Agent binary must be transferred to arbitrary Linux targets during SSH bootstrap (steps 2–3 above). This presents three competing requirements: **fast transfer** (the binary is sent on every cold connection), **cross-architecture support** (a macOS aarch64 Host must deploy to Linux x86_64 and aarch64 Targets), and **zero user friction** (no manual compilation or flags required).
+
+#### 3.1.1 Binary Embedding
+
+The CLI binary embeds pre-compiled Agent binaries for both supported Linux architectures at compile time:
+
+*   `x86_64-unknown-linux-musl` (statically linked)
+*   `aarch64-unknown-linux-musl` (statically linked)
+
+Musl binaries are statically linked and run on any Linux distro without glibc version conflicts, eliminating "target system too old" failures.
+
+A CLI `build.rs` script cross-compiles both targets using the `agent-release` profile. The resulting binaries are gzip-compressed and embedded via `include_bytes!`:
+
+```rust
+const AGENT_X86_64_GZ: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/agent-x86_64-linux-musl.gz"));
+const AGENT_AARCH64_GZ: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/agent-aarch64-linux-musl.gz"));
+```
+
+For local development builds where cross-compiled agents are unavailable, `build.rs` falls back to the native `target/{debug,release}/port-linker-agent`. If no binary is found, the CLI emits a clear runtime error: *"Agent binary unavailable. Build with `cargo build -p agent` first, or use `--agent-binary`."*
+
+#### 3.1.2 Compression & Size Budget
+
+Agent binaries are compressed with **gzip -9** before embedding.
+
+| Metric | Uncompressed | Gzip -9 |
+| :--- | :--- | :--- |
+| Agent binary (per-arch) | ~1.8 MB | ~950 KB |
+| CLI overhead (2 arches) | ~3.6 MB | ~1.9 MB |
+
+The Host checks for `gunzip` availability on the Target to determine the transfer method:
+
+1.  **Compressed Transfer:** If `gunzip` is available, the Host sends the compressed payload directly over SSH and decompresses on the Target:
+    ```bash
+    gunzip -c > /tmp/port-linker-agent-{random} && chmod +x /tmp/port-linker-agent-{random}
+    ```
+    This halves transfer time on slow links.
+
+2.  **Uncompressed Fallback:** If the Target lacks `gunzip`, the Host decompresses the embedded binary in-process and sends the uncompressed bytes over the wire. This ensures the agent can be deployed to minimal environments despite the higher bandwidth cost.
+
+**Agent Binary Size Contributors** (measured via `cargo-bloat`, `agent-release` profile):
+
+| Crate | .text Size | Notes |
+| :--- | :--- | :--- |
+| `std` | ~282 KB | Rust stdlib (irreducible) |
+| `quinn_proto` + `quinn` | ~162 KB | QUIC protocol (irreducible) |
+| `rustls` + `ring` | ~207 KB | TLS crypto (irreducible) |
+| `regex_automata` + `regex_syntax` | ~133 KB | From `tracing-subscriber` env-filter. **Optimization target.** |
+| `tracing_subscriber` | ~51 KB | Logging layer |
+| `tokio` | ~43 KB | Async runtime |
+| `rcgen` | ~20 KB | Self-signed cert generation |
+| Agent application code | ~51 KB | Scanner, diff, log forwarding |
+
+**Key optimization:** The Agent's `tracing-subscriber` dependency should use `default-features = false` with only `fmt` and `registry` features (no `env-filter`, no `ansi`). This eliminates the ~133 KB regex engine, reducing the binary by ~8%. The Agent uses a static `LevelFilter` or `Targets` filter instead.
+
+**Transfer Time Estimates** (gzip-compressed ~950 KB):
+
+| Connection | Bandwidth | Cold Transfer | Warm (Cached) |
+| :--- | :--- | :--- | :--- |
+| LAN | 100 MB/s | <10 ms | <50 ms |
+| Fast WAN | 50 Mbps | ~150 ms | <50 ms |
+| Typical WAN | 10 Mbps | ~750 ms | <50 ms |
+| Slow VPN | 2 Mbps | ~3.7 s | <50 ms |
+
+#### 3.1.3 Remote Caching
+
+Re-transferring ~1 MB on every connection is wasteful when the Agent binary is stable for a given CLI version. The Host implements a SHA256-based persistent cache on the Target:
+
+```
+/tmp/.port-linker-cache/
+  agent-{sha256_prefix}     # The agent binary (executable)
+```
+
+**Cache Protocol:**
+
+1.  Host computes SHA256 of the (uncompressed) agent binary locally.
+2.  Host checks if `/tmp/.port-linker-cache/agent-{sha256_prefix}` exists on Target via SSH.
+3.  **Hit:** Symlink `/tmp/port-linker-agent-{random}` → cached copy. No transfer.
+4.  **Miss:** Transfer compressed binary, decompress on Target, copy to cache directory.
+5.  **Eviction:** Host removes cache entries older than 7 days during bootstrap.
+
+Cache corruption is detected by re-validating the SHA256 of the cached file before symlinking. On mismatch, the Host ignores the cache and re-transfers.
+
+Using `/tmp` ensures the cache survives user logout but is cleaned on reboot (stale agents purge automatically).
+
+#### 3.1.4 Cross-Compilation CI Pipeline
+
+The CLI release workflow cross-compiles the Agent for both architectures before building the CLI:
+
+```yaml
+jobs:
+  build-agents:
+    strategy:
+      matrix:
+        target: [x86_64-unknown-linux-musl, aarch64-unknown-linux-musl]
+    steps:
+      - uses: taiki-e/install-action@cross
+      - run: cross build --profile agent-release --target ${{ matrix.target }} -p agent
+      - run: gzip -9 -k target/${{ matrix.target }}/agent-release/port-linker-agent
+      - uses: actions/upload-artifact@v4
+
+  build-cli:
+    needs: build-agents
+    strategy:
+      matrix:
+        include:
+          - { os: macos-latest, target: aarch64-apple-darwin }
+          - { os: macos-latest, target: x86_64-apple-darwin }
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-musl }
+    steps:
+      - uses: actions/download-artifact@v4  # Download pre-built agents
+      - run: cargo build --release -p cli   # build.rs embeds agents via include_bytes!
+```
+
+For local development, `build.rs` skips cross-compilation and falls back to searching for a native agent binary in `target/`.
+
+#### 3.1.5 Power User Override
+
+The `--agent-binary <PATH>` flag bypasses embedding and caching entirely:
+
+```bash
+port-linker --remote user@host --agent-binary ./target/debug/port-linker-agent
+```
+
+This transfers the specified binary directly. Useful for testing local agent changes, debugging with symbols, or deploying custom-patched agents.
+
+#### 3.1.6 Security
+
+*   **Binary integrity:** Embedded agents inherit the CLI binary's release signature (cosign). Verifying the CLI transitively verifies the agents.
+*   **Cache poisoning:** `/tmp/.port-linker-cache` is world-writable on shared systems. The Host validates SHA256 before using any cached binary. On mismatch, the cache is ignored and the binary is re-transferred from the trusted embedded copy.
+*   **Transport:** SSH provides encryption. No additional layer is needed.
+
 ## 4. The "Forward All Ports" Strategy
 
 Naively binding ports 1–65535 will crash the Host (File Descriptor exhaustion) and break OS networking (ephemeral port starvation). We use Dynamic State Synchronization.
@@ -145,6 +278,21 @@ These tests run in a CI pipeline using Linux containers for both Host and Target
 6.  **The "Ephemeral Guard" Case:**
     *   **Action:** Target binds a port in the Host's ephemeral range (e.g., 50000).
     *   **Expectation:** Host logs a warning and *refuses* to bind the local port to avoid collision.
+7.  **The "Cold Cache" Case:**
+    *   **Action:** Bootstrap agent on a fresh Target (no cache directory).
+    *   **Expectation:** Compressed agent transfers, decompresses, cache is populated, agent starts within 5 seconds on LAN.
+8.  **The "Warm Cache" Case:**
+    *   **Action:** Bootstrap agent on Target with existing cache (matching SHA256).
+    *   **Expectation:** No transfer occurs, symlink created, agent starts within 1 second.
+9.  **The "Cache Corruption" Case:**
+    *   **Action:** Corrupt the cached agent binary on the Target, then bootstrap.
+    *   **Expectation:** Host detects SHA256 mismatch, ignores cache, re-transfers from embedded copy.
+10. **The "Cross-Arch" Case:**
+    *   **Action:** macOS aarch64 Host bootstraps to Linux x86_64 Target.
+    *   **Expectation:** Correct x86_64 embedded agent is selected, transferred, and executed.
+11. **The "Custom Binary" Case:**
+    *   **Action:** Use `--agent-binary ./path/to/debug-agent`.
+    *   **Expectation:** Custom binary is transferred directly, cache is bypassed entirely.
 
 ## 9. Implementation Roadmap
 

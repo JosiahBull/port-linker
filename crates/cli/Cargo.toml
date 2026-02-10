@@ -1,0 +1,28 @@
+[package]
+name = "cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "port-linker"
+path = "src/main.rs"
+
+[dependencies]
+protocol = { path = "../protocol" }
+common = { path = "../common" }
+tokio.workspace = true
+quinn.workspace = true
+rustls.workspace = true
+rustls-pki-types.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tracing-appender.workspace = true
+bytes.workspace = true
+dialoguer.workspace = true
+russh.workspace = true
+dirs.workspace = true
+ring.workspace = true
+
+[build-dependencies]
+flate2 = "1"

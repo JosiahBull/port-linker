@@ -1,0 +1,26 @@
+[package]
+name = "integration-tests"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[lib]
+name = "integration_tests"
+path = "integration_test.rs"
+
+[dependencies]
+protocol = { path = "../crates/protocol" }
+common = { path = "../crates/common" }
+tokio.workspace = true
+quinn = "0.11"
+rustls.workspace = true
+rustls-pki-types.workspace = true
+bytes.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+# Testing dependencies
+assert_cmd.workspace = true
+wait-timeout.workspace = true
+
+[dev-dependencies]

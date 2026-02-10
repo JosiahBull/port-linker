@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/*"]
+members = ["crates/*", "tests"]
 
 [workspace.package]
 version = "0.1.0"
@@ -11,14 +11,13 @@ license = "MIT"
 
 [workspace.dependencies]
 # Async runtime
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread", "macros", "net", "sync", "io-util", "time"] }
 
 # CLI
 clap = { version = "4", features = ["derive"] }
 
 # SSH
 russh = "0.57"
-ssh2-config-rs = "0.7.2"
 
 # System
 sysinfo = "0.38"
@@ -32,7 +31,8 @@ notify-rust = "4"
 # Logging
 tracing = "0.1"
 tracing-core = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "ansi"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "ansi", "fmt", "registry"] }
+tracing-appender = "0.2"
 
 # Error handling
 thiserror = "2"
@@ -41,22 +41,35 @@ thiserror = "2"
 dialoguer = "0.12"
 
 # Internal crates
-scanner = { path = "crates/scanner" }
+protocol = { path = "crates/protocol" }
+common = { path = "crates/common" }
 notify = { path = "crates/notify" }
-assert_cmd = "2"
 assets = { path = "crates/assets" }
-base64 = "0.22"
+
+# Serialization
+rkyv = { version = "0.8", features = ["bytecheck"] }
 bytes = "1"
-insta = "1"
-libc = "0.2"
-ntest = "0.9"
+base64 = "0.22"
+
+# QUIC transport
+quinn = { version = "0.11", default-features = false, features = ["rustls-ring", "runtime-tokio"] }
 quinn-proto = { version = "0.11", default-features = false }
-rcgen = "0.14"
-resvg = "0.46"
-ring = "0.17"
-rustls = { version = "0.23", default-features = false }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rustls-pki-types = "1"
+rcgen = { version = "0.14", default-features = false, features = ["ring"] }
+ring = "0.17"
+
+# System
+libc = "0.2"
+
+# Testing
+assert_cmd = "2"
+insta = "1"
+ntest = "0.9"
 wait-timeout = "0.2"
+
+# Build
+resvg = "0.46"
 
 [profile.release]
 lto = true
@@ -65,13 +78,15 @@ strip = true
 
 # Heavily optimized profile for agent - minimal binary size for SSH transfer
 # Based on release but with aggressive size optimizations
+# Reference: https://github.com/johnthagen/min-sized-rust
 [profile.agent-release]
 inherits = "release"
 opt-level = "z"           # Optimize for size
-lto = true                # Link-time optimization
-codegen-units = 1         # Single codegen unit for better optimization
+lto = true                # Full link-time optimization
+codegen-units = 1         # Single codegen unit for maximum optimization
 panic = "abort"           # No unwinding = smaller binary
 strip = true              # Strip all symbols
+overflow-checks = false   # Remove overflow check panic paths
 
 [workspace.package.metadata.docs.rs]
 all-features = true
