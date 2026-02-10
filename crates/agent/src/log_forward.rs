@@ -1,13 +1,11 @@
-//! Agent log forwarding layer (Architecture Section 7.1).
+//! Agent log forwarding layer.
 //!
 //! Provides a tracing `Layer` that captures log events and sends them
-//! over a QUIC unidirectional stream to the host in real-time. The events
-//! are serialized using the protocol crate's `AgentLogEvent` type.
+//! as `MuxFrame::Log` frames through the shared stdout channel.
 //!
 //! The internal channel is bounded to `CHANNEL_CAPACITY` to provide
-//! backpressure. When the channel is full (e.g. the QUIC stream is
-//! congested), log events are silently dropped rather than blocking the
-//! calling task.
+//! backpressure. When the channel is full, log events are silently
+//! dropped rather than blocking the calling task.
 
 use std::fmt;
 
@@ -16,20 +14,16 @@ use tracing_core::{Event, Subscriber};
 use tracing_subscriber::Layer;
 use tracing_subscriber::layer::Context;
 
-use protocol::{AgentLogEvent, LogLevel};
+use protocol::{AgentLogEvent, LogLevel, MuxFrame};
 
 /// Maximum number of log events buffered before the layer starts dropping.
-///
-/// 4096 events is generous for burst logging (a typical log event is
-/// ~200-500 bytes serialized, so worst-case buffer is ~2 MB). This
-/// prevents unbounded memory growth if the QUIC stream is congested.
 const CHANNEL_CAPACITY: usize = 4096;
 
-/// Create a forwarding layer and the receiver that drains into QUIC.
+/// Create a forwarding layer and the receiver that drains into the mux channel.
 ///
 /// The returned [`ForwardingLayer`] should be installed in the agent's
 /// tracing subscriber. The [`mpsc::Receiver`] should be passed to
-/// [`drain_logs_to_quic`] once the QUIC connection is established.
+/// [`drain_logs`] once the mux frame channel is established.
 pub fn forwarding_layer() -> (ForwardingLayer, mpsc::Receiver<AgentLogEvent>) {
     let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
     (ForwardingLayer { tx }, rx)
@@ -55,8 +49,6 @@ impl<S: Subscriber> Layer<S> for ForwardingLayer {
 
         let target = metadata.target().to_string();
 
-        // Format the event fields into a message string.
-        // Pre-allocate 128 bytes; typical log messages fit without realloc.
         let mut visitor = MessageVisitor {
             buf: String::with_capacity(128),
             has_message: false,
@@ -65,9 +57,6 @@ impl<S: Subscriber> Layer<S> for ForwardingLayer {
         let message = visitor.buf;
 
         // Best-effort send; if the channel is full or closed, silently drop.
-        // Using try_send is critical: a tracing layer MUST NOT block the
-        // calling task, and awaiting a bounded send is not possible here
-        // (on_event is synchronous).
         let _ = self.tx.try_send(AgentLogEvent {
             level,
             target,
@@ -76,25 +65,15 @@ impl<S: Subscriber> Layer<S> for ForwardingLayer {
     }
 }
 
-/// A field visitor that formats event fields into a single string.
-///
-/// Uses in-place `write!` on the buffer instead of `format!` to avoid
-/// allocating a new `String` on every field. The `message` field is
-/// always written first (tracing emits it before other fields), and
-/// additional fields are appended with comma separation.
 struct MessageVisitor {
     buf: String,
-    /// Whether the special `message` field has been recorded. When true,
-    /// subsequent fields are appended after a separator.
     has_message: bool,
 }
 
 impl MessageVisitor {
-    /// Append a separator before the next field if the buffer already has content.
     #[inline]
     fn write_separator(&mut self) {
         if !self.buf.is_empty() {
-            // Writing a literal str to a String is infallible.
             self.buf.push_str(", ");
         }
     }
@@ -104,9 +83,6 @@ impl tracing_core::field::Visit for MessageVisitor {
     fn record_debug(&mut self, field: &tracing_core::field::Field, value: &dyn fmt::Debug) {
         use fmt::Write;
         if field.name() == "message" {
-            // Clear any previously accumulated non-message fields and write
-            // the message. In practice tracing always emits `message` first,
-            // but clear defensively.
             self.buf.clear();
             let _ = write!(self.buf, "{:?}", value);
             self.has_message = true;
@@ -129,46 +105,20 @@ impl tracing_core::field::Visit for MessageVisitor {
     }
 }
 
-/// Maximum frame size for log events (64 KB — more than enough for a log line).
-const MAX_LOG_FRAME: u32 = 65_536;
-
-/// Drain log events from the channel and write them to a QUIC unidirectional
-/// stream as length-prefixed rkyv-encoded `AgentLogEvent` messages.
+/// Drain log events from the channel and send them as `MuxFrame::Log` frames
+/// through the shared mux channel.
 ///
-/// Runs until the receiver is drained and all senders are dropped (i.e., the
-/// subscriber is torn down) or the QUIC stream errors out.
-pub async fn drain_logs_to_quic(
+/// Runs until the receiver is drained and all senders are dropped, or the
+/// mux channel is closed.
+pub async fn drain_logs(
     mut rx: mpsc::Receiver<AgentLogEvent>,
-    mut send: quinn::SendStream,
+    frame_tx: mpsc::UnboundedSender<MuxFrame>,
 ) {
-    // Reusable buffer for coalescing the 4-byte length prefix + payload into
-    // a single write_all call. Avoids per-event allocation and reduces the
-    // number of QUIC stream writes by half.
-    let mut write_buf: Vec<u8> = Vec::with_capacity(512);
-
     while let Some(event) = rx.recv().await {
-        let payload = match protocol::encode(&event) {
-            Ok(p) => p,
-            Err(_) => continue,
-        };
-
-        let len = payload.len() as u32;
-        if len > MAX_LOG_FRAME {
-            continue;
-        }
-
-        // Coalesce length prefix + payload into a single write.
-        write_buf.clear();
-        write_buf.extend_from_slice(&len.to_be_bytes());
-        write_buf.extend_from_slice(&payload);
-
-        if send.write_all(&write_buf).await.is_err() {
+        if frame_tx.send(MuxFrame::Log(event)).is_err() {
             break;
         }
     }
-
-    // Best-effort graceful close.
-    let _ = send.finish();
 }
 
 /// Map a [`LogLevel`] to a [`tracing_core::Level`].
@@ -222,7 +172,6 @@ mod tests {
     async fn forwarding_layer_sends_events() {
         let (layer, mut rx) = forwarding_layer();
 
-        // Install the layer in a subscriber and emit an event.
         use tracing_subscriber::layer::SubscriberExt;
         let subscriber = tracing_subscriber::registry().with(layer);
 
@@ -230,7 +179,6 @@ mod tests {
             tracing::info!(target: "test_target", "hello from test");
         });
 
-        // The event should appear in the channel.
         let event = rx.try_recv().expect("should have received a log event");
         assert_eq!(event.level, LogLevel::Info);
         assert_eq!(event.target, "test_target");
@@ -302,7 +250,6 @@ mod tests {
         });
 
         let event = rx.try_recv().expect("should have received event");
-        // The message should contain the main message text.
         assert!(
             event.message.contains("main message"),
             "message should contain main text: {}",
@@ -313,30 +260,18 @@ mod tests {
     #[tokio::test]
     async fn forwarding_layer_handles_channel_close() {
         let (layer, rx) = forwarding_layer();
-
-        // Drop the receiver to close the channel.
         drop(rx);
 
-        // Install the layer and emit an event.
         use tracing_subscriber::layer::SubscriberExt;
         let subscriber = tracing_subscriber::registry().with(layer);
 
         tracing::subscriber::with_default(subscriber, || {
-            // This should not panic even though the channel is closed.
             tracing::info!("test");
         });
     }
 
     #[test]
-    fn max_log_frame_constant() {
-        assert_eq!(MAX_LOG_FRAME, 65_536);
-        const { assert!(MAX_LOG_FRAME > 0) };
-        assert!(MAX_LOG_FRAME.is_power_of_two());
-    }
-
-    #[test]
     fn to_tracing_level_coverage() {
-        // Ensure all LogLevel variants are covered.
         let all_levels = vec![
             LogLevel::Error,
             LogLevel::Warn,

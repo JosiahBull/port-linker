@@ -1,4 +1,3 @@
-use bytes::Bytes;
 use rkyv::{
     Archive, Deserialize, Serialize,
     api::high::{HighSerializer, HighValidator},
@@ -10,13 +9,13 @@ use rkyv::{
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
-/// Serialize `value` into a `Bytes` buffer using rkyv.
-pub fn encode<T>(value: &T) -> Result<Bytes, BoxError>
+/// Serialize `value` into a `Vec<u8>` buffer using rkyv.
+pub fn encode<T>(value: &T) -> Result<Vec<u8>, BoxError>
 where
     T: for<'a> Serialize<HighSerializer<AlignedVec, ArenaHandle<'a>, rkyv::rancor::Error>>,
 {
     let buf = rkyv::to_bytes::<rkyv::rancor::Error>(value)?;
-    Ok(Bytes::from(buf.into_vec()))
+    Ok(buf.into_vec())
 }
 
 /// Deserialize a `T` from the raw bytes produced by [`encode`].

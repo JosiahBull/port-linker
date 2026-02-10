@@ -14,6 +14,9 @@ pub enum Error {
     #[error("QUIC stream error: {0}")]
     QuicStream(String),
 
+    #[error("transport error: {0}")]
+    Transport(String),
+
     #[error("codec error: {0}")]
     Codec(String),
 }

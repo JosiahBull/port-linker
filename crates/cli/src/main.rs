@@ -7,7 +7,6 @@ mod ssh;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use bytes::Bytes;
 use clap::Parser;
 use quinn::crypto::rustls::QuicClientConfig;
 use tracing::{debug, error, info, warn};
@@ -122,7 +121,7 @@ impl rustls::client::danger::ServerCertVerifier for SkipServerVerification {
 
 /// Send a `ControlMsg` with a 4-byte big-endian length prefix.
 async fn send_msg(send: &mut quinn::SendStream, msg: &ControlMsg) -> Result<()> {
-    let payload: Bytes = protocol::encode(msg).map_err(|e| Error::Codec(e.to_string()))?;
+    let payload = protocol::encode(msg).map_err(|e| Error::Codec(e.to_string()))?;
     let len = payload.len() as u32;
     send.write_all(&len.to_be_bytes())
         .await

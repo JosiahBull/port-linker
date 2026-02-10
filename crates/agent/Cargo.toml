@@ -10,12 +10,14 @@ path = "src/main.rs"
 [dependencies]
 protocol = { path = "../protocol" }
 common = { path = "../common" }
-tokio = { workspace = true, default-features = false, features = ["rt", "macros", "net", "sync", "io-util", "time"] }
-quinn.workspace = true
-rustls.workspace = true
-rustls-pki-types.workspace = true
-rcgen.workspace = true
+# Do NOT use workspace = true. The workspace tokio includes "rt-multi-thread"
+# for the CLI, but the agent uses current_thread and does not need the
+# multi-threaded scheduler, thread pool, or work-stealing code.
+tokio = { version = "1", default-features = false, features = ["rt", "macros", "net", "sync", "io-util", "io-std", "time"] }
 tracing.workspace = true
 tracing-core.workspace = true
-tracing-subscriber = { workspace = true, default-features = false, features = ["fmt", "registry"] }
-bytes.workspace = true
+# IMPORTANT: Do NOT use workspace = true here. The workspace definition includes
+# "ansi" and "env-filter" features (needed by the CLI), and Cargo feature
+# unification would pull those into the agent binary, adding ~25 KiB of
+# formatting, regex, and ANSI color code machinery that the agent never uses.
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry"] }

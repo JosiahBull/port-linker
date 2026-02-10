@@ -73,3 +73,32 @@ pub enum Packet {
     /// A UDP datagram payload destined for / originating from `port`.
     UdpData { port: u16, data: Vec<u8> },
 }
+
+/// A multiplexed frame sent over the SSH stdio transport.
+///
+/// This replaces the QUIC-based transport with a simpler length-prefixed
+/// binary protocol over stdin/stdout. SSH provides encryption, so TLS
+/// (and therefore QUIC) is redundant.
+///
+/// Wire format: `[4 bytes: payload length BE][rkyv-encoded MuxFrame]`
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Debug, Clone, PartialEq)]
+#[rkyv(compare(PartialEq), derive(Debug))]
+pub enum MuxFrame {
+    /// A control-plane message (PortAdded, PortRemoved, Heartbeat, etc.)
+    Control(ControlMsg),
+    /// Host requests the agent open a TCP connection to localhost:port.
+    StreamOpen { stream_id: u32, port: u16 },
+    /// Agent reports the result of a StreamOpen. `None` = success.
+    StreamResult {
+        stream_id: u32,
+        error: Option<String>,
+    },
+    /// Bidirectional data on an established TCP stream.
+    StreamData { stream_id: u32, data: Vec<u8> },
+    /// Close a TCP stream (sender is done writing).
+    StreamClose { stream_id: u32 },
+    /// A UDP datagram destined for / originating from `port`.
+    Datagram { port: u16, data: Vec<u8> },
+    /// A structured log event from the agent.
+    Log(AgentLogEvent),
+}

@@ -217,7 +217,7 @@ impl BindingManager {
                         };
                         match protocol::encode(&packet) {
                             Ok(encoded) => {
-                                if let Err(e) = connection.send_datagram(encoded) {
+                                if let Err(e) = connection.send_datagram(encoded.into()) {
                                     debug!(port, %e, "failed to send QUIC datagram");
                                 }
                             }
