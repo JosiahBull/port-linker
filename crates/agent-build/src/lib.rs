@@ -55,6 +55,21 @@ impl CrossTarget {
         self
     }
 
+    /// Linux x86_64 target with musl (static linking) and cross fallback.
+    pub fn linux_x86_64() -> Self {
+        Self::new("x86_64-unknown-linux-musl").with_cross_fallback()
+    }
+
+    /// Linux ARM64 target with musl (static linking) and cross fallback.
+    pub fn linux_aarch64() -> Self {
+        Self::new("aarch64-unknown-linux-musl").with_cross_fallback()
+    }
+
+    /// macOS ARM64 (Apple Silicon) target.
+    pub fn darwin_aarch64() -> Self {
+        Self::new("aarch64-apple-darwin").with_cross_fallback()
+    }
+
     /// Set a custom cargo profile for release builds.
     pub fn with_custom_profile<S: Into<String>>(mut self, profile: S) -> Self {
         self.custom_profile = Some(profile.into());

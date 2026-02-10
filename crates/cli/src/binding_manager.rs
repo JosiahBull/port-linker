@@ -7,7 +7,7 @@ use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
-use common::process::{self, ProcessInfo};
+use common::process::{self, ProcessInfo, TransportProto};
 use protocol::{ControlMsg, Protocol};
 
 /// Default maximum number of active forwarded ports.
@@ -108,6 +108,12 @@ impl BindingManager {
         // Skip if already bound.
         if self.bindings.contains_key(&(port, proto)) {
             debug!(port, ?proto, "port already bound, ignoring duplicate");
+            return;
+        }
+
+        // Privileged port guard: skip ports below 1024 which require root.
+        if port < 1024 {
+            warn!(port, ?proto, "refusing to bind privileged port (< 1024)");
             return;
         }
 
@@ -260,7 +266,7 @@ async fn try_bind_tcp(
     }
 
     // Port is in use - resolve the conflict.
-    if !resolve_conflict(port, "TCP", policy).await {
+    if !resolve_conflict(port, "TCP", TransportProto::Tcp, policy).await {
         return None;
     }
 
@@ -287,7 +293,7 @@ async fn try_bind_udp(
     }
 
     // Port is in use - resolve the conflict.
-    if !resolve_conflict(port, "UDP", policy).await {
+    if !resolve_conflict(port, "UDP", TransportProto::Udp, policy).await {
         return None;
     }
 
@@ -299,14 +305,20 @@ async fn try_bind_udp(
 ///
 /// Returns `true` if the conflict was resolved (process killed),
 /// `false` if the port should be skipped.
-async fn resolve_conflict(port: u16, proto_name: &str, policy: ConflictPolicy) -> bool {
+async fn resolve_conflict(
+    port: u16,
+    proto_name: &str,
+    transport: TransportProto,
+    policy: ConflictPolicy,
+) -> bool {
     // Look up who owns the port. This shells out to `lsof` on macOS (can take
     // 200-500ms), so run on the blocking threadpool to avoid starving the
     // async runtime.
-    let process_info = tokio::task::spawn_blocking(move || process::find_listener(port))
-        .await
-        .ok()
-        .flatten();
+    let process_info =
+        tokio::task::spawn_blocking(move || process::find_listener(port, transport))
+            .await
+            .ok()
+            .flatten();
 
     match policy {
         ConflictPolicy::AutoSkip => {

@@ -1,5 +1,12 @@
 use std::fmt;
 
+/// Transport protocol for process lookups.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransportProto {
+    Tcp,
+    Udp,
+}
+
 /// Information about a process holding a port.
 #[derive(Debug, Clone)]
 pub struct ProcessInfo {
@@ -13,11 +20,11 @@ impl fmt::Display for ProcessInfo {
     }
 }
 
-/// Look up which process is listening on `127.0.0.1:port` (TCP).
+/// Look up which process is bound to `port` with the given protocol.
 ///
 /// Returns `None` if no process is found or lookup fails.
-pub fn find_listener(port: u16) -> Option<ProcessInfo> {
-    platform::find_listener(port)
+pub fn find_listener(port: u16, proto: TransportProto) -> Option<ProcessInfo> {
+    platform::find_listener(port, proto)
 }
 
 /// Send SIGTERM to a process, wait up to 1 second, then SIGKILL if still alive.
@@ -34,22 +41,21 @@ pub fn kill_process(pid: u32) -> Result<(), String> {
 
 #[cfg(target_os = "macos")]
 mod platform {
-    use super::ProcessInfo;
+    use super::{ProcessInfo, TransportProto};
 
-    /// Use `lsof` to find which process is listening on a TCP port.
-    pub fn find_listener(port: u16) -> Option<ProcessInfo> {
-        // lsof -i TCP:PORT -sTCP:LISTEN -n -P
+    /// Use `lsof` to find which process owns a port.
+    pub fn find_listener(port: u16, proto: TransportProto) -> Option<ProcessInfo> {
         // Output format: COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME
-        let output = std::process::Command::new("lsof")
-            .args([
-                "-i",
-                &format!("TCP:{port}"),
-                "-sTCP:LISTEN",
-                "-n",
-                "-P",
-            ])
-            .output()
-            .ok()?;
+        let output = match proto {
+            TransportProto::Tcp => std::process::Command::new("lsof")
+                .args(["-i", &format!("TCP:{port}"), "-sTCP:LISTEN", "-n", "-P"])
+                .output()
+                .ok()?,
+            TransportProto::Udp => std::process::Command::new("lsof")
+                .args(["-i", &format!("UDP:{port}"), "-n", "-P"])
+                .output()
+                .ok()?,
+        };
 
         if !output.status.success() {
             return None;
@@ -83,19 +89,23 @@ mod platform {
 
 #[cfg(target_os = "linux")]
 mod platform {
-    use super::ProcessInfo;
+    use super::{ProcessInfo, TransportProto};
 
-    /// Parse /proc/net/tcp to find the inode for the listening socket,
+    /// Parse /proc/net/{tcp,udp} to find the inode for the socket,
     /// then walk /proc/*/fd to find the owning PID.
-    pub fn find_listener(port: u16) -> Option<ProcessInfo> {
-        let inode = find_tcp_inode(port)?;
+    pub fn find_listener(port: u16, proto: TransportProto) -> Option<ProcessInfo> {
+        let inode = find_socket_inode(port, proto)?;
         let pid = find_pid_for_inode(inode)?;
         let name = read_process_name(pid)?;
         Some(ProcessInfo { pid, name })
     }
 
-    fn find_tcp_inode(port: u16) -> Option<u64> {
-        let data = std::fs::read_to_string("/proc/net/tcp").ok()?;
+    fn find_socket_inode(port: u16, proto: TransportProto) -> Option<u64> {
+        let proc_file = match proto {
+            TransportProto::Tcp => "/proc/net/tcp",
+            TransportProto::Udp => "/proc/net/udp",
+        };
+        let data = std::fs::read_to_string(proc_file).ok()?;
         let hex_port = format!("{:04X}", port);
 
         for line in data.lines().skip(1) {
@@ -104,12 +114,13 @@ mod platform {
                 continue;
             }
             // fields[1] = local_address (hex_ip:hex_port)
-            // fields[3] = state (0A = LISTEN)
+            // fields[3] = state (0A = LISTEN for TCP)
             let local_addr = fields[1];
             let state = fields[3];
 
-            if state != "0A" {
-                continue; // Not LISTEN
+            // TCP: only match LISTEN state. UDP: match any state.
+            if proto == TransportProto::Tcp && state != "0A" {
+                continue;
             }
 
             if let Some(addr_port) = local_addr.split(':').nth(1) {
@@ -168,9 +179,9 @@ mod platform {
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 mod platform {
-    use super::ProcessInfo;
+    use super::{ProcessInfo, TransportProto};
 
-    pub fn find_listener(_port: u16) -> Option<ProcessInfo> {
+    pub fn find_listener(_port: u16, _proto: TransportProto) -> Option<ProcessInfo> {
         None
     }
 
@@ -234,9 +245,15 @@ mod tests {
     }
 
     #[test]
-    fn find_listener_nonexistent_port() {
+    fn find_listener_nonexistent_tcp_port() {
         // Port 1 is almost certainly not in use.
-        let result = find_listener(1);
+        let result = find_listener(1, TransportProto::Tcp);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn find_listener_nonexistent_udp_port() {
+        let result = find_listener(1, TransportProto::Udp);
         assert!(result.is_none());
     }
 }

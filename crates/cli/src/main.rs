@@ -1,6 +1,7 @@
 mod binding_manager;
 mod bootstrap;
 mod logging;
+mod notifications;
 mod ssh;
 
 use std::net::SocketAddr;
@@ -61,6 +62,14 @@ struct Args {
     /// Path to a custom agent binary to transfer (bypasses embedded binaries and caching)
     #[arg(long)]
     agent_binary: Option<std::path::PathBuf>,
+
+    /// Enable desktop notifications for port events
+    #[arg(long, default_value_t = true)]
+    notifications: bool,
+
+    /// Enable notification sounds
+    #[arg(long, default_value_t = true)]
+    notification_sound: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -276,18 +285,12 @@ async fn bootstrap_remote(
     let ssh_session =
         ssh::SshSession::connect(remote, args.ssh_host_key_verification).await?;
 
-    let host = if let Some(idx) = remote.find('@') {
-        &remote[idx + 1..]
-    } else {
-        remote
-    };
+    let peer_ip = ssh_session.peer_ip();
 
     let (handshake, remote_agent) =
         bootstrap::bootstrap_agent(ssh_session, args.agent_binary.as_deref()).await?;
 
-    let agent_addr: SocketAddr = format!("{}:{}", host, handshake.port)
-        .parse()
-        .map_err(|e| Error::Protocol(format!("invalid agent address: {e}")))?;
+    let agent_addr = SocketAddr::new(peer_ip, handshake.port);
 
     Ok((agent_addr, remote_agent))
 }
@@ -322,6 +325,9 @@ async fn run_single_session(
     let mut transport = quinn::TransportConfig::default();
     transport.max_concurrent_bidi_streams(4096u32.into());
     transport.datagram_receive_buffer_size(Some(1_048_576));
+    // Send QUIC PINGs every 10s to prevent the idle timeout (default 30s)
+    // from killing the connection when no user traffic is flowing.
+    transport.keep_alive_interval(Some(std::time::Duration::from_secs(10)));
     client_config.transport_config(Arc::new(transport));
 
     // Create QUIC client endpoint.
@@ -448,41 +454,60 @@ async fn run_single_session(
         args.conflict_resolution,
     );
 
+    // Initialize desktop notifications with 2-second accumulation.
+    let mapping = Arc::new(notify::PortMapping::load_default());
+    let notifier = Arc::new(notify::Notifier::new(
+        args.notifications,
+        args.notification_sound,
+        Arc::clone(&mapping),
+    ));
+    let mut accumulator =
+        notifications::NotificationAccumulator::new(Arc::clone(&notifier), mapping);
+
     // Enter the receive loop: listen for control messages from the agent.
     info!("entering receive loop (press Ctrl-C to exit)");
     let session_error = loop {
-        match recv_msg(&mut recv).await {
-            Ok(msg) => match msg {
-                ControlMsg::PortAdded { port, proto } => {
-                    info!(port, ?proto, "remote port added");
-                    manager.handle_port_added(port, proto);
-                    info!(active = manager.active_count(), "active bindings");
+        tokio::select! {
+            msg = recv_msg(&mut recv) => {
+                match msg {
+                    Ok(ControlMsg::PortAdded { port, proto }) => {
+                        info!(port, ?proto, "remote port added");
+                        manager.handle_port_added(port, proto);
+                        accumulator.port_added(port, proto);
+                        info!(active = manager.active_count(), "active bindings");
+                    }
+                    Ok(ControlMsg::PortRemoved { port, proto }) => {
+                        info!(port, ?proto, "remote port removed");
+                        manager.handle_port_removed(port, proto);
+                        accumulator.port_removed(port, proto);
+                        info!(active = manager.active_count(), "active bindings");
+                    }
+                    Ok(ControlMsg::Heartbeat) => {
+                        debug!("received heartbeat, sending heartbeat back");
+                        send_msg(&mut send, &ControlMsg::Heartbeat).await?;
+                    }
+                    Ok(ControlMsg::EchoRequest { payload }) => {
+                        debug!("received EchoRequest, sending EchoResponse");
+                        send_msg(&mut send, &ControlMsg::EchoResponse { payload }).await?;
+                    }
+                    Ok(other) => {
+                        debug!("received unhandled message: {other:?}");
+                    }
+                    Err(e) => break e,
                 }
-                ControlMsg::PortRemoved { port, proto } => {
-                    info!(port, ?proto, "remote port removed");
-                    manager.handle_port_removed(port, proto);
-                    info!(active = manager.active_count(), "active bindings");
-                }
-                ControlMsg::Heartbeat => {
-                    debug!("received heartbeat, sending heartbeat back");
-                    send_msg(&mut send, &ControlMsg::Heartbeat).await?;
-                }
-                ControlMsg::EchoRequest { payload } => {
-                    debug!("received EchoRequest, sending EchoResponse");
-                    send_msg(&mut send, &ControlMsg::EchoResponse { payload }).await?;
-                }
-                other => {
-                    debug!("received unhandled message: {other:?}");
-                }
-            },
-            Err(e) => {
-                break e;
+            }
+            _ = accumulator.next_flush() => {
+                accumulator.flush();
             }
         }
     };
 
+    // Flush any remaining accumulated events before exit.
+    accumulator.flush();
+
     // The control stream closed — connection lost.
     info!("control stream closed: {session_error}");
+    notifier.notify_event(notify::NotificationEvent::ConnectionLost);
 
     // Gracefully close.
     connection.close(0u32.into(), b"done");

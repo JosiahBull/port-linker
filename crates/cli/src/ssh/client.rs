@@ -74,6 +74,8 @@ impl client::Handler for Handler {
 pub struct SshSession {
     handle: client::Handle<Handler>,
     config: SshHostConfig,
+    /// The resolved IP address of the remote host.
+    peer_ip: std::net::IpAddr,
 }
 
 impl SshSession {
@@ -104,7 +106,7 @@ impl SshSession {
 
         // Build russh client config.
         let client_config = Arc::new(client::Config {
-            inactivity_timeout: Some(Duration::from_secs(30)),
+            inactivity_timeout: None,
             ..Default::default()
         });
 
@@ -136,10 +138,16 @@ impl SshSession {
         let mut session = SshSession {
             handle,
             config: ssh_config,
+            peer_ip: addr.ip(),
         };
         session.authenticate().await?;
 
         Ok(session)
+    }
+
+    /// The resolved IP address of the remote host.
+    pub fn peer_ip(&self) -> std::net::IpAddr {
+        self.peer_ip
     }
 
     async fn authenticate(&mut self) -> Result<()> {

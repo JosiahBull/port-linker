@@ -148,9 +148,10 @@ async fn run(log_rx: tokio::sync::mpsc::Receiver<protocol::AgentLogEvent>) -> Re
     info!("sent handshake");
 
     // 9. Start the background port scan loop.
+    // Pass the QUIC port so the scanner excludes our own UDP endpoint.
     let (tx, mut rx) = mpsc::unbounded_channel::<PortEvent>();
     let scanner = DefaultScanner::new();
-    tokio::spawn(run_scan_loop(scanner, tx));
+    tokio::spawn(run_scan_loop(scanner, tx, port));
 
     // Shared cache of UDP sockets for datagram forwarding (port -> socket).
     let udp_cache: Arc<RwLock<HashMap<u16, Arc<UdpSocket>>>> =

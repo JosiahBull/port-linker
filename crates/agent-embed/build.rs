@@ -1,0 +1,64 @@
+use std::fs;
+use std::io::Write;
+
+use agent_build::{build_for_targets, watch_sources, BuildConfig, CrossTarget};
+
+fn main() {
+    let config = BuildConfig::from_env("agent")
+        .binary_name("port-linker-agent")
+        .target(CrossTarget::linux_x86_64().with_custom_profile("agent-release"))
+        .target(CrossTarget::linux_aarch64().with_custom_profile("agent-release"))
+        .target(CrossTarget::darwin_aarch64().with_custom_profile("agent-release"));
+
+    let results = build_for_targets(&config);
+
+    // Gzip-compress successful builds, write empty placeholders for failures.
+    for target in &config.targets {
+        let raw_path = config
+            .out_dir
+            .join(agent_build::output_filename(&config.package, &target.triple));
+        let gz_path = config
+            .out_dir
+            .join(format!("agent-{}.gz", target.triple));
+
+        if let Some(result) = results.get(&target.triple) {
+            if result.is_success() {
+                if let Ok(data) = fs::read(&raw_path) {
+                    if !data.is_empty() {
+                        let compressed = gzip_compress(&data);
+                        fs::write(&gz_path, &compressed).unwrap();
+                        eprintln!(
+                            "cargo:warning=Embedded agent for {} ({} -> {} bytes, {:.0}% reduction)",
+                            target.triple,
+                            data.len(),
+                            compressed.len(),
+                            (1.0 - compressed.len() as f64 / data.len() as f64) * 100.0,
+                        );
+                        continue;
+                    }
+                }
+            }
+        }
+
+        // Failed or empty build — write empty placeholder.
+        fs::write(&gz_path, b"").unwrap();
+        eprintln!(
+            "cargo:warning=No agent binary for {}, using empty placeholder",
+            target.triple
+        );
+    }
+
+    // Watch agent + protocol sources for rebuild triggers.
+    watch_sources(&[
+        "../agent/src",
+        "../agent/Cargo.toml",
+        "../protocol/src",
+        "../protocol/Cargo.toml",
+    ]);
+}
+
+fn gzip_compress(data: &[u8]) -> Vec<u8> {
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+    encoder.write_all(data).unwrap();
+    encoder.finish().unwrap()
+}

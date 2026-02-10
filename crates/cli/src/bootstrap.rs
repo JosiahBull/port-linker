@@ -8,19 +8,6 @@ use common::{Error, Result};
 
 use crate::ssh::SshSession;
 
-// ---------------------------------------------------------------------------
-// Embedded agent binaries (gzip-compressed, produced by build.rs)
-// ---------------------------------------------------------------------------
-
-const AGENT_X86_64_GZ: &[u8] = include_bytes!(concat!(
-    env!("OUT_DIR"),
-    "/agent-x86_64-unknown-linux-musl.gz"
-));
-const AGENT_AARCH64_GZ: &[u8] = include_bytes!(concat!(
-    env!("OUT_DIR"),
-    "/agent-aarch64-unknown-linux-musl.gz"
-));
-
 /// Remote cache directory on the target host.
 const CACHE_DIR: &str = "/tmp/.port-linker-cache";
 
@@ -135,7 +122,6 @@ async fn detect_architecture(ssh: &SshSession) -> Result<String> {
 /// 1. `--agent-binary` override: transfer the user-specified file directly.
 /// 2. Embedded binary with remote cache: check SHA256-keyed cache, transfer
 ///    compressed binary on miss, decompress with gunzip on the target.
-/// 3. Local fallback (dev mode): search for a native agent binary in target/.
 async fn transfer_agent(
     ssh: &SshSession,
     arch: &str,
@@ -153,57 +139,37 @@ async fn transfer_agent(
     }
 
     // Strategy 2: Embedded binary with remote caching.
-    let embedded_gz = select_embedded_binary(arch);
-    if !embedded_gz.is_empty() {
-        let hash_prefix = sha256_hex_prefix(embedded_gz);
-        let cache_path = format!("{CACHE_DIR}/agent-{hash_prefix}");
+    let embedded_gz = agent_embed::get_binary_for_system("linux", arch).ok_or_else(|| {
+        Error::Protocol(format!(
+            "no embedded agent binary for architecture '{arch}'. \
+             Available targets: {:?}. \
+             Use --agent-binary to provide a custom binary.",
+            agent_embed::available_targets(),
+        ))
+    })?;
 
-        // Check remote cache.
-        if check_remote_cache(ssh, &cache_path).await {
-            info!(cache = %cache_path, "cache hit, symlinking");
-            symlink_cached(ssh, &cache_path, &remote_path).await?;
-            return Ok(remote_path);
-        }
+    let hash_prefix = sha256_hex_prefix(embedded_gz);
+    let cache_path = format!("{CACHE_DIR}/agent-{hash_prefix}");
 
-        // Cache miss: transfer compressed binary, decompress on target.
-        info!(
-            arch,
-            compressed_size = embedded_gz.len(),
-            "cache miss, transferring compressed agent"
-        );
-        transfer_compressed(ssh, embedded_gz, &remote_path).await?;
-
-        // Populate cache in background (best-effort).
-        populate_cache(ssh, &remote_path, &cache_path).await;
-
+    // Check remote cache.
+    if check_remote_cache(ssh, &cache_path).await {
+        info!(cache = %cache_path, "cache hit, symlinking");
+        symlink_cached(ssh, &cache_path, &remote_path).await?;
         return Ok(remote_path);
     }
 
-    // Strategy 3: Local fallback (dev mode).
-    info!(arch, "no embedded agent binary, searching locally");
-    let data = find_local_agent_binary(arch).await?;
-
+    // Cache miss: transfer compressed binary, decompress on target.
     info!(
-        size = data.len(),
-        remote_path = %remote_path,
-        remote_arch = arch,
-        "transferring local agent binary"
+        arch,
+        compressed_size = embedded_gz.len(),
+        "cache miss, transferring compressed agent"
     );
+    transfer_compressed(ssh, embedded_gz, &remote_path).await?;
 
-    transfer_raw(ssh, &data, &remote_path).await?;
-
-    info!("local agent binary transferred");
+    // Populate cache in background (best-effort).
+    populate_cache(ssh, &remote_path, &cache_path).await;
 
     Ok(remote_path)
-}
-
-/// Select the embedded gzip-compressed agent binary for the given architecture.
-fn select_embedded_binary(arch: &str) -> &'static [u8] {
-    match arch {
-        "x86_64" => AGENT_X86_64_GZ,
-        "aarch64" => AGENT_AARCH64_GZ,
-        _ => &[],
-    }
 }
 
 /// Compute the first N hex chars of SHA256 of the given data.
@@ -301,77 +267,6 @@ async fn read_file_blocking(path: &Path) -> Result<Vec<u8>> {
     tokio::task::spawn_blocking(move || std::fs::read(&path).map_err(Error::Io))
         .await
         .map_err(|e| Error::Protocol(format!("failed to read file: {e}")))?
-}
-
-/// Find the agent binary on the local filesystem (dev mode).
-///
-/// Searches for architecture-compatible agent binaries in the following order:
-/// 1. Cross-compiled Linux binary for target arch: `target/{arch}-unknown-linux-musl/debug/port-linker-agent`
-/// 2. Cross-compiled Linux binary for target arch: `target/{arch}-unknown-linux-musl/release/port-linker-agent`
-/// 3. Native binary (only if running on Linux with matching arch): `target/debug/port-linker-agent`
-/// 4. Native binary (only if running on Linux with matching arch): `target/release/port-linker-agent`
-async fn find_local_agent_binary(arch: &str) -> Result<Vec<u8>> {
-    let arch = arch.to_string();
-    tokio::task::spawn_blocking(move || {
-        let local_os = std::env::consts::OS;
-        let local_arch = std::env::consts::ARCH;
-
-        // Strategy 1: Cross-compiled Linux binaries (highest priority).
-        let cross_compiled_candidates = [
-            format!("target/{}-unknown-linux-musl/debug/port-linker-agent", arch),
-            format!("target/{}-unknown-linux-musl/release/port-linker-agent", arch),
-        ];
-
-        for candidate in &cross_compiled_candidates {
-            let path = std::path::Path::new(candidate);
-            if path.exists() {
-                let data = std::fs::read(path).map_err(Error::Io)?;
-                info!(
-                    path = %path.display(),
-                    size = data.len(),
-                    remote_arch = %arch,
-                    "found cross-compiled agent binary"
-                );
-                return Ok(data);
-            }
-        }
-
-        // Strategy 2: Native binaries (fallback, only if OS and arch match).
-        // Only consider native binaries when running on Linux with the same architecture as the remote.
-        if local_os == "linux" && local_arch == arch {
-            let native_candidates = [
-                "target/debug/port-linker-agent",
-                "target/release/port-linker-agent",
-            ];
-
-            for candidate in &native_candidates {
-                let path = std::path::Path::new(candidate);
-                if path.exists() {
-                    let data = std::fs::read(path).map_err(Error::Io)?;
-                    info!(
-                        path = %path.display(),
-                        size = data.len(),
-                        "found native agent binary (local arch matches remote)"
-                    );
-                    return Ok(data);
-                }
-            }
-        }
-
-        // No compatible binary found.
-        Err(Error::Protocol(format!(
-            "could not find compatible agent binary for remote architecture '{arch}'.\n\
-             Build with `cargo build --target {arch}-unknown-linux-musl -p agent` first, \
-             or specify --agent-binary to provide a custom binary.\n\
-             \n\
-             Current environment: OS={local_os}, ARCH={local_arch}\n\
-             Remote environment: OS=linux, ARCH={arch}\n\
-             \n\
-             Cross-compilation is required when the local and remote architectures differ."
-        )))
-    })
-    .await
-    .map_err(|e| Error::Protocol(format!("failed to read agent binary: {e}")))?
 }
 
 // ---------------------------------------------------------------------------
@@ -538,18 +433,15 @@ mod tests {
     }
 
     #[test]
-    fn test_select_embedded_binary() {
-        // x86_64 and aarch64 should return the embedded constants.
-        let x86 = select_embedded_binary("x86_64");
-        let aarch = select_embedded_binary("aarch64");
-        let unknown = select_embedded_binary("riscv64");
+    fn test_embedded_binary_lookup() {
+        // Unsupported targets should return None.
+        assert!(agent_embed::get_binary_for_system("linux", "riscv64").is_none());
+        assert!(agent_embed::get_binary_for_system("windows", "x86_64").is_none());
 
-        // In dev builds these will be empty placeholders.
-        // Just verify they don't panic and unknown returns empty.
-        assert!(unknown.is_empty());
-        // x86 and aarch64 should be either empty (dev) or non-empty (release).
-        let _ = x86;
-        let _ = aarch;
+        // Supported targets return Some (non-empty) or None (empty placeholder).
+        // Either way, no panic.
+        let _ = agent_embed::get_binary_for_system("linux", "x86_64");
+        let _ = agent_embed::get_binary_for_system("linux", "aarch64");
     }
 
     #[test]
@@ -775,160 +667,5 @@ mod tests {
         assert!(got_ready);
         assert_eq!(port, Some(4444));
         assert_eq!(token.as_deref(), Some("plk-token"));
-    }
-
-    // -----------------------------------------------------------------------
-    // Tests for find_local_agent_binary architecture-aware search
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_binary_search_order() {
-        // Test the search order for cross-compiled binaries.
-        // We test the path construction logic rather than actual file access.
-        let arch = "x86_64";
-        let expected_paths = vec![
-            format!("target/{arch}-unknown-linux-musl/debug/port-linker-agent"),
-            format!("target/{arch}-unknown-linux-musl/release/port-linker-agent"),
-        ];
-
-        // Verify path construction is correct.
-        assert_eq!(
-            expected_paths[0],
-            "target/x86_64-unknown-linux-musl/debug/port-linker-agent"
-        );
-        assert_eq!(
-            expected_paths[1],
-            "target/x86_64-unknown-linux-musl/release/port-linker-agent"
-        );
-    }
-
-    #[test]
-    fn test_aarch64_binary_paths() {
-        // Verify correct path construction for aarch64 architecture.
-        let arch = "aarch64";
-        let expected_paths = vec![
-            format!("target/{arch}-unknown-linux-musl/debug/port-linker-agent"),
-            format!("target/{arch}-unknown-linux-musl/release/port-linker-agent"),
-        ];
-
-        assert_eq!(
-            expected_paths[0],
-            "target/aarch64-unknown-linux-musl/debug/port-linker-agent"
-        );
-        assert_eq!(
-            expected_paths[1],
-            "target/aarch64-unknown-linux-musl/release/port-linker-agent"
-        );
-    }
-
-    #[test]
-    fn test_native_binary_paths_linux_only() {
-        // Native binaries should only be considered on Linux when arch matches.
-        // This test verifies the path construction for native binaries.
-        #[cfg(target_os = "linux")]
-        {
-            let native_paths = vec![
-                "target/debug/port-linker-agent",
-                "target/release/port-linker-agent",
-            ];
-
-            // On Linux, native paths should be included in the search.
-            assert!(!native_paths.is_empty());
-        }
-
-        #[cfg(not(target_os = "linux"))]
-        {
-            // On non-Linux platforms (macOS, Windows), native binaries
-            // should NOT be searched when targeting Linux remotes.
-            // This is tested implicitly by the search logic in find_local_agent_binary.
-        }
-    }
-
-    #[test]
-    fn test_error_message_mentions_cross_compilation() {
-        // When no compatible binary is found, the error message should guide
-        // the user toward cross-compilation solutions.
-        let error_msg = "could not find compatible agent binary for remote architecture 'x86_64'. \
-                        Build with `cargo build --target x86_64-unknown-linux-musl -p agent` first, \
-                        or specify --agent-binary to connect directly to a running agent.";
-
-        assert!(error_msg.contains("cross-compilation")
-                || error_msg.contains("--target")
-                || error_msg.contains("x86_64-unknown-linux-musl"));
-        assert!(error_msg.contains("--agent-binary"));
-    }
-
-    #[test]
-    fn test_architecture_triple_format() {
-        // Verify the Rust target triple format used in cross-compilation.
-        let x86_triple = "x86_64-unknown-linux-musl";
-        let aarch_triple = "aarch64-unknown-linux-musl";
-
-        assert!(x86_triple.contains("unknown-linux-musl"));
-        assert!(aarch_triple.contains("unknown-linux-musl"));
-        assert!(x86_triple.starts_with("x86_64"));
-        assert!(aarch_triple.starts_with("aarch64"));
-    }
-
-    #[test]
-    fn test_macos_to_linux_incompatibility() {
-        // This test documents the bug: macOS binaries (Mach-O) cannot run on Linux (ELF).
-        // The search logic must prioritize cross-compiled Linux binaries over native macOS ones.
-        #[cfg(target_os = "macos")]
-        {
-            // When running on macOS and targeting Linux, we should NOT use native binaries.
-            // This is the core bug that needs fixing.
-            let remote_os = "linux";
-            let local_os = "macos";
-            assert_ne!(remote_os, local_os);
-
-            // The fix should ensure native macOS binaries are never transferred to Linux.
-        }
-    }
-
-    #[test]
-    fn test_local_arch_detection() {
-        // Test that we can detect the local architecture at compile time.
-        let local_arch = std::env::consts::ARCH;
-        assert!(
-            local_arch == "x86_64" || local_arch == "aarch64",
-            "unexpected local architecture: {local_arch}"
-        );
-    }
-
-    #[test]
-    fn test_os_detection() {
-        // Test that we can detect the local OS at compile time.
-        let local_os = std::env::consts::OS;
-        assert!(
-            local_os == "linux" || local_os == "macos" || local_os == "windows",
-            "unexpected local OS: {local_os}"
-        );
-    }
-
-    #[test]
-    fn test_cross_compile_priority_over_native() {
-        // The search order MUST prioritize cross-compiled binaries over native ones.
-        // Cross-compiled: target/{arch}-unknown-linux-musl/{debug,release}/port-linker-agent
-        // Native: target/{debug,release}/port-linker-agent
-
-        // This test verifies the search order by checking index positions.
-        let search_order = vec![
-            "cross_compiled_debug",   // Index 0 (highest priority)
-            "cross_compiled_release", // Index 1
-            "native_debug",           // Index 2 (only if OS matches)
-            "native_release",         // Index 3 (only if OS matches)
-        ];
-
-        assert_eq!(search_order[0], "cross_compiled_debug");
-        assert_eq!(search_order[1], "cross_compiled_release");
-
-        // Native binaries should come after cross-compiled ones.
-        let cross_idx = search_order.iter().position(|&x| x.starts_with("cross"));
-        let native_idx = search_order.iter().position(|&x| x.starts_with("native"));
-
-        if let (Some(cross), Some(native)) = (cross_idx, native_idx) {
-            assert!(cross < native, "cross-compiled must be searched before native");
-        }
     }
 }
