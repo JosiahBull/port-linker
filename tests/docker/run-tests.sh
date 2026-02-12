@@ -103,6 +103,19 @@ done
 # Give SSH a moment to fully initialize.
 sleep 2
 
+# Debug: verify SSH setup in containers.
+info "verifying SSH setup..."
+info "Key fingerprint (local): $(ssh-keygen -lf "$KEY_FILE.pub" 2>/dev/null)"
+for container in plk-jump1 plk-jump2 plk-target; do
+    info "$container authorized_keys: $(docker exec "$container" cat /home/testuser/.ssh/authorized_keys 2>/dev/null | head -c 80)..."
+    info "$container sshd running: $(docker exec "$container" pgrep -f sshd 2>/dev/null | head -1)"
+done
+# Quick SSH connectivity check using the system SSH client.
+info "testing SSH to jump1 with system client..."
+ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+    -o BatchMode=yes -o ConnectTimeout=5 \
+    -i "$KEY_FILE" testuser@172.20.0.10 echo "SSH OK" 2>&1 || info "system SSH test failed (may be expected)"
+
 # Step 4: Run scenarios.
 PASSED=0
 FAILED=0
