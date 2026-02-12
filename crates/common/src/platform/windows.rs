@@ -146,9 +146,15 @@ pub mod process {
 /// Port scanner using Windows IP Helper API (GetExtendedTcpTable / GetExtendedUdpTable).
 pub struct IpHelperScanner;
 
+impl IpHelperScanner {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
 impl Default for IpHelperScanner {
     fn default() -> Self {
-        Self
+        Self::new()
     }
 }
 

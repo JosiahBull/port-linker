@@ -187,12 +187,12 @@ pub mod process {
                 continue;
             }
 
-            if let Some(addr_port) = local_addr.split(':').nth(1) {
-                if addr_port == hex_port {
-                    let ip_hex = local_addr.split(':').next().unwrap_or("");
-                    if ip_hex == "00000000" || ip_hex == "0100007F" {
-                        return fields[9].parse().ok();
-                    }
+            if let Some(addr_port) = local_addr.split(':').nth(1)
+                && addr_port == hex_port
+            {
+                let ip_hex = local_addr.split(':').next().unwrap_or("");
+                if ip_hex == "00000000" || ip_hex == "0100007F" {
+                    return fields[9].parse().ok();
                 }
             }
         }
@@ -477,6 +477,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     mod linux_integration {
         use super::super::*;
+        use crate::platform::PortScanner;
         use std::fs;
 
         #[test]
