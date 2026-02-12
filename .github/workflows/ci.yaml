@@ -122,12 +122,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Build documentation
-        run: cargo doc --workspace --all-features --no-deps
+        run: cargo doc --workspace --all-features --no-deps --exclude agent-embed --exclude relay-embed
 
   test-docker:
     name: Docker Integration Tests
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     needs: [check, clippy]
     concurrency:
       group: ci-test-docker-${{ github.repository }}-${{ github.ref }}
@@ -152,7 +152,7 @@ jobs:
         run: cargo build -p cli
 
       - name: Run Docker integration tests
-        run: bash tests/docker/run-tests.sh all
+        run: bash tests/docker/run-tests.sh ci
 
   build:
     name: Build

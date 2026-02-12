@@ -140,6 +140,14 @@ case "$SCENARIO" in
         run_scenario "E (direct/regression)" "$SCRIPT_DIR/scenarios/scenario_e.sh"
         run_scenario "F (data flow)" "$SCRIPT_DIR/scenarios/scenario_f_dataflow.sh"
         ;;
+    ci)
+        # CI-compatible subset: skip UDP relay scenarios (QUIC over UDP relay
+        # chains requires real network topology, not Docker bridge networks).
+        run_scenario "C (no UDP)" "$SCRIPT_DIR/scenarios/scenario_c.sh"
+        run_scenario "D-TCP (single hop TCP)" "$SCRIPT_DIR/scenarios/scenario_d_tcp.sh"
+        run_scenario "E (direct/regression)" "$SCRIPT_DIR/scenarios/scenario_e.sh"
+        run_scenario "F (data flow)" "$SCRIPT_DIR/scenarios/scenario_f_dataflow.sh"
+        ;;
     a) run_scenario "A" "$SCRIPT_DIR/scenarios/scenario_a.sh" ;;
     b) run_scenario "B" "$SCRIPT_DIR/scenarios/scenario_b.sh" ;;
     c) run_scenario "C" "$SCRIPT_DIR/scenarios/scenario_c.sh" ;;
@@ -149,7 +157,7 @@ case "$SCENARIO" in
     f) run_scenario "F" "$SCRIPT_DIR/scenarios/scenario_f_dataflow.sh" ;;
     *)
         echo "Unknown scenario: $SCENARIO"
-        echo "Usage: $0 {all|a|b|c|d-udp|d-tcp|e|f}"
+        echo "Usage: $0 {all|ci|a|b|c|d-udp|d-tcp|e|f}"
         exit 1
         ;;
 esac

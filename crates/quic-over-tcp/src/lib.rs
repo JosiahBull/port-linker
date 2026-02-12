@@ -27,11 +27,6 @@ const MAX_DATAGRAM_SIZE: usize = 65535;
 /// Frame header size (2-byte BE length prefix).
 const FRAME_HEADER_SIZE: usize = 2;
 
-/// A synthetic local address used for `RecvMeta`.
-fn synthetic_addr() -> SocketAddr {
-    "127.0.0.1:0".parse().unwrap()
-}
-
 /// Inner mutable state for the `TcpUdpSocket`.
 struct Inner {
     recv_queue: VecDeque<Vec<u8>>,
@@ -47,6 +42,7 @@ pub struct TcpUdpSocket {
     inner: Arc<Mutex<Inner>>,
     writer: Arc<Mutex<Box<dyn AsyncWrite + Unpin + Send>>>,
     local_addr: SocketAddr,
+    remote_addr: SocketAddr,
 }
 
 impl std::fmt::Debug for TcpUdpSocket {
@@ -67,7 +63,12 @@ impl TcpUdpSocket {
     ///
     /// Spawns a background reader task that reads length-prefixed datagrams
     /// from the stream and queues them for `poll_recv`.
-    pub fn new<S>(stream: S, local_addr: SocketAddr) -> Arc<Self>
+    ///
+    /// `local_addr` is reported by `local_addr()`. `remote_addr` is used as
+    /// the source address in `RecvMeta` so that quinn can associate incoming
+    /// datagrams with the correct connection. Both addresses must have non-zero
+    /// ports to satisfy quinn's validation.
+    pub fn new<S>(stream: S, local_addr: SocketAddr, remote_addr: SocketAddr) -> Arc<Self>
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
@@ -83,6 +84,7 @@ impl TcpUdpSocket {
             inner: inner.clone(),
             writer: Arc::new(Mutex::new(Box::new(write_half))),
             local_addr,
+            remote_addr,
         });
 
         // Spawn background reader.
@@ -210,7 +212,7 @@ impl quinn::AsyncUdpSocket for TcpUdpSocket {
             let len = datagram.len().min(bufs[i].len());
             bufs[i][..len].copy_from_slice(&datagram[..len]);
             meta[i] = RecvMeta {
-                addr: synthetic_addr(),
+                addr: self.remote_addr,
                 len,
                 stride: len,
                 ecn: None,
@@ -256,12 +258,6 @@ impl quinn::UdpPoller for TcpUdpPoller {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_synthetic_addr() {
-        let addr = synthetic_addr();
-        assert!(addr.ip().is_loopback());
-    }
 
     #[test]
     fn test_frame_header_size() {

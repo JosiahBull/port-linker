@@ -39,7 +39,8 @@ info "starting TCP echo server on plk-target:9876"
 start_tcp_echo plk-target 9876
 
 # 2. Run port-linker in background (forwarding mode).
-run_port_linker_bg
+#    Explicitly use tcp-bridge since we're testing TCP data flow, not UDP relay.
+run_port_linker_bg --transport tcp-bridge
 
 # 3. Wait for port-linker to bind port 9876 locally.
 info "waiting for local port 9876 to become available..."
