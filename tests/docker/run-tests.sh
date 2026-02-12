@@ -73,6 +73,14 @@ $PLK_MARKER
 EOF
 chmod 600 "$SSH_CONFIG"
 
+# Verify the key file exists and is readable.
+if [ ! -f "$KEY_FILE" ]; then
+    fail "SSH key not found at $KEY_FILE"
+    exit 1
+fi
+chmod 600 "$KEY_FILE"
+info "SSH config written. Key file: $KEY_FILE"
+
 # Step 2: Build containers.
 info "building Docker containers..."
 docker compose -f "$COMPOSE_FILE" build
