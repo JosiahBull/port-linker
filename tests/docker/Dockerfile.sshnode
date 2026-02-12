@@ -11,6 +11,7 @@ RUN apk add --no-cache \
 
 # Create test user
 RUN adduser -D -s /bin/bash testuser \
+    && echo "testuser:testpassword" | chpasswd \
     && mkdir -p /home/testuser/.ssh \
     && chmod 700 /home/testuser/.ssh \
     && chown testuser:testuser /home/testuser/.ssh

@@ -1,6 +1,5 @@
 # port-linker test SSHD config
 Port 22
-LogLevel DEBUG3
 PermitRootLogin no
 PubkeyAuthentication yes
 PasswordAuthentication no
