@@ -717,8 +717,13 @@ dependencies = [
 name = "common"
 version = "0.3.0"
 dependencies = [
+ "dirs",
  "libc",
+ "notify-rust",
+ "protocol",
  "thiserror 2.0.18",
+ "tracing",
+ "windows 0.62.2",
 ]
 
 [[package]]
@@ -2016,6 +2021,7 @@ name = "notify"
 version = "0.3.0"
 dependencies = [
  "assets",
+ "common",
  "dirs",
  "notify-rust",
  "thiserror 2.0.18",

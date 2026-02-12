@@ -82,11 +82,13 @@ pub fn init_logging() -> WorkerGuard {
 /// via `dirs::state_dir()`). Falls back to `~/.local/state/port-linker/` if
 /// the platform helper returns `None`.
 fn log_directory() -> std::path::PathBuf {
-    if let Some(state) = dirs::state_dir() {
+    use common::platform::{CurrentPlatform, Platform};
+
+    if let Some(state) = CurrentPlatform::state_dir() {
         return state.join(LOG_DIR_NAME);
     }
     // Fallback: build the path manually.
-    if let Some(home) = dirs::home_dir() {
+    if let Some(home) = CurrentPlatform::home_dir() {
         return home.join(".local").join("state").join(LOG_DIR_NAME);
     }
     // Last resort: current directory.

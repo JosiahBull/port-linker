@@ -1,280 +1,9 @@
-use std::collections::HashSet;
-use std::fmt;
+// Re-export from the platform module.
+pub use common::platform::{Listener, PortScanner, ScanError};
 
-use protocol::Protocol;
-
-/// A (port, protocol) pair representing a listening socket.
-pub type Listener = (u16, Protocol);
-
-/// Error type for port scanning failures.
-#[derive(Debug)]
-pub enum ScanError {
-    /// An I/O error occurred while reading proc files.
-    Io(std::io::Error),
-    /// A generic scan failure with a descriptive message.
-    Message(String),
-}
-
-impl fmt::Display for ScanError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ScanError::Io(e) => write!(f, "scan I/O error: {e}"),
-            ScanError::Message(msg) => write!(f, "scan error: {msg}"),
-        }
-    }
-}
-
-impl std::error::Error for ScanError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            ScanError::Io(e) => Some(e),
-            ScanError::Message(_) => None,
-        }
-    }
-}
-
-impl From<std::io::Error> for ScanError {
-    fn from(e: std::io::Error) -> Self {
-        ScanError::Io(e)
-    }
-}
-
-/// Trait for scanning the OS for listening ports.
-pub trait PortScanner: Send + 'static {
-    fn scan(&self) -> Result<HashSet<Listener>, ScanError>;
-}
-
-// ---------------------------------------------------------------------------
-// Linux implementation: parse /proc/net/{tcp,tcp6,udp,udp6}
-// ---------------------------------------------------------------------------
-#[cfg(target_os = "linux")]
-mod platform {
-    use super::*;
-    use std::fs;
-    use std::path::PathBuf;
-
-    use tracing::{debug, trace, warn};
-
-    /// TCP socket state for LISTEN.
-    const TCP_LISTEN_STATE: u8 = 0x0A;
-
-    /// Scanner that reads from `/proc/net/` to discover listening ports.
-    ///
-    /// The `proc_root` field can be overridden for testing (defaults to `/proc`).
-    pub struct LinuxProcScanner {
-        proc_root: PathBuf,
-    }
-
-    impl Default for LinuxProcScanner {
-        fn default() -> Self {
-            Self::new()
-        }
-    }
-
-    impl LinuxProcScanner {
-        /// Create a scanner that reads from the real `/proc` filesystem.
-        pub fn new() -> Self {
-            Self {
-                proc_root: PathBuf::from("/proc"),
-            }
-        }
-
-        /// Create a scanner that reads from a custom root directory.
-        /// Useful for testing with mock proc files.
-        pub fn with_root(proc_root: PathBuf) -> Self {
-            Self { proc_root }
-        }
-
-        /// Parse a single `/proc/net/tcp` or `/proc/net/tcp6` style file.
-        /// Only includes sockets in the LISTEN state (0x0A).
-        fn parse_tcp_file(&self, path: &std::path::Path) -> Result<Vec<u16>, ScanError> {
-            let contents = fs::read_to_string(path)?;
-            let mut ports = Vec::new();
-
-            for (line_idx, line) in contents.lines().enumerate() {
-                // Skip the header line.
-                if line_idx == 0 {
-                    continue;
-                }
-
-                let line = line.trim();
-                if line.is_empty() {
-                    continue;
-                }
-
-                match parse_proc_net_line(line) {
-                    Some((port, state)) => {
-                        if state == TCP_LISTEN_STATE {
-                            trace!(port, state, "found TCP LISTEN socket");
-                            ports.push(port);
-                        }
-                    }
-                    None => {
-                        debug!(line_idx, "skipping malformed line in {:?}", path);
-                    }
-                }
-            }
-
-            Ok(ports)
-        }
-
-        /// Parse a single `/proc/net/udp` or `/proc/net/udp6` style file.
-        /// Includes all bound UDP sockets (any state).
-        fn parse_udp_file(&self, path: &std::path::Path) -> Result<Vec<u16>, ScanError> {
-            let contents = fs::read_to_string(path)?;
-            let mut ports = Vec::new();
-
-            for (line_idx, line) in contents.lines().enumerate() {
-                // Skip the header line.
-                if line_idx == 0 {
-                    continue;
-                }
-
-                let line = line.trim();
-                if line.is_empty() {
-                    continue;
-                }
-
-                match parse_proc_net_line(line) {
-                    Some((port, _state)) => {
-                        trace!(port, "found bound UDP socket");
-                        ports.push(port);
-                    }
-                    None => {
-                        debug!(line_idx, "skipping malformed line in {:?}", path);
-                    }
-                }
-            }
-
-            Ok(ports)
-        }
-    }
-
-    impl PortScanner for LinuxProcScanner {
-        fn scan(&self) -> Result<HashSet<Listener>, ScanError> {
-            let mut listeners = HashSet::new();
-
-            let net_dir = self.proc_root.join("net");
-
-            // TCP (IPv4 + IPv6)
-            for filename in &["tcp", "tcp6"] {
-                let path = net_dir.join(filename);
-                match self.parse_tcp_file(&path) {
-                    Ok(ports) => {
-                        for port in ports {
-                            listeners.insert((port, Protocol::Tcp));
-                        }
-                    }
-                    Err(ScanError::Io(ref e)) if e.kind() == std::io::ErrorKind::NotFound => {
-                        warn!(?path, "proc net file not found, skipping");
-                    }
-                    Err(e) => return Err(e),
-                }
-            }
-
-            // UDP (IPv4 + IPv6)
-            for filename in &["udp", "udp6"] {
-                let path = net_dir.join(filename);
-                match self.parse_udp_file(&path) {
-                    Ok(ports) => {
-                        for port in ports {
-                            listeners.insert((port, Protocol::Udp));
-                        }
-                    }
-                    Err(ScanError::Io(ref e)) if e.kind() == std::io::ErrorKind::NotFound => {
-                        warn!(?path, "proc net file not found, skipping");
-                    }
-                    Err(e) => return Err(e),
-                }
-            }
-
-            debug!(count = listeners.len(), "scan complete");
-            Ok(listeners)
-        }
-    }
-
-    /// Parse a single line from `/proc/net/{tcp,tcp6,udp,udp6}`.
-    ///
-    /// Returns `(port, state)` on success, or `None` if the line is malformed.
-    ///
-    /// The line format is whitespace-delimited:
-    /// ```text
-    ///   sl  local_address rem_address  st ...
-    ///    0: 00000000:0050 00000000:0000 0A ...
-    /// ```
-    fn parse_proc_net_line(line: &str) -> Option<(u16, u8)> {
-        let mut fields = line.split_whitespace();
-
-        // Field 0: slot number (e.g., "0:")
-        let _sl = fields.next()?;
-
-        // Field 1: local_address (e.g., "00000000:0050")
-        let local_addr = fields.next()?;
-
-        // Field 2: remote_address (skip)
-        let _rem_addr = fields.next()?;
-
-        // Field 3: state (hex, e.g., "0A")
-        let state_hex = fields.next()?;
-
-        // Parse the port from local_address.
-        let port_hex = local_addr.rsplit(':').next()?;
-        let port = u16::from_str_radix(port_hex, 16).ok()?;
-
-        // Parse the state.
-        let state = u8::from_str_radix(state_hex, 16).ok()?;
-
-        Some((port, state))
-    }
-
-    pub use LinuxProcScanner as DefaultScanner;
-}
-
-// ---------------------------------------------------------------------------
-// Non-Linux stub implementation
-// ---------------------------------------------------------------------------
-#[cfg(not(target_os = "linux"))]
-mod platform {
-    use super::*;
-    use std::sync::atomic::{AtomicBool, Ordering};
-
-    use tracing::warn;
-
-    /// Stub scanner for non-Linux platforms. Returns an empty set.
-    pub struct StubScanner {
-        warned: AtomicBool,
-    }
-
-    impl Default for StubScanner {
-        fn default() -> Self {
-            Self {
-                warned: AtomicBool::new(false),
-            }
-        }
-    }
-
-    impl StubScanner {
-        pub fn new() -> Self {
-            Self::default()
-        }
-    }
-
-    impl PortScanner for StubScanner {
-        fn scan(&self) -> Result<HashSet<Listener>, ScanError> {
-            if !self.warned.swap(true, Ordering::Relaxed) {
-                warn!(
-                    "port scanning is not supported on this platform; \
-                     returning empty set"
-                );
-            }
-            Ok(HashSet::new())
-        }
-    }
-
-    pub use StubScanner as DefaultScanner;
-}
-
-pub use platform::DefaultScanner;
+/// The default scanner for the current platform.
+pub type DefaultScanner =
+    <common::platform::CurrentPlatform as common::platform::Platform>::Scanner;
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -282,6 +11,8 @@ pub use platform::DefaultScanner;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use protocol::Protocol;
+    use std::collections::HashSet;
 
     // Re-use the Linux parsing logic for tests regardless of platform.
     // We pull in the parse function directly for unit testing.
@@ -485,7 +216,7 @@ mod tests {
     // -----------------------------------------------------------------------
     #[cfg(target_os = "linux")]
     mod linux_integration {
-        use super::super::*;
+        use super::*;
         use std::fs;
 
         #[test]
@@ -516,7 +247,7 @@ mod tests {
             )
             .unwrap();
 
-            let scanner = platform::LinuxProcScanner::with_root(tmp.clone());
+            let scanner = common::platform::linux::ProcNetScanner::with_root(tmp.clone());
             let result = scanner.scan().unwrap();
 
             assert!(result.contains(&(80, Protocol::Tcp)));
@@ -547,7 +278,7 @@ mod tests {
             )
             .unwrap();
 
-            let scanner = platform::LinuxProcScanner::with_root(tmp.clone());
+            let scanner = common::platform::linux::ProcNetScanner::with_root(tmp.clone());
             let result = scanner.scan().unwrap();
 
             assert!(result.is_empty());

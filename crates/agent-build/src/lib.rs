@@ -70,6 +70,16 @@ impl CrossTarget {
         Self::new("aarch64-apple-darwin").with_cross_fallback()
     }
 
+    /// Windows x86_64 target (MSVC).
+    pub fn windows_x86_64() -> Self {
+        Self::new("x86_64-pc-windows-msvc")
+    }
+
+    /// Windows ARM64 target (MSVC).
+    pub fn windows_aarch64() -> Self {
+        Self::new("aarch64-pc-windows-msvc")
+    }
+
     /// Set a custom cargo profile for release builds.
     pub fn with_custom_profile<S: Into<String>>(mut self, profile: S) -> Self {
         self.custom_profile = Some(profile.into());
@@ -578,11 +588,18 @@ fn find_binary(
     profile_dir: &str,
     binary_name: &str,
 ) -> Option<PathBuf> {
+    // Windows targets produce .exe binaries.
+    let actual_name = if target.contains("windows") {
+        format!("{binary_name}.exe")
+    } else {
+        binary_name.to_string()
+    };
+
     // Try the expected profile directory first
     let path = build_target_dir
         .join(target)
         .join(profile_dir)
-        .join(binary_name);
+        .join(&actual_name);
 
     if path.exists() {
         return Some(path);
@@ -592,7 +609,7 @@ fn find_binary(
     let release_path = build_target_dir
         .join(target)
         .join("release")
-        .join(binary_name);
+        .join(&actual_name);
 
     if release_path.exists() {
         return Some(release_path);

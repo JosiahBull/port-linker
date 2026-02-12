@@ -60,6 +60,16 @@ jobs:
             artifact_name: port-linker
             asset_name: port-linker-macos-aarch64
             command: cargo
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            artifact_name: port-linker.exe
+            asset_name: port-linker-windows-x86_64
+            command: cargo
+          - target: aarch64-pc-windows-msvc
+            os: windows-latest
+            artifact_name: port-linker.exe
+            asset_name: port-linker-windows-aarch64
+            command: cargo
 
     steps:
       - uses: actions/checkout@v4
@@ -207,6 +217,8 @@ jobs:
             | Linux | aarch64 (musl) | `port-linker-linux-aarch64-musl.tar.gz` |
             | macOS | x86_64 (Intel) | `port-linker-macos-x86_64.tar.gz` |
             | macOS | aarch64 (Apple Silicon) | `port-linker-macos-aarch64.tar.gz` |
+            | Windows | x86_64 | `port-linker-windows-x86_64.tar.gz` |
+            | Windows | aarch64 | `port-linker-windows-aarch64.tar.gz` |
 
             ### Quick install
 
