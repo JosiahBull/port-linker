@@ -28,6 +28,51 @@ SCENARIO="${1:-all}"
 info "checking SSH keys..."
 bash "$SCRIPT_DIR/ssh/setup-keys.sh"
 
+# Step 1b: Write SSH config so the CLI can resolve Docker container hostnames.
+# The CLI reads ~/.ssh/config to discover ProxyJump chains and identity files.
+KEY_FILE="$SCRIPT_DIR/ssh/keys/id_ed25519"
+SSH_DIR="$HOME/.ssh"
+SSH_CONFIG="$SSH_DIR/config"
+PLK_MARKER="# --- port-linker integration tests ---"
+
+info "writing SSH config for Docker test hosts..."
+mkdir -p "$SSH_DIR"
+chmod 700 "$SSH_DIR"
+
+# Remove any previous port-linker test block.
+if [ -f "$SSH_CONFIG" ]; then
+    sed -i.bak "/$PLK_MARKER/,/$PLK_MARKER/d" "$SSH_CONFIG"
+    rm -f "$SSH_CONFIG.bak"
+fi
+
+cat >> "$SSH_CONFIG" <<EOF
+$PLK_MARKER
+Host jump1
+    Hostname 172.20.0.10
+    User testuser
+    IdentityFile $KEY_FILE
+    StrictHostKeyChecking no
+    UserKnownHostsFile /dev/null
+
+Host jump2
+    Hostname 172.20.1.20
+    User testuser
+    IdentityFile $KEY_FILE
+    ProxyJump jump1
+    StrictHostKeyChecking no
+    UserKnownHostsFile /dev/null
+
+Host target
+    Hostname 172.20.2.20
+    User testuser
+    IdentityFile $KEY_FILE
+    ProxyJump jump1,jump2
+    StrictHostKeyChecking no
+    UserKnownHostsFile /dev/null
+$PLK_MARKER
+EOF
+chmod 600 "$SSH_CONFIG"
+
 # Step 2: Build containers.
 info "building Docker containers..."
 docker compose -f "$COMPOSE_FILE" build
@@ -109,6 +154,12 @@ fi
 if [ "${KEEP_CONTAINERS:-}" != "1" ]; then
     info "tearing down containers..."
     docker compose -f "$COMPOSE_FILE" down -v
+
+    # Remove test SSH config block.
+    if [ -f "$SSH_CONFIG" ]; then
+        sed -i.bak "/$PLK_MARKER/,/$PLK_MARKER/d" "$SSH_CONFIG"
+        rm -f "$SSH_CONFIG.bak"
+    fi
 else
     info "KEEP_CONTAINERS=1, leaving containers running"
     info "Teardown manually with: docker compose -f $COMPOSE_FILE down -v"
