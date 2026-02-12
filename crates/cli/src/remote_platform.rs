@@ -8,7 +8,7 @@ use tracing::{info, warn};
 
 use common::{Error, Result};
 
-use crate::ssh::SshSession;
+use crate::ssh::SshExecutor;
 
 /// Runtime abstraction over a remote host's OS for bootstrap commands.
 ///
@@ -212,7 +212,7 @@ impl RemotePlatform for RemoteWindows {
 
 /// Detect the remote OS and resolve its directories via SSH.
 /// Returns a trait object for use throughout the bootstrap flow.
-pub async fn detect_remote_platform(ssh: &SshSession) -> Box<dyn RemotePlatform> {
+pub async fn detect_remote_platform(ssh: &(impl SshExecutor + ?Sized)) -> Box<dyn RemotePlatform> {
     // Try uname (succeeds on Unix, fails on Windows).
     if let Ok((stdout, _, Some(0))) = ssh.exec("uname -s 2>/dev/null").await {
         let os_raw = stdout.trim().to_lowercase();
@@ -383,5 +383,76 @@ mod tests {
         };
         let cmd = w.detect_arch_cmd();
         assert!(cmd.contains("PROCESSOR_ARCHITECTURE"));
+    }
+
+    #[test]
+    fn windows_transfer_compressed_cmd() {
+        let w = test_helpers::windows_platform();
+        let cmd = w.transfer_compressed_cmd(r"C:\temp\agent-abc.exe");
+        assert!(cmd.contains("GzipStream"), "should use gzip decompression");
+        assert!(cmd.contains("Set-Content"), "should write via Set-Content");
+        assert!(
+            cmd.contains("agent-abc.exe"),
+            "should contain the remote path"
+        );
+    }
+
+    #[test]
+    fn windows_transfer_raw_cmd() {
+        let w = test_helpers::windows_platform();
+        let cmd = w.transfer_raw_cmd(r"C:\temp\agent-abc.exe");
+        assert!(
+            cmd.contains("Set-Content"),
+            "should write via Set-Content"
+        );
+        assert!(cmd.contains("Encoding Byte"), "should use byte encoding");
+    }
+
+    #[test]
+    fn windows_copy_cached_cmd() {
+        let w = test_helpers::windows_platform();
+        let cmd = w.copy_cached_cmd(r"C:\temp\cache\agent-hash", r"C:\temp\agent-abc.exe");
+        assert!(cmd.contains("Copy-Item"), "should use Copy-Item");
+        assert!(cmd.contains("agent-hash"), "should contain cache path");
+        assert!(cmd.contains("agent-abc.exe"), "should contain remote path");
+    }
+
+    #[test]
+    fn windows_populate_cache_cmd() {
+        let w = test_helpers::windows_platform();
+        let cmd = w.populate_cache_cmd(r"C:\temp\agent-abc.exe", r"C:\temp\cache\agent-hash");
+        assert!(cmd.contains("New-Item"), "should create directory");
+        assert!(
+            cmd.contains("AddDays(-7)"),
+            "should prune entries older than 7 days"
+        );
+        assert!(cmd.contains("Copy-Item"), "should copy binary to cache");
+    }
+
+    #[test]
+    fn windows_check_cache_cmd() {
+        let w = test_helpers::windows_platform();
+        let cmd = w.check_cache_cmd(r"C:\temp\cache\agent-hash");
+        assert!(cmd.contains("Test-Path"), "should use Test-Path");
+        assert!(cmd.contains("agent-hash"), "should contain cache path");
+    }
+
+    #[test]
+    fn remote_unix_check_cache_cmd() {
+        let u = test_helpers::unix_platform();
+        let cmd = u.check_cache_cmd("/tmp/.port-linker-cache/agent-hash");
+        assert!(cmd.contains("test -x"), "should use test -x");
+        assert!(cmd.contains("echo OK"), "should echo OK on success");
+    }
+
+    #[test]
+    fn remote_unix_copy_cached_cmd() {
+        let u = test_helpers::unix_platform();
+        let cmd = u.copy_cached_cmd(
+            "/tmp/.port-linker-cache/agent-hash",
+            "/tmp/agent-abc",
+        );
+        assert!(cmd.contains("cp "), "should use cp command");
+        assert!(cmd.contains("chmod +x"), "should make executable");
     }
 }

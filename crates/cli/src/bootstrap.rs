@@ -7,7 +7,7 @@ use tracing::{debug, error, info, warn};
 use common::{Error, Result};
 
 use crate::remote_platform::{RemotePlatform, detect_remote_platform};
-use crate::ssh::SshSession;
+use crate::ssh::{SshExecutor, SshSession};
 
 /// Number of hex chars from the SHA256 hash used as cache key.
 const HASH_PREFIX_LEN: usize = 16;
@@ -67,7 +67,7 @@ pub struct RelayInfo {
 /// Similar to `bootstrap_agent`: detect arch, transfer binary, execute,
 /// parse handshake (RELAY_READY/PORT=).
 pub async fn bootstrap_relay(
-    ssh: &SshSession,
+    ssh: &(impl SshExecutor + ?Sized),
     target_addr: &str,
     custom_binary: Option<&std::path::Path>,
 ) -> Result<RelayInfo> {
@@ -205,7 +205,7 @@ pub async fn bootstrap_agent(
 // Architecture detection
 // ---------------------------------------------------------------------------
 
-async fn detect_architecture(ssh: &SshSession, platform: &dyn RemotePlatform) -> Result<String> {
+async fn detect_architecture(ssh: &(impl SshExecutor + ?Sized), platform: &dyn RemotePlatform) -> Result<String> {
     let cmd = platform.detect_arch_cmd();
     let (stdout, stderr, exit_code) = ssh.exec(cmd).await?;
 
@@ -231,7 +231,7 @@ async fn detect_architecture(ssh: &SshSession, platform: &dyn RemotePlatform) ->
 /// 2. Embedded binary with remote cache: check SHA256-keyed cache, transfer
 ///    compressed binary on miss, decompress on the target.
 async fn transfer_agent(
-    ssh: &SshSession,
+    ssh: &(impl SshExecutor + ?Sized),
     platform: &dyn RemotePlatform,
     arch: &str,
     custom_binary: Option<&Path>,
@@ -301,7 +301,7 @@ fn sha256_hex_prefix(data: &[u8]) -> String {
 
 /// Check if the cached binary exists on the remote host.
 async fn check_remote_cache(
-    ssh: &SshSession,
+    ssh: &(impl SshExecutor + ?Sized),
     platform: &dyn RemotePlatform,
     cache_path: &str,
 ) -> bool {
@@ -314,7 +314,7 @@ async fn check_remote_cache(
 
 /// Copy from the cached binary to the target path.
 async fn copy_cached(
-    ssh: &SshSession,
+    ssh: &(impl SshExecutor + ?Sized),
     platform: &dyn RemotePlatform,
     cache_path: &str,
     remote_path: &str,
@@ -335,7 +335,7 @@ async fn copy_cached(
 
 /// Populate the remote cache with the deployed binary (best-effort).
 async fn populate_cache(
-    ssh: &SshSession,
+    ssh: &(impl SshExecutor + ?Sized),
     platform: &dyn RemotePlatform,
     remote_path: &str,
     cache_path: &str,
@@ -352,7 +352,7 @@ async fn populate_cache(
 
 /// Transfer a gzip-compressed binary and decompress on the remote host.
 async fn transfer_compressed(
-    ssh: &SshSession,
+    ssh: &(impl SshExecutor + ?Sized),
     platform: &dyn RemotePlatform,
     gz_data: &[u8],
     remote_path: &str,
@@ -377,7 +377,7 @@ async fn transfer_compressed(
 
 /// Transfer a raw (uncompressed) binary to the remote host.
 async fn transfer_raw(
-    ssh: &SshSession,
+    ssh: &(impl SshExecutor + ?Sized),
     platform: &dyn RemotePlatform,
     data: &[u8],
     remote_path: &str,
@@ -472,6 +472,213 @@ async fn execute_and_handshake(agent: &RemoteAgent) -> Result<AgentHandshake> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ssh::SshExecutor;
+
+    /// Mock SSH executor for testing bootstrap functions without a live SSH server.
+    ///
+    /// Commands are matched by substring against the `pattern` field.
+    /// Responses are returned in order of first match.
+    struct MockSshExecutor {
+        responses: Vec<MockResponse>,
+    }
+
+    struct MockResponse {
+        pattern: &'static str,
+        stdout: String,
+        stderr: String,
+        exit_code: Option<u32>,
+    }
+
+    impl MockSshExecutor {
+        fn new() -> Self {
+            Self {
+                responses: Vec::new(),
+            }
+        }
+
+        fn on(mut self, pattern: &'static str, stdout: &str, exit_code: u32) -> Self {
+            self.responses.push(MockResponse {
+                pattern,
+                stdout: stdout.to_string(),
+                stderr: String::new(),
+                exit_code: Some(exit_code),
+            });
+            self
+        }
+
+        fn on_err(mut self, pattern: &'static str, stderr: &str, exit_code: u32) -> Self {
+            self.responses.push(MockResponse {
+                pattern,
+                stdout: String::new(),
+                stderr: stderr.to_string(),
+                exit_code: Some(exit_code),
+            });
+            self
+        }
+
+        fn on_fail(mut self, pattern: &'static str) -> Self {
+            self.responses.push(MockResponse {
+                pattern,
+                stdout: String::new(),
+                stderr: "command failed".to_string(),
+                exit_code: Some(1),
+            });
+            self
+        }
+
+        fn find_response(&self, command: &str) -> (String, String, Option<u32>) {
+            for resp in &self.responses {
+                if command.contains(resp.pattern) {
+                    return (
+                        resp.stdout.clone(),
+                        resp.stderr.clone(),
+                        resp.exit_code,
+                    );
+                }
+            }
+            // Default: command not found
+            (String::new(), "mock: no match".to_string(), Some(127))
+        }
+    }
+
+    impl SshExecutor for MockSshExecutor {
+        async fn exec(&self, command: &str) -> common::Result<(String, String, Option<u32>)> {
+            Ok(self.find_response(command))
+        }
+
+        async fn exec_with_stdin(
+            &self,
+            command: &str,
+            _data: &[u8],
+        ) -> common::Result<(String, String, Option<u32>)> {
+            Ok(self.find_response(command))
+        }
+
+        async fn exec_and_read_lines(
+            &self,
+            command: &str,
+            _timeout: Duration,
+            mut predicate: impl FnMut(&str) -> bool + Send,
+        ) -> common::Result<Vec<String>> {
+            let (stdout, _, _) = self.find_response(command);
+            let mut lines = Vec::new();
+            for line in stdout.lines() {
+                let done = predicate(line);
+                lines.push(line.to_string());
+                if done {
+                    return Ok(lines);
+                }
+            }
+            Ok(lines)
+        }
+
+        async fn exec_detached(&self, _command: &str) -> common::Result<()> {
+            Ok(())
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests using MockSshExecutor
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_detect_remote_platform_linux() {
+        let mock = MockSshExecutor::new()
+            .on("uname -s", "Linux\n", 0)
+            .on("TMPDIR", "/tmp", 0);
+        let platform = crate::remote_platform::detect_remote_platform(&mock).await;
+        assert_eq!(platform.os_id(), "linux");
+    }
+
+    #[tokio::test]
+    async fn test_detect_remote_platform_darwin() {
+        let mock = MockSshExecutor::new()
+            .on("uname -s", "Darwin\n", 0)
+            .on("TMPDIR", "/tmp", 0);
+        let platform = crate::remote_platform::detect_remote_platform(&mock).await;
+        assert_eq!(platform.os_id(), "darwin");
+    }
+
+    #[tokio::test]
+    async fn test_detect_remote_platform_windows() {
+        let mock = MockSshExecutor::new()
+            .on_err("uname", "not found", 127)
+            .on("powershell", r"C:\Users\Admin\AppData\Local\Temp", 0);
+        let platform = crate::remote_platform::detect_remote_platform(&mock).await;
+        assert_eq!(platform.os_id(), "windows");
+    }
+
+    #[tokio::test]
+    async fn test_detect_remote_platform_fallback() {
+        let mock = MockSshExecutor::new()
+            .on_fail("uname")
+            .on_fail("powershell");
+        let platform = crate::remote_platform::detect_remote_platform(&mock).await;
+        // Falls back to Linux.
+        assert_eq!(platform.os_id(), "linux");
+    }
+
+    #[tokio::test]
+    async fn test_detect_architecture_linux() {
+        let mock = MockSshExecutor::new().on("uname -m", "x86_64\n", 0);
+        let platform = crate::remote_platform::test_helpers::unix_platform();
+        let arch = detect_architecture(&mock, &platform).await.unwrap();
+        assert_eq!(arch, "x86_64");
+    }
+
+    #[tokio::test]
+    async fn test_detect_architecture_arm64() {
+        let mock = MockSshExecutor::new().on("uname -m", "arm64\n", 0);
+        let platform = crate::remote_platform::test_helpers::unix_platform();
+        let arch = detect_architecture(&mock, &platform).await.unwrap();
+        assert_eq!(arch, "aarch64");
+    }
+
+    #[tokio::test]
+    async fn test_detect_architecture_failure() {
+        let mock = MockSshExecutor::new().on_err("uname -m", "not found", 1);
+        let platform = crate::remote_platform::test_helpers::unix_platform();
+        let result = detect_architecture(&mock, &platform).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_transfer_compressed_success() {
+        let mock = MockSshExecutor::new().on("gunzip", "", 0);
+        let platform = crate::remote_platform::test_helpers::unix_platform();
+        let result = transfer_compressed(&mock, &platform, b"fake-gz-data", "/tmp/agent-xyz").await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_transfer_compressed_failure() {
+        let mock = MockSshExecutor::new().on_err("gunzip", "disk full", 1);
+        let platform = crate::remote_platform::test_helpers::unix_platform();
+        let result = transfer_compressed(&mock, &platform, b"fake-gz-data", "/tmp/agent-xyz").await;
+        assert!(result.is_err());
+        let err_msg = format!("{:?}", result.unwrap_err());
+        assert!(err_msg.contains("disk full") || err_msg.contains("transfer failed"));
+    }
+
+    #[tokio::test]
+    async fn test_check_remote_cache_hit() {
+        let mock = MockSshExecutor::new().on("test -x", "OK\n", 0);
+        let platform = crate::remote_platform::test_helpers::unix_platform();
+        let hit = check_remote_cache(&mock, &platform, "/tmp/cache/agent-hash").await;
+        assert!(hit);
+    }
+
+    #[tokio::test]
+    async fn test_check_remote_cache_miss() {
+        let mock = MockSshExecutor::new().on_fail("test -x");
+        let platform = crate::remote_platform::test_helpers::unix_platform();
+        let hit = check_remote_cache(&mock, &platform, "/tmp/cache/agent-hash").await;
+        assert!(!hit);
+    }
+
+    // -----------------------------------------------------------------------
+    // Original tests (unchanged)
+    // -----------------------------------------------------------------------
 
     #[test]
     fn parse_handshake_lines() {

@@ -65,6 +65,39 @@ pub mod process {
         let pid: u32 = fields[1].parse().ok()?;
         Some(ProcessInfo { pid, name })
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn test_parse_lsof_typical_output() {
+            let output = b"COMMAND     PID   USER   FD   TYPE   DEVICE SIZE/OFF NODE NAME\nnginx     12345   root    6u  IPv4  1234567      0t0  TCP *:80 (LISTEN)\n";
+            let info = parse_lsof_output(output).expect("should parse typical lsof output");
+            assert_eq!(info.name, "nginx");
+            assert_eq!(info.pid, 12345);
+        }
+
+        #[test]
+        fn test_parse_lsof_empty_output() {
+            let info = parse_lsof_output(b"");
+            assert!(info.is_none(), "empty output should return None");
+        }
+
+        #[test]
+        fn test_parse_lsof_header_only() {
+            let output = b"COMMAND     PID   USER   FD   TYPE   DEVICE SIZE/OFF NODE NAME\n";
+            let info = parse_lsof_output(output);
+            assert!(info.is_none(), "header-only output should return None");
+        }
+
+        #[test]
+        fn test_parse_lsof_malformed_pid() {
+            let output = b"COMMAND     PID   USER\nnginx     notapid   root\n";
+            let info = parse_lsof_output(output);
+            assert!(info.is_none(), "non-numeric PID should return None");
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

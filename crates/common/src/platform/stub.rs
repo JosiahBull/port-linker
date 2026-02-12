@@ -58,3 +58,23 @@ impl super::Notifier for StubNotifier {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::platform::{Notifier, PortScanner};
+
+    #[test]
+    fn test_stub_scanner_returns_empty() {
+        let scanner = StubScanner::default();
+        let result = scanner.scan().expect("scan should succeed");
+        assert!(result.is_empty(), "stub scanner should return empty set");
+    }
+
+    #[test]
+    fn test_stub_notifier_succeeds() {
+        let notifier = StubNotifier::default();
+        let result = notifier.show("title", "body", false, true);
+        assert!(result.is_ok(), "stub notifier should always succeed");
+    }
+}

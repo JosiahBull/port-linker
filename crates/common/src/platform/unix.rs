@@ -43,3 +43,14 @@ pub fn username() -> String {
         .or_else(|_| std::env::var("LOGNAME"))
         .unwrap_or_else(|_| "root".to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_username_returns_nonempty() {
+        let name = username();
+        assert!(!name.is_empty(), "username should return a non-empty string");
+    }
+}
