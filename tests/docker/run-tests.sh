@@ -106,15 +106,22 @@ sleep 2
 # Debug: verify SSH setup in containers.
 info "verifying SSH setup..."
 info "Key fingerprint (local): $(ssh-keygen -lf "$KEY_FILE.pub" 2>/dev/null)"
-for container in plk-jump1 plk-jump2 plk-target; do
-    info "$container .ssh perms: $(docker exec "$container" ls -la /home/testuser/.ssh/ 2>/dev/null)"
-    info "$container sshd running: $(docker exec "$container" pgrep -f sshd 2>/dev/null | head -1)"
+info "Private key permissions: $(ls -la "$KEY_FILE" 2>/dev/null)"
+for container in plk-jump1; do
+    info "$container home dir: $(docker exec "$container" ls -la /home/testuser/ 2>&1)"
+    info "$container .ssh dir: $(docker exec "$container" ls -la /home/testuser/.ssh/ 2>&1)"
+    info "$container authorized_keys fingerprint: $(docker exec "$container" ssh-keygen -lf /home/testuser/.ssh/authorized_keys 2>&1)"
+    info "$container sshd config test: $(docker exec "$container" sshd -T 2>&1 | grep -iE 'authorizedkeysfile|pubkey|strictmodes|loglevel')"
 done
 # Quick SSH connectivity check using the system SSH client.
 info "testing SSH to jump1 with system client..."
-ssh -v -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+ssh -vvv -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
     -o BatchMode=yes -o ConnectTimeout=5 \
-    -i "$KEY_FILE" testuser@172.20.0.10 echo "SSH OK" 2>&1 || info "system SSH test failed (may be expected)"
+    -i "$KEY_FILE" testuser@172.20.0.10 echo "SSH OK" 2>&1 || info "system SSH test failed"
+# Dump sshd server-side logs for debugging.
+info "=== sshd logs from jump1 ==="
+docker logs plk-jump1 2>&1 | tail -50
+info "=== end sshd logs ==="
 
 # Step 4: Run scenarios.
 PASSED=0
