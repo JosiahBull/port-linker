@@ -11,6 +11,8 @@ path = "src/main.rs"
 protocol = { path = "../protocol" }
 common = { path = "../common" }
 agent-embed = { path = "../agent-embed" }
+relay-embed = { path = "../relay-embed" }
+quic-over-tcp = { path = "../quic-over-tcp" }
 tokio.workspace = true
 quinn.workspace = true
 rustls.workspace = true

@@ -1,0 +1,10 @@
+[package]
+name = "quic-over-tcp"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+quinn.workspace = true
+tokio.workspace = true
+bytes.workspace = true
+tracing.workspace = true

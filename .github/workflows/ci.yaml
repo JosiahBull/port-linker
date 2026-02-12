@@ -124,6 +124,36 @@ jobs:
       - name: Build documentation
         run: cargo doc --workspace --all-features --no-deps
 
+  test-docker:
+    name: Docker Integration Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: [check, clippy]
+    concurrency:
+      group: ci-test-docker-${{ github.repository }}-${{ github.ref }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          targets: x86_64-unknown-linux-musl
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install musl tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools socat
+
+      - name: Build binaries for musl
+        run: cargo build -p agent -p udp-relay -p cli --target x86_64-unknown-linux-musl
+
+      - name: Build CLI (native)
+        run: cargo build -p cli
+
+      - name: Run Docker integration tests
+        run: bash tests/docker/run-tests.sh all
+
   build:
     name: Build
     runs-on: ${{ matrix.os }}

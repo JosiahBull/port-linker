@@ -8,7 +8,7 @@ use tracing::{debug, info};
 
 use common::{Error, Result};
 
-use super::config::{self, SshHostConfig};
+use super::config::{self, JumpHost, SshHostConfig};
 
 // ---------------------------------------------------------------------------
 // Host key verification policy
@@ -476,6 +476,27 @@ impl SshSession {
         Ok(())
     }
 
+    /// Open a direct-tcpip tunnel to a remote host:port through this SSH session.
+    ///
+    /// Returns a `ChannelStream` that implements `AsyncRead + AsyncWrite`.
+    pub async fn open_tunnel(
+        &self,
+        host: &str,
+        port: u16,
+    ) -> Result<russh::ChannelStream<client::Msg>> {
+        let channel = self
+            .handle
+            .channel_open_direct_tcpip(host, port as u32, "127.0.0.1", 0)
+            .await
+            .map_err(|e| {
+                Error::Protocol(format!(
+                    "failed to open direct-tcpip tunnel to {host}:{port}: {e}"
+                ))
+            })?;
+
+        Ok(channel.into_stream())
+    }
+
     /// Close the SSH connection gracefully.
     #[allow(dead_code)]
     pub async fn close(self) -> Result<()> {
@@ -484,6 +505,206 @@ impl SshSession {
             .await
             .map_err(|e| Error::Protocol(format!("SSH disconnect failed: {e}")))?;
         Ok(())
+    }
+
+    /// Connect to a host via SSH over an existing stream (e.g., a tunnel).
+    ///
+    /// This is used for multi-hop SSH connections where the stream is a
+    /// `direct-tcpip` channel from a previous SSH session.
+    async fn connect_over_stream<S>(
+        stream: S,
+        ssh_config: SshHostConfig,
+        host_key_policy: HostKeyPolicy,
+        peer_ip: std::net::IpAddr,
+    ) -> Result<Self>
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
+        let client_config = Arc::new(client::Config {
+            inactivity_timeout: None,
+            ..Default::default()
+        });
+
+        let handler = Handler {
+            policy: host_key_policy,
+        };
+
+        let handle = client::connect_stream(client_config, stream, handler)
+            .await
+            .map_err(|e| Error::Protocol(format!("SSH connect over stream failed: {e}")))?;
+
+        let mut session = SshSession {
+            handle,
+            config: ssh_config,
+            peer_ip,
+        };
+        session.authenticate().await?;
+        Ok(session)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SSH connection chaining (ProxyJump support)
+// ---------------------------------------------------------------------------
+
+/// An SSH connection chain through one or more jump hosts.
+///
+/// Keeps all intermediate SSH sessions alive so the tunneled channels
+/// remain valid for the lifetime of the chain.
+pub struct SshChain {
+    /// Jump host sessions, in order. Must be kept alive for channel lifetime.
+    pub jump_sessions: Vec<SshSession>,
+    /// The final target SSH session.
+    pub target: SshSession,
+}
+
+impl SshChain {
+    /// Connect to a target host through a chain of jump hosts.
+    ///
+    /// `jump_hosts` is the ordered list of hops (first = closest to client).
+    /// The final connection is made to `remote` (the target).
+    pub async fn connect(
+        remote: &str,
+        host_key_policy: HostKeyPolicy,
+        jump_hosts: &[JumpHost],
+    ) -> Result<Self> {
+        if jump_hosts.is_empty() {
+            return Err(Error::Protocol(
+                "SshChain::connect called with empty jump_hosts".into(),
+            ));
+        }
+
+        let mut jump_sessions = Vec::with_capacity(jump_hosts.len());
+
+        // Step 1: Connect to the first jump host directly.
+        let first_jump = &jump_hosts[0];
+        let first_config = config::SshHostConfig {
+            hostname: first_jump.hostname.clone(),
+            port: first_jump.port,
+            user: first_jump.user.clone().unwrap_or_else(config::whoami_pub),
+            identity_files: if first_jump.identity_files.is_empty() {
+                config::default_identity_files_pub()
+            } else {
+                first_jump.identity_files.clone()
+            },
+            proxy_jump: None,
+        };
+
+        info!(
+            host = %first_config.hostname,
+            port = first_config.port,
+            user = %first_config.user,
+            "connecting to first jump host"
+        );
+
+        let addr_str = format!("{}:{}", first_config.hostname, first_config.port);
+        let addr: SocketAddr = tokio::net::lookup_host(&addr_str)
+            .await
+            .map_err(|e| {
+                Error::Protocol(format!("failed to resolve jump host '{}': {e}", addr_str))
+            })?
+            .next()
+            .ok_or_else(|| {
+                Error::Protocol(format!("no addresses found for jump host '{}'", addr_str))
+            })?;
+
+        let client_config = Arc::new(client::Config {
+            inactivity_timeout: None,
+            ..Default::default()
+        });
+
+        let handler = Handler {
+            policy: host_key_policy,
+        };
+
+        let handle = client::connect(client_config, addr, handler)
+            .await
+            .map_err(|e| Error::Protocol(format!("SSH connect to jump host failed: {e}")))?;
+
+        let mut first_session = SshSession {
+            handle,
+            config: first_config,
+            peer_ip: addr.ip(),
+        };
+        first_session.authenticate().await?;
+        info!("connected to first jump host at {}", addr);
+
+        jump_sessions.push(first_session);
+
+        // Step 2: Chain through remaining jump hosts.
+        for (i, jump) in jump_hosts.iter().enumerate().skip(1) {
+            let prev = &jump_sessions[i - 1];
+            let jump_config = config::SshHostConfig {
+                hostname: jump.hostname.clone(),
+                port: jump.port,
+                user: jump.user.clone().unwrap_or_else(config::whoami_pub),
+                identity_files: if jump.identity_files.is_empty() {
+                    config::default_identity_files_pub()
+                } else {
+                    jump.identity_files.clone()
+                },
+                proxy_jump: None,
+            };
+
+            info!(
+                host = %jump_config.hostname,
+                port = jump_config.port,
+                hop = i + 1,
+                "tunneling to next jump host"
+            );
+
+            let stream = prev
+                .open_tunnel(&jump_config.hostname, jump_config.port)
+                .await?;
+            let peer_ip = prev.peer_ip;
+
+            let session =
+                SshSession::connect_over_stream(stream, jump_config, host_key_policy, peer_ip)
+                    .await?;
+
+            jump_sessions.push(session);
+        }
+
+        // Step 3: Connect to the final target through the last jump host.
+        let (user_override, host) = if let Some(idx) = remote.find('@') {
+            (Some(&remote[..idx]), &remote[idx + 1..])
+        } else {
+            (None, remote)
+        };
+
+        let target_config = config::resolve_ssh_config(host, user_override);
+        let last_jump = jump_sessions.last().unwrap();
+
+        info!(
+            host = %target_config.hostname,
+            port = target_config.port,
+            user = %target_config.user,
+            "tunneling to final target"
+        );
+
+        let stream = last_jump
+            .open_tunnel(&target_config.hostname, target_config.port)
+            .await?;
+
+        // Resolve target IP (best-effort for peer_ip tracking).
+        let target_ip =
+            tokio::net::lookup_host(format!("{}:{}", target_config.hostname, target_config.port))
+                .await
+                .ok()
+                .and_then(|mut addrs| addrs.next())
+                .map(|a| a.ip())
+                .unwrap_or(last_jump.peer_ip);
+
+        let target =
+            SshSession::connect_over_stream(stream, target_config, host_key_policy, target_ip)
+                .await?;
+
+        info!("SSH chain established ({} hops)", jump_sessions.len());
+
+        Ok(SshChain {
+            jump_sessions,
+            target,
+        })
     }
 }
 

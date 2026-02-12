@@ -15,10 +15,52 @@ use tracing::{debug, error, info, warn};
 use binding_manager::{BindingManager, ConflictPolicy};
 use common::{Error, Result};
 use protocol::{ControlMsg, PROTOCOL_VERSION};
-use ssh::HostKeyPolicy;
+use ssh::{HostKeyPolicy, SshChain};
 
 /// Maximum allowed frame size (1 MB).
 const MAX_FRAME_SIZE: u32 = 1_048_576;
+
+// ---------------------------------------------------------------------------
+// Transport strategy (ProxyJump support)
+// ---------------------------------------------------------------------------
+
+/// How to transport QUIC traffic when ProxyJump is configured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum TransportStrategy {
+    /// Try UDP relay chain first, fall back to QUIC-over-TCP if UDP is blocked.
+    Auto,
+    /// Use UDP relay chain on jump hosts (preserves full QUIC end-to-end).
+    UdpRelay,
+    /// Use QUIC-over-TCP via SSH direct-tcpip tunnel.
+    TcpBridge,
+}
+
+impl std::fmt::Display for TransportStrategy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Auto => write!(f, "auto"),
+            Self::UdpRelay => write!(f, "udp-relay"),
+            Self::TcpBridge => write!(f, "tcp-bridge"),
+        }
+    }
+}
+
+/// Active transport context for a session.
+#[allow(dead_code)]
+enum TransportContext {
+    /// Direct QUIC connection (no ProxyJump).
+    Direct,
+    /// UDP relay chain on jump hosts.
+    UdpRelay {
+        /// Relay cleanups for each jump host.
+        _relay_infos: Vec<bootstrap::RelayInfo>,
+    },
+    /// QUIC-over-TCP via SSH tunnel.
+    TcpBridge {
+        /// The abstract socket wrapping the TCP tunnel.
+        socket: Arc<quic_over_tcp::TcpUdpSocket>,
+    },
+}
 
 /// Maximum number of Phoenix Agent restart attempts before giving up.
 const MAX_RESTART_ATTEMPTS: u32 = 5;
@@ -70,6 +112,18 @@ struct Args {
     /// Enable notification sounds
     #[arg(long, default_value_t = true)]
     notification_sound: bool,
+
+    /// Transport strategy when ProxyJump is configured: auto, udp-relay, or tcp-bridge
+    #[arg(long, value_enum, default_value_t = TransportStrategy::Auto)]
+    transport: TransportStrategy,
+
+    /// Timeout (seconds) for UDP relay probe when using auto transport detection
+    #[arg(long, default_value_t = 5)]
+    relay_probe_timeout: u64,
+
+    /// Path to a custom relay binary to transfer to jump hosts
+    #[arg(long)]
+    relay_binary: Option<std::path::PathBuf>,
 }
 
 // ---------------------------------------------------------------------------
@@ -180,7 +234,7 @@ async fn main() -> Result<()> {
     } else if args.agent.is_some() {
         // Direct agent mode — single session, no restart.
         let agent_addr = args.agent.unwrap();
-        run_single_session(&args, agent_addr, None).await
+        run_single_session(&args, agent_addr, None, None).await
     } else {
         Err(Error::Protocol(
             "either --remote or --agent must be specified".into(),
@@ -209,10 +263,15 @@ async fn run_with_phoenix_restart(args: &Args) -> Result<()> {
             "bootstrapping agent via SSH"
         );
 
-        // Step 1: SSH bootstrap.
+        // Step 1: SSH bootstrap (including transport setup for ProxyJump).
         let bootstrap_result = bootstrap_remote(args, remote).await;
-        let (agent_addr, remote_agent) = match bootstrap_result {
-            Ok(pair) => pair,
+        let BootstrapResult {
+            agent_addr,
+            remote_agent,
+            transport_ctx,
+            _jump_sessions,
+        } = match bootstrap_result {
+            Ok(result) => result,
             Err(e) => {
                 consecutive_failures += 1;
                 error!(
@@ -233,7 +292,8 @@ async fn run_with_phoenix_restart(args: &Args) -> Result<()> {
         };
 
         // Step 2: Run the session.
-        let session_result = run_single_session(args, agent_addr, Some(&remote_agent)).await;
+        let session_result =
+            run_single_session(args, agent_addr, Some(&remote_agent), transport_ctx).await;
 
         // Step 3: Cleanup the old agent.
         remote_agent.cleanup().await;
@@ -266,21 +326,322 @@ async fn run_with_phoenix_restart(args: &Args) -> Result<()> {
     }
 }
 
-/// SSH bootstrap: connect, deploy agent, return QUIC address + remote agent.
-async fn bootstrap_remote(
+/// Result from bootstrapping a remote connection, including transport context.
+struct BootstrapResult {
+    agent_addr: SocketAddr,
+    remote_agent: bootstrap::RemoteAgent,
+    transport_ctx: Option<TransportContext>,
+    /// Jump host SSH sessions that must be kept alive for the tunnel chain.
+    /// If these are dropped, the tunneled channels die and the target SSH
+    /// session (and QUIC connection) will break.
+    _jump_sessions: Vec<ssh::SshSession>,
+}
+
+/// SSH bootstrap: connect, deploy agent, set up transport, return results.
+///
+/// If the target host has `ProxyJump` configured in `~/.ssh/config`, the
+/// connection is chained through the jump hosts and an appropriate transport
+/// strategy is selected (UDP relay, TCP bridge, or auto-detected).
+async fn bootstrap_remote(args: &Args, remote: &str) -> Result<BootstrapResult> {
+    // Peek at the SSH config to check for ProxyJump.
+    let (user_override, host) = if let Some(idx) = remote.find('@') {
+        (Some(&remote[..idx]), &remote[idx + 1..])
+    } else {
+        (None, remote)
+    };
+
+    let ssh_config = ssh::config_for_host(host, user_override);
+
+    if let Some(ref jump_hosts) = ssh_config.proxy_jump {
+        info!(
+            hops = jump_hosts.len(),
+            transport = %args.transport,
+            "ProxyJump configured, using SSH connection chaining"
+        );
+
+        bootstrap_with_proxy_jump(args, remote, jump_hosts).await
+    } else {
+        // Direct connection — no ProxyJump.
+        let ssh_session = ssh::SshSession::connect(remote, args.ssh_host_key_verification).await?;
+
+        let peer_ip = ssh_session.peer_ip();
+        let (handshake, remote_agent) =
+            bootstrap::bootstrap_agent(ssh_session, args.agent_binary.as_deref()).await?;
+
+        let agent_addr = SocketAddr::new(peer_ip, handshake.port);
+        Ok(BootstrapResult {
+            agent_addr,
+            remote_agent,
+            transport_ctx: None,
+            _jump_sessions: Vec::new(),
+        })
+    }
+}
+
+/// Bootstrap with ProxyJump: set up SSH chain, deploy agent, select transport.
+async fn bootstrap_with_proxy_jump(
     args: &Args,
     remote: &str,
-) -> Result<(SocketAddr, bootstrap::RemoteAgent)> {
-    let ssh_session = ssh::SshSession::connect(remote, args.ssh_host_key_verification).await?;
+    jump_hosts: &[ssh::JumpHost],
+) -> Result<BootstrapResult> {
+    let chain = SshChain::connect(remote, args.ssh_host_key_verification, jump_hosts).await?;
 
-    let peer_ip = ssh_session.peer_ip();
-
+    let peer_ip = chain.target.peer_ip();
     let (handshake, remote_agent) =
-        bootstrap::bootstrap_agent(ssh_session, args.agent_binary.as_deref()).await?;
+        bootstrap::bootstrap_agent(chain.target, args.agent_binary.as_deref()).await?;
 
-    let agent_addr = SocketAddr::new(peer_ip, handshake.port);
+    // Determine the target's IP for UDP relay targeting.
+    //
+    // When the SSH config uses a loopback address (e.g., `Hostname 127.0.0.1`
+    // for a port-forwarded container/VM), the loopback address only works for
+    // the specific SSH-forwarded port — the agent's random QUIC port is NOT
+    // reachable at that address from the jump host.
+    //
+    // We resolve the target's real network IP by running `hostname -I` on the
+    // target. For TCP bridge, we tunnel through the target's own SSH session
+    // to localhost, so loopback is fine.
+    let relay_target_ip = if peer_ip.is_loopback() {
+        warn!(
+            peer_ip = %peer_ip,
+            "target SSH hostname resolves to loopback, \
+             resolving actual network IP for relay targeting"
+        );
+        resolve_target_real_ip(&remote_agent.ssh).await
+    } else {
+        Some(peer_ip)
+    };
 
-    Ok((agent_addr, remote_agent))
+    // Select transport strategy.
+    match args.transport {
+        TransportStrategy::UdpRelay => {
+            let agent_ip = relay_target_ip.ok_or_else(|| {
+                Error::Protocol(
+                    "UDP relay requires a non-loopback target IP, but could not \
+                     resolve one. The target appears to be behind a port forward. \
+                     Use --transport=tcp-bridge instead."
+                        .into(),
+                )
+            })?;
+            let agent_addr = SocketAddr::new(agent_ip, handshake.port);
+            let (relay_addr, relay_infos) =
+                setup_udp_relay_chain(args, &chain.jump_sessions, agent_addr).await?;
+            Ok(BootstrapResult {
+                agent_addr: relay_addr,
+                remote_agent,
+                transport_ctx: Some(TransportContext::UdpRelay {
+                    _relay_infos: relay_infos,
+                }),
+                _jump_sessions: chain.jump_sessions,
+            })
+        }
+        TransportStrategy::TcpBridge => {
+            let (bridge_addr, socket) = setup_tcp_bridge(&remote_agent.ssh, &handshake).await?;
+            Ok(BootstrapResult {
+                agent_addr: bridge_addr,
+                remote_agent,
+                transport_ctx: Some(TransportContext::TcpBridge { socket }),
+                _jump_sessions: chain.jump_sessions,
+            })
+        }
+        TransportStrategy::Auto => {
+            // If we have a routable target IP, try UDP relay first.
+            if let Some(agent_ip) = relay_target_ip {
+                let agent_addr = SocketAddr::new(agent_ip, handshake.port);
+                match try_udp_relay_auto(args, &chain.jump_sessions, agent_addr).await {
+                    Ok((relay_addr, relay_infos)) => {
+                        info!("auto-detection: UDP relay chain working");
+                        Ok(BootstrapResult {
+                            agent_addr: relay_addr,
+                            remote_agent,
+                            transport_ctx: Some(TransportContext::UdpRelay {
+                                _relay_infos: relay_infos,
+                            }),
+                            _jump_sessions: chain.jump_sessions,
+                        })
+                    }
+                    Err(e) => {
+                        warn!(%e, "auto-detection: UDP relay failed, falling back to TCP bridge");
+                        let (bridge_addr, socket) =
+                            setup_tcp_bridge(&remote_agent.ssh, &handshake).await?;
+                        Ok(BootstrapResult {
+                            agent_addr: bridge_addr,
+                            remote_agent,
+                            transport_ctx: Some(TransportContext::TcpBridge { socket }),
+                            _jump_sessions: chain.jump_sessions,
+                        })
+                    }
+                }
+            } else {
+                // No routable target IP — skip relay, go straight to TCP bridge.
+                info!(
+                    "target behind loopback with no resolvable network IP, \
+                     using TCP bridge directly"
+                );
+                let (bridge_addr, socket) = setup_tcp_bridge(&remote_agent.ssh, &handshake).await?;
+                Ok(BootstrapResult {
+                    agent_addr: bridge_addr,
+                    remote_agent,
+                    transport_ctx: Some(TransportContext::TcpBridge { socket }),
+                    _jump_sessions: chain.jump_sessions,
+                })
+            }
+        }
+    }
+}
+
+/// Set up a chain of UDP relays on jump hosts.
+///
+/// Works backwards: last relay targets the agent's QUIC port, each prior
+/// relay targets the next relay. Host connects to the first relay.
+async fn setup_udp_relay_chain(
+    args: &Args,
+    jump_sessions: &[ssh::SshSession],
+    agent_addr: SocketAddr,
+) -> Result<(SocketAddr, Vec<bootstrap::RelayInfo>)> {
+    let mut relay_infos = Vec::with_capacity(jump_sessions.len());
+    let mut next_target = agent_addr;
+
+    // Deploy relays in reverse order (last jump host first).
+    for (i, session) in jump_sessions.iter().enumerate().rev() {
+        let target_str = next_target.to_string();
+        info!(
+            hop = i + 1,
+            target = %target_str,
+            "deploying relay on jump host"
+        );
+
+        let relay_info =
+            bootstrap::bootstrap_relay(session, &target_str, args.relay_binary.as_deref()).await?;
+
+        // The next target for the previous relay is this relay.
+        next_target = SocketAddr::new(session.peer_ip(), relay_info.port);
+        relay_infos.push(relay_info);
+    }
+
+    // Reverse so relay_infos[0] is the first hop.
+    relay_infos.reverse();
+
+    // Host connects to the first relay.
+    let first_relay_addr = next_target;
+    info!(
+        addr = %first_relay_addr,
+        chain_len = relay_infos.len(),
+        "UDP relay chain established"
+    );
+
+    Ok((first_relay_addr, relay_infos))
+}
+
+/// Try to set up a UDP relay chain with auto-detection probe.
+async fn try_udp_relay_auto(
+    args: &Args,
+    jump_sessions: &[ssh::SshSession],
+    agent_addr: SocketAddr,
+) -> Result<(SocketAddr, Vec<bootstrap::RelayInfo>)> {
+    let (relay_addr, relay_infos) = setup_udp_relay_chain(args, jump_sessions, agent_addr).await?;
+
+    // Probe the first relay to check if UDP is reachable.
+    let probe_timeout = std::time::Duration::from_secs(args.relay_probe_timeout);
+    info!(
+        addr = %relay_addr,
+        timeout_secs = args.relay_probe_timeout,
+        "probing UDP relay connectivity"
+    );
+
+    let probe_socket = tokio::net::UdpSocket::bind("0.0.0.0:0")
+        .await
+        .map_err(|e| Error::Protocol(format!("failed to bind probe socket: {e}")))?;
+
+    probe_socket
+        .send_to(b"PLK_PROBE", relay_addr)
+        .await
+        .map_err(|e| Error::Protocol(format!("failed to send probe: {e}")))?;
+
+    let mut buf = [0u8; 64];
+    match tokio::time::timeout(probe_timeout, probe_socket.recv_from(&mut buf)).await {
+        Ok(Ok((len, _))) => {
+            if &buf[..len] == b"PLK_PROBE_ACK" {
+                info!("relay probe: received ACK, UDP path is clear");
+                Ok((relay_addr, relay_infos))
+            } else {
+                Err(Error::Protocol("relay probe: unexpected response".into()))
+            }
+        }
+        Ok(Err(e)) => Err(Error::Protocol(format!("relay probe recv error: {e}"))),
+        Err(_) => Err(Error::Protocol(
+            "relay probe: timed out (UDP may be blocked)".into(),
+        )),
+    }
+}
+
+/// Set up a QUIC-over-TCP bridge via SSH direct-tcpip tunnel.
+///
+/// Opens a tunnel through the **target's own SSH session** to `localhost:bridge_port`.
+/// This works even when the target is behind a port forward (loopback address in SSH
+/// config), because the tunnel endpoint is on the target itself where the bridge
+/// listener runs.
+async fn setup_tcp_bridge(
+    target_session: &ssh::SshSession,
+    handshake: &bootstrap::AgentHandshake,
+) -> Result<(SocketAddr, Arc<quic_over_tcp::TcpUdpSocket>)> {
+    let bridge_port = handshake.bridge_port.ok_or_else(|| {
+        Error::Protocol("TCP bridge requested but agent did not report BRIDGE_PORT".into())
+    })?;
+
+    info!(
+        bridge_port,
+        "setting up QUIC-over-TCP bridge via SSH tunnel to target"
+    );
+
+    // Open the tunnel through the target's SSH session to localhost:bridge_port.
+    // The bridge listener is on the target host itself, so 127.0.0.1 is correct.
+    let tunnel_stream = target_session.open_tunnel("127.0.0.1", bridge_port).await?;
+
+    let socket = quic_over_tcp::TcpUdpSocket::new(tunnel_stream, "127.0.0.1:0".parse().unwrap());
+
+    // The QUIC endpoint will connect to the synthetic bridge address.
+    // The actual routing happens through the TCP tunnel.
+    let bridge_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+
+    info!("TCP bridge established");
+    Ok((bridge_addr, socket))
+}
+
+/// Resolve the target host's actual network IP when SSH config uses a loopback address.
+///
+/// When the target is configured with `Hostname 127.0.0.1` (common for port-forwarded
+/// containers, VMs, or devcontainers), the loopback address only works for the specific
+/// SSH-forwarded port. For UDP relay, we need the target's real network IP as seen from
+/// the jump host. This function runs `hostname -I` on the target to discover it.
+async fn resolve_target_real_ip(ssh: &ssh::SshSession) -> Option<std::net::IpAddr> {
+    // Try Linux-style `hostname -I` first (works on most Linux including busybox/Alpine).
+    let cmd = "hostname -I 2>/dev/null | awk '{print $1}'";
+    if let Ok((stdout, _, Some(0))) = ssh.exec(cmd).await {
+        let ip_str = stdout.trim();
+        if !ip_str.is_empty()
+            && let Ok(ip) = ip_str.parse::<std::net::IpAddr>()
+            && !ip.is_loopback()
+        {
+            info!(ip = %ip, "resolved target's actual network IP via hostname -I");
+            return Some(ip);
+        }
+    }
+
+    // Fallback: use `ip route get` to find the default route's source IP.
+    let cmd = r#"ip -4 route get 1 2>/dev/null | awk '/src/{for(i=1;i<=NF;i++)if($i=="src")print $(i+1);exit}'"#;
+    if let Ok((stdout, _, Some(0))) = ssh.exec(cmd).await {
+        let ip_str = stdout.trim();
+        if !ip_str.is_empty()
+            && let Ok(ip) = ip_str.parse::<std::net::IpAddr>()
+            && !ip.is_loopback()
+        {
+            info!(ip = %ip, "resolved target's actual network IP via ip route");
+            return Some(ip);
+        }
+    }
+
+    warn!("could not resolve target's actual network IP");
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -296,6 +657,7 @@ async fn run_single_session(
     args: &Args,
     agent_addr: SocketAddr,
     remote_agent: Option<&bootstrap::RemoteAgent>,
+    transport_ctx: Option<TransportContext>,
 ) -> Result<()> {
     info!("connecting to agent at {}", agent_addr);
 
@@ -318,20 +680,48 @@ async fn run_single_session(
     transport.keep_alive_interval(Some(std::time::Duration::from_secs(10)));
     client_config.transport_config(Arc::new(transport));
 
-    // Create QUIC client endpoint.
-    let bind_addr: SocketAddr = "0.0.0.0:0"
-        .parse()
-        .map_err(|e| Error::Protocol(format!("invalid bind address: {e}")))?;
-    let mut endpoint =
-        quinn::Endpoint::client(bind_addr).map_err(|e| Error::QuicConnection(e.to_string()))?;
-    endpoint.set_default_client_config(client_config);
+    // Create QUIC client endpoint based on transport context.
+    let (endpoint, connection) = match transport_ctx {
+        Some(TransportContext::TcpBridge { ref socket }) => {
+            // Use the TcpUdpSocket as the abstract UDP socket for QUIC.
+            info!("using QUIC-over-TCP bridge transport");
+            let runtime = quinn::default_runtime()
+                .ok_or_else(|| Error::QuicConnection("no async runtime".into()))?;
+            let mut endpoint = quinn::Endpoint::new_with_abstract_socket(
+                quinn::EndpointConfig::default(),
+                None,
+                socket.clone(),
+                runtime,
+            )
+            .map_err(|e| Error::QuicConnection(e.to_string()))?;
+            endpoint.set_default_client_config(client_config);
 
-    // Connect to the agent.
-    let connection = endpoint
-        .connect(agent_addr, "localhost")
-        .map_err(|e| Error::QuicConnection(e.to_string()))?
-        .await
-        .map_err(|e| Error::QuicConnection(e.to_string()))?;
+            let connection = endpoint
+                .connect(agent_addr, "localhost")
+                .map_err(|e| Error::QuicConnection(e.to_string()))?
+                .await
+                .map_err(|e| Error::QuicConnection(e.to_string()))?;
+
+            (endpoint, connection)
+        }
+        _ => {
+            // Direct UDP or UDP relay -- standard UDP endpoint.
+            let bind_addr: SocketAddr = "0.0.0.0:0"
+                .parse()
+                .map_err(|e| Error::Protocol(format!("invalid bind address: {e}")))?;
+            let mut endpoint = quinn::Endpoint::client(bind_addr)
+                .map_err(|e| Error::QuicConnection(e.to_string()))?;
+            endpoint.set_default_client_config(client_config);
+
+            let connection = endpoint
+                .connect(agent_addr, "localhost")
+                .map_err(|e| Error::QuicConnection(e.to_string()))?
+                .await
+                .map_err(|e| Error::QuicConnection(e.to_string()))?;
+
+            (endpoint, connection)
+        }
+    };
 
     info!("QUIC connection established");
 

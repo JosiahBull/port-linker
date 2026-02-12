@@ -22,11 +22,23 @@ const HASH_PREFIX_LEN: usize = 16;
 pub struct AgentHandshake {
     pub port: u16,
     pub token: String,
+    /// TCP bridge port for QUIC-over-TCP fallback (Phase 3).
+    /// Only present when the agent supports the TCP bridge.
+    pub bridge_port: Option<u16>,
 }
 
 /// Remote agent deployment info for cleanup.
 pub struct RemoteAgent {
     pub ssh: SshSession,
+    pub remote_path: String,
+    /// Relay processes deployed on jump hosts (for cleanup).
+    #[allow(dead_code)]
+    pub relay_cleanups: Vec<RelayCleanup>,
+}
+
+/// Info needed to clean up a relay process on a jump host.
+#[allow(dead_code)]
+pub struct RelayCleanup {
     pub remote_path: String,
 }
 
@@ -42,6 +54,98 @@ impl RemoteAgent {
             warn!(%e, "failed to clean up remote agent");
         }
     }
+}
+
+/// Information about a deployed relay.
+pub struct RelayInfo {
+    /// The port the relay is listening on.
+    pub port: u16,
+    /// Remote path of the relay binary (for cleanup).
+    #[allow(dead_code)]
+    pub remote_path: String,
+}
+
+/// Bootstrap a UDP relay on a jump host via an SSH session.
+///
+/// Similar to `bootstrap_agent`: detect arch, transfer binary, execute,
+/// parse handshake (RELAY_READY/PORT=).
+pub async fn bootstrap_relay(
+    ssh: &SshSession,
+    target_addr: &str,
+    custom_binary: Option<&std::path::Path>,
+) -> Result<RelayInfo> {
+    let arch = detect_architecture(ssh).await?;
+    info!(arch = %arch, "detected jump host architecture for relay");
+
+    let random_suffix = common::generate_token();
+    let remote_path = format!("/tmp/port-linker-relay-{random_suffix}");
+
+    if let Some(path) = custom_binary {
+        info!(path = %path.display(), "using custom relay binary");
+        let data = read_file_blocking(path).await?;
+        transfer_raw(ssh, &data, &remote_path).await?;
+    } else {
+        let embedded_gz =
+            relay_embed::get_relay_binary_for_system("linux", &arch).ok_or_else(|| {
+                Error::Protocol(format!(
+                    "no embedded relay binary for architecture '{arch}'. \
+                     Available targets: {:?}.",
+                    relay_embed::available_relay_targets(),
+                ))
+            })?;
+
+        let hash_prefix = sha256_hex_prefix(embedded_gz);
+        let cache_path = format!("{CACHE_DIR}/relay-{hash_prefix}");
+
+        if check_remote_cache(ssh, &cache_path).await {
+            info!(cache = %cache_path, "relay cache hit");
+            symlink_cached(ssh, &cache_path, &remote_path).await?;
+        } else {
+            info!(
+                arch,
+                compressed_size = embedded_gz.len(),
+                "relay cache miss, transferring"
+            );
+            transfer_compressed(ssh, embedded_gz, &remote_path).await?;
+            populate_cache(ssh, &remote_path, &cache_path).await;
+        }
+    }
+
+    // Execute the relay and parse handshake.
+    let command = format!("{remote_path} --target {target_addr}");
+    let mut relay_port: Option<u16> = None;
+    let mut got_ready = false;
+
+    let lines = ssh
+        .exec_and_read_lines(&command, Duration::from_secs(10), |line| {
+            if line == "RELAY_READY" {
+                got_ready = true;
+            } else if let Some(p) = line.strip_prefix("PORT=") {
+                relay_port = p.trim().parse().ok();
+            }
+            got_ready && relay_port.is_some()
+        })
+        .await?;
+
+    let port = relay_port.ok_or_else(|| {
+        Error::Protocol(format!(
+            "relay did not report PORT (got {} lines: {:?})",
+            lines.len(),
+            lines
+        ))
+    })?;
+
+    if !got_ready {
+        return Err(Error::Protocol(format!(
+            "relay did not report RELAY_READY (got {} lines: {:?})",
+            lines.len(),
+            lines
+        )));
+    }
+
+    info!(port, "relay deployed and listening");
+
+    Ok(RelayInfo { port, remote_path })
 }
 
 // ---------------------------------------------------------------------------
@@ -66,7 +170,11 @@ pub async fn bootstrap_agent(
     let remote_path = transfer_agent(&ssh, &arch, custom_binary).await?;
     info!(path = %remote_path, "agent deployed");
 
-    let remote_agent = RemoteAgent { ssh, remote_path };
+    let remote_agent = RemoteAgent {
+        ssh,
+        remote_path,
+        relay_cleanups: Vec::new(),
+    };
 
     // Step 3: Execute agent and parse handshake.
     let handshake = match execute_and_handshake(&remote_agent).await {
@@ -278,6 +386,7 @@ async fn execute_and_handshake(agent: &RemoteAgent) -> Result<AgentHandshake> {
 
     let mut port: Option<u16> = None;
     let mut token: Option<String> = None;
+    let mut bridge_port: Option<u16> = None;
     let mut got_ready = false;
 
     let lines = agent
@@ -289,7 +398,10 @@ async fn execute_and_handshake(agent: &RemoteAgent) -> Result<AgentHandshake> {
                 port = p.trim().parse().ok();
             } else if let Some(t) = line.strip_prefix("TOKEN=") {
                 token = Some(t.trim().to_string());
+            } else if let Some(bp) = line.strip_prefix("BRIDGE_PORT=") {
+                bridge_port = bp.trim().parse().ok();
             }
+            // BRIDGE_PORT is optional, so don't wait for it.
             got_ready && port.is_some() && token.is_some()
         })
         .await?;
@@ -318,7 +430,11 @@ async fn execute_and_handshake(agent: &RemoteAgent) -> Result<AgentHandshake> {
         )));
     }
 
-    Ok(AgentHandshake { port, token })
+    Ok(AgentHandshake {
+        port,
+        token,
+        bridge_port,
+    })
 }
 
 #[cfg(test)]
@@ -385,10 +501,44 @@ mod tests {
         let handshake = AgentHandshake {
             port: 9999,
             token: "test-token-abc".to_string(),
+            bridge_port: Some(8888),
         };
 
         assert_eq!(handshake.port, 9999);
         assert_eq!(handshake.token, "test-token-abc");
+        assert_eq!(handshake.bridge_port, Some(8888));
+    }
+
+    #[test]
+    fn parse_handshake_with_bridge_port() {
+        let lines = vec![
+            "AGENT_READY".to_string(),
+            "PORT=12345".to_string(),
+            "TOKEN=plk-abc-123".to_string(),
+            "BRIDGE_PORT=54321".to_string(),
+        ];
+
+        let mut port = None;
+        let mut token = None;
+        let mut bridge_port = None;
+        let mut got_ready = false;
+
+        for line in &lines {
+            if line == "AGENT_READY" {
+                got_ready = true;
+            } else if let Some(p) = line.strip_prefix("PORT=") {
+                port = p.trim().parse().ok();
+            } else if let Some(t) = line.strip_prefix("TOKEN=") {
+                token = Some(t.trim().to_string());
+            } else if let Some(bp) = line.strip_prefix("BRIDGE_PORT=") {
+                bridge_port = bp.trim().parse().ok();
+            }
+        }
+
+        assert!(got_ready);
+        assert_eq!(port, Some(12345));
+        assert_eq!(token.as_deref(), Some("plk-abc-123"));
+        assert_eq!(bridge_port, Some(54321));
     }
 
     #[test]
