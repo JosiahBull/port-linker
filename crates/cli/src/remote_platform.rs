@@ -401,10 +401,7 @@ mod tests {
     fn windows_transfer_raw_cmd() {
         let w = test_helpers::windows_platform();
         let cmd = w.transfer_raw_cmd(r"C:\temp\agent-abc.exe");
-        assert!(
-            cmd.contains("Set-Content"),
-            "should write via Set-Content"
-        );
+        assert!(cmd.contains("Set-Content"), "should write via Set-Content");
         assert!(cmd.contains("Encoding Byte"), "should use byte encoding");
     }
 
@@ -448,10 +445,7 @@ mod tests {
     #[test]
     fn remote_unix_copy_cached_cmd() {
         let u = test_helpers::unix_platform();
-        let cmd = u.copy_cached_cmd(
-            "/tmp/.port-linker-cache/agent-hash",
-            "/tmp/agent-abc",
-        );
+        let cmd = u.copy_cached_cmd("/tmp/.port-linker-cache/agent-hash", "/tmp/agent-abc");
         assert!(cmd.contains("cp "), "should use cp command");
         assert!(cmd.contains("chmod +x"), "should make executable");
     }

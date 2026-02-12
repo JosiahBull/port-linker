@@ -205,7 +205,10 @@ pub async fn bootstrap_agent(
 // Architecture detection
 // ---------------------------------------------------------------------------
 
-async fn detect_architecture(ssh: &(impl SshExecutor + ?Sized), platform: &dyn RemotePlatform) -> Result<String> {
+async fn detect_architecture(
+    ssh: &(impl SshExecutor + ?Sized),
+    platform: &dyn RemotePlatform,
+) -> Result<String> {
     let cmd = platform.detect_arch_cmd();
     let (stdout, stderr, exit_code) = ssh.exec(cmd).await?;
 
@@ -529,11 +532,7 @@ mod tests {
         fn find_response(&self, command: &str) -> (String, String, Option<u32>) {
             for resp in &self.responses {
                 if command.contains(resp.pattern) {
-                    return (
-                        resp.stdout.clone(),
-                        resp.stderr.clone(),
-                        resp.exit_code,
-                    );
+                    return (resp.stdout.clone(), resp.stderr.clone(), resp.exit_code);
                 }
             }
             // Default: command not found
@@ -601,9 +600,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_detect_remote_platform_windows() {
-        let mock = MockSshExecutor::new()
-            .on_err("uname", "not found", 127)
-            .on("powershell", r"C:\Users\Admin\AppData\Local\Temp", 0);
+        let mock = MockSshExecutor::new().on_err("uname", "not found", 127).on(
+            "powershell",
+            r"C:\Users\Admin\AppData\Local\Temp",
+            0,
+        );
         let platform = crate::remote_platform::detect_remote_platform(&mock).await;
         assert_eq!(platform.os_id(), "windows");
     }

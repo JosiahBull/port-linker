@@ -51,6 +51,9 @@ mod tests {
     #[test]
     fn test_username_returns_nonempty() {
         let name = username();
-        assert!(!name.is_empty(), "username should return a non-empty string");
+        assert!(
+            !name.is_empty(),
+            "username should return a non-empty string"
+        );
     }
 }

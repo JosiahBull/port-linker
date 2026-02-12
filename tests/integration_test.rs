@@ -3229,7 +3229,10 @@ async fn test_port_removed_notification() {
             Ok(Err(_)) | Err(_) => break,
         }
     }
-    assert!(got_removed, "should have received PortRemoved for port 19877");
+    assert!(
+        got_removed,
+        "should have received PortRemoved for port 19877"
+    );
 
     connection.close(0u32.into(), b"done");
     endpoint.wait_idle().await;
