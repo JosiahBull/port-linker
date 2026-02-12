@@ -2965,7 +2965,7 @@ async fn test_udp_forwarding_e2e() {
     };
     let encoded = protocol::encode(&packet).expect("encode failed");
     connection
-        .send_datagram(Bytes::from(encoded))
+        .send_datagram(encoded)
         .expect("failed to send datagram");
 
     // Receive the forwarded data on the UDP socket with timeout.
@@ -3024,7 +3024,7 @@ async fn test_udp_forwarding_multiple_datagrams() {
         };
         let encoded = protocol::encode(&packet).expect("encode failed");
         connection
-            .send_datagram(Bytes::from(encoded))
+            .send_datagram(encoded)
             .expect("failed to send datagram");
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -3090,7 +3090,7 @@ async fn test_udp_forwarding_large_datagram() {
     };
     let encoded = protocol::encode(&packet).expect("encode failed");
     connection
-        .send_datagram(Bytes::from(encoded))
+        .send_datagram(encoded)
         .expect("failed to send large datagram");
 
     // Receive and verify.

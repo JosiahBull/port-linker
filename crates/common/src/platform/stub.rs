@@ -73,7 +73,7 @@ mod tests {
 
     #[test]
     fn test_stub_notifier_succeeds() {
-        let notifier = StubNotifier::default();
+        let notifier = StubNotifier;
         let result = notifier.show("title", "body", false, true);
         assert!(result.is_ok(), "stub notifier should always succeed");
     }
