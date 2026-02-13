@@ -195,7 +195,7 @@ jobs:
         if: matrix.os == 'windows-latest'
         run: |
           upx --best --lzma target/release/port-linker.exe
-          dir target\release\port-linker.exe
+          ls -lh target/release/port-linker.exe
 
       - name: Upload binary artifact (Unix)
         if: matrix.os != 'windows-latest'
