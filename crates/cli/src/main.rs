@@ -303,6 +303,13 @@ async fn run_with_phoenix_restart(args: &Args) -> Result<()> {
             Ok(()) => {
                 // Clean exit (echo-only mode or graceful shutdown).
                 info!("session ended cleanly");
+                if args.echo_only {
+                    // Force-exit to avoid blocking on SSH session drop.
+                    // The echo test has passed and cleanup is done; lingering
+                    // async tasks (SSH keepalives, tunnel readers) can be
+                    // safely abandoned.
+                    std::process::exit(0);
+                }
                 return Ok(());
             }
             Err(e) => {
