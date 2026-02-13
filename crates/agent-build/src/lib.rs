@@ -297,13 +297,14 @@ impl ToolchainInfo {
 
 /// Build for all configured targets.
 ///
+/// Builds are parallelized across targets using separate target directories
+/// to avoid cargo lock conflicts.
+///
 /// Returns a map of target triple to build result.
 pub fn build_for_targets(config: &BuildConfig) -> HashMap<String, BuildResult> {
     let toolchain = ToolchainInfo::detect();
-    let mut results = HashMap::new();
 
-    // Use a separate target directory to avoid cargo lock conflicts
-    let build_target_dir = config.workspace_root.join("target").join("cross-build");
+    let base_target_dir = config.workspace_root.join("target").join("cross-build");
 
     // Create placeholder files for all targets first
     // This ensures include_bytes! doesn't fail even if builds fail
@@ -316,13 +317,27 @@ pub fn build_for_targets(config: &BuildConfig) -> HashMap<String, BuildResult> {
         }
     }
 
-    // Build each target
-    for target in &config.targets {
-        let result = build_single_target(config, target, &toolchain, &build_target_dir);
-        results.insert(target.triple.clone(), result);
-    }
+    // Build all targets in parallel using threads with per-target directories.
+    let toolchain_ref = &toolchain;
+    std::thread::scope(|s| {
+        let handles: Vec<_> = config
+            .targets
+            .iter()
+            .map(|target| {
+                let build_target_dir = base_target_dir.join(&target.triple);
+                s.spawn(move || {
+                    let result =
+                        build_single_target(config, target, toolchain_ref, &build_target_dir);
+                    (target.triple.clone(), result)
+                })
+            })
+            .collect();
 
-    results
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("build thread panicked"))
+            .collect()
+    })
 }
 
 /// Generate the output filename for a target.
