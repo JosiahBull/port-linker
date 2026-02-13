@@ -833,11 +833,7 @@ async fn run_single_session(
         connection.close(0u32.into(), b"done");
         // Give the endpoint a bounded time to drain. Over TCP bridge the
         // peer may never send the final ACK, so we must not block forever.
-        let _ = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            endpoint.wait_idle(),
-        )
-        .await;
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), endpoint.wait_idle()).await;
         // In echo-only mode, cleanup is handled by the caller (Phoenix loop
         // or direct --agent mode).
         if let Some(agent) = remote_agent {
