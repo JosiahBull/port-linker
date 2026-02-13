@@ -1,0 +1,73 @@
+# Docker Compose for port-linker ProxyJump integration tests.
+#
+# Network topology:
+#   net-host-jump1 (172.20.0.0/24) -- host connects here
+#   net-jump1-jump2 (172.20.1.0/24) -- between jump1 and jump2
+#   net-jump2-target (172.20.2.0/24) -- between jump2 and target
+
+services:
+  jump1:
+    build:
+      context: .
+      dockerfile: Dockerfile.sshnode
+    container_name: plk-jump1
+    hostname: jump1
+    cap_add:
+      - NET_ADMIN
+    networks:
+      net-host-jump1:
+        ipv4_address: 172.20.0.10
+      net-jump1-jump2:
+        ipv4_address: 172.20.1.10
+    volumes:
+      - ./ssh/keys:/tmp/ssh-keys:ro
+      - ../../target/x86_64-unknown-linux-musl/debug:/opt/plk:ro
+
+  jump2:
+    build:
+      context: .
+      dockerfile: Dockerfile.sshnode
+    container_name: plk-jump2
+    hostname: jump2
+    cap_add:
+      - NET_ADMIN
+    networks:
+      net-jump1-jump2:
+        ipv4_address: 172.20.1.20
+      net-jump2-target:
+        ipv4_address: 172.20.2.10
+    volumes:
+      - ./ssh/keys:/tmp/ssh-keys:ro
+      - ../../target/x86_64-unknown-linux-musl/debug:/opt/plk:ro
+
+  target:
+    build:
+      context: .
+      dockerfile: Dockerfile.sshnode
+    container_name: plk-target
+    hostname: target
+    cap_add:
+      - NET_ADMIN
+    networks:
+      net-jump2-target:
+        ipv4_address: 172.20.2.20
+    volumes:
+      - ./ssh/keys:/tmp/ssh-keys:ro
+      - ../../target/x86_64-unknown-linux-musl/debug:/opt/plk:ro
+
+networks:
+  net-host-jump1:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/24
+  net-jump1-jump2:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.1.0/24
+  net-jump2-target:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.2.0/24

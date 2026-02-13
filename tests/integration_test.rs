@@ -79,20 +79,52 @@ impl Drop for AgentProcess {
     }
 }
 
+/// Resolve the path to the agent binary, building it first if necessary.
+///
+/// Uses `std::sync::Once` so the build is invoked at most once per test run,
+/// even when tests execute in parallel.
+fn agent_binary_path() -> String {
+    use std::sync::Once;
+    static BUILD_ONCE: Once = Once::new();
+
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let workspace_root = std::path::Path::new(manifest_dir)
+        .parent()
+        .expect("tests dir should have a parent");
+
+    // Prefer the env var set by Cargo when using artifact dependencies.
+    if let Ok(path) = std::env::var("CARGO_BIN_EXE_port-linker-agent") {
+        return path;
+    }
+
+    let bin_path = workspace_root
+        .join("target/debug/port-linker-agent")
+        .to_string_lossy()
+        .to_string();
+
+    BUILD_ONCE.call_once(|| {
+        if std::path::Path::new(&bin_path).exists() {
+            return;
+        }
+        // Build the agent binary.  Cargo's own build lock prevents races
+        // with any concurrent `cargo` invocations.
+        let status = Command::new("cargo")
+            .args(["build", "-p", "agent"])
+            .current_dir(workspace_root)
+            .status()
+            .expect("failed to invoke `cargo build -p agent`");
+        assert!(
+            status.success(),
+            "cargo build -p agent failed with {status}"
+        );
+    });
+
+    bin_path
+}
+
 /// Spawn the agent binary and parse its stdout for AGENT_READY/PORT/TOKEN.
 fn spawn_agent() -> Result<AgentProcess> {
-    // Try environment variable first, then fall back to workspace-relative path.
-    let agent_bin = std::env::var("CARGO_BIN_EXE_port-linker-agent").unwrap_or_else(|_| {
-        // Resolve relative to workspace root.
-        let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        let workspace_root = std::path::Path::new(manifest_dir)
-            .parent()
-            .expect("tests dir should have a parent");
-        workspace_root
-            .join("target/debug/port-linker-agent")
-            .to_string_lossy()
-            .to_string()
-    });
+    let agent_bin = agent_binary_path();
 
     let mut child = Command::new(agent_bin)
         .stdout(Stdio::piped())
@@ -198,6 +230,15 @@ impl rustls::client::danger::ServerCertVerifier for SkipServerVerification {
 
 /// Build a QUIC client endpoint with TLS verification disabled.
 fn build_client_endpoint() -> Result<quinn::Endpoint> {
+    build_client_endpoint_inner(false)
+}
+
+/// Build a QUIC client endpoint with TLS verification disabled and QUIC datagrams enabled.
+fn build_client_endpoint_with_datagrams() -> Result<quinn::Endpoint> {
+    build_client_endpoint_inner(true)
+}
+
+fn build_client_endpoint_inner(enable_datagrams: bool) -> Result<quinn::Endpoint> {
     rustls::crypto::ring::default_provider()
         .install_default()
         .ok();
@@ -209,7 +250,13 @@ fn build_client_endpoint() -> Result<quinn::Endpoint> {
 
     let quic_client_config = QuicClientConfig::try_from(rustls_config)
         .map_err(|e| Error::QuicConnection(e.to_string()))?;
-    let client_config = quinn::ClientConfig::new(Arc::new(quic_client_config));
+    let mut client_config = quinn::ClientConfig::new(Arc::new(quic_client_config));
+
+    if enable_datagrams {
+        let mut transport = quinn::TransportConfig::default();
+        transport.datagram_receive_buffer_size(Some(1_048_576));
+        client_config.transport_config(Arc::new(transport));
+    }
 
     let bind_addr: SocketAddr = "0.0.0.0:0"
         .parse()
@@ -2873,4 +2920,321 @@ fn test_agent_log_event_max_fields() {
     assert_eq!(decoded.target.len(), max_target.len());
     assert_eq!(decoded.message.len(), max_message.len());
     assert_eq!(decoded.level, LogLevel::Warn);
+}
+
+// ---------------------------------------------------------------------------
+// UDP Forwarding E2E Tests
+// ---------------------------------------------------------------------------
+
+/// Test 72: End-to-end UDP forwarding through QUIC datagrams.
+///
+/// Spawns agent, starts a local UDP echo socket, connects a QUIC client with
+/// datagram support, sends a UdpData packet via send_datagram(), and verifies
+/// the UDP socket receives the forwarded data.
+#[tokio::test]
+async fn test_udp_forwarding_e2e() {
+    use protocol::Packet;
+
+    let mut agent = spawn_agent().expect("failed to spawn agent");
+
+    let agent_addr: SocketAddr = format!("127.0.0.1:{}", agent.info.port).parse().unwrap();
+
+    // Start a local UDP socket to receive forwarded data.
+    let udp_socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("failed to bind UDP socket");
+    let udp_port = udp_socket.local_addr().unwrap().port();
+
+    // Connect to agent with datagram-enabled endpoint.
+    let endpoint = build_client_endpoint_with_datagrams().unwrap();
+    let connection = endpoint
+        .connect(agent_addr, "localhost")
+        .unwrap()
+        .await
+        .unwrap();
+
+    // Accept and discard the control stream handshake.
+    let (_control_send, mut control_recv) = connection.accept_bi().await.unwrap();
+    let _ = recv_msg(&mut control_recv).await.unwrap();
+
+    // Encode and send a UDP datagram via QUIC.
+    let test_data = b"hello udp".to_vec();
+    let packet = Packet::UdpData {
+        port: udp_port,
+        data: test_data.clone(),
+    };
+    let encoded = protocol::encode(&packet).expect("encode failed");
+    connection
+        .send_datagram(encoded)
+        .expect("failed to send datagram");
+
+    // Receive the forwarded data on the UDP socket with timeout.
+    let mut buf = vec![0u8; 1500];
+    let recv_result = tokio::time::timeout(Duration::from_secs(3), udp_socket.recv_from(&mut buf))
+        .await
+        .expect("timeout waiting for UDP data")
+        .expect("failed to recv from UDP socket");
+
+    let (len, _addr) = recv_result;
+    assert_eq!(
+        &buf[..len],
+        &test_data[..],
+        "forwarded UDP data should match"
+    );
+
+    connection.close(0u32.into(), b"done");
+    endpoint.wait_idle().await;
+    agent.kill().ok();
+}
+
+/// Test 73: UDP forwarding with multiple datagrams.
+///
+/// Sends 10 datagrams with a small delay between each and verifies at least
+/// most arrive. QUIC datagrams are unreliable, so we accept some loss.
+#[tokio::test]
+async fn test_udp_forwarding_multiple_datagrams() {
+    use protocol::Packet;
+
+    let mut agent = spawn_agent().expect("failed to spawn agent");
+
+    let agent_addr: SocketAddr = format!("127.0.0.1:{}", agent.info.port).parse().unwrap();
+
+    let udp_socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("failed to bind UDP socket");
+    let udp_port = udp_socket.local_addr().unwrap().port();
+
+    let endpoint = build_client_endpoint_with_datagrams().unwrap();
+    let connection = endpoint
+        .connect(agent_addr, "localhost")
+        .unwrap()
+        .await
+        .unwrap();
+
+    let (_control_send, mut control_recv) = connection.accept_bi().await.unwrap();
+    let _ = recv_msg(&mut control_recv).await.unwrap();
+
+    // Send 10 datagrams with small delays to avoid congestion.
+    let count = 10;
+    for i in 0..count {
+        let data = format!("datagram {i}").into_bytes();
+        let packet = Packet::UdpData {
+            port: udp_port,
+            data,
+        };
+        let encoded = protocol::encode(&packet).expect("encode failed");
+        connection
+            .send_datagram(encoded)
+            .expect("failed to send datagram");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // Receive datagrams with timeout.
+    // QUIC datagrams are unreliable, so we accept >= 7 out of 10.
+    let mut received = Vec::new();
+    let mut buf = vec![0u8; 1500];
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while received.len() < count {
+        match tokio::time::timeout_at(deadline, udp_socket.recv_from(&mut buf)).await {
+            Ok(Ok((len, _addr))) => {
+                received.push(buf[..len].to_vec());
+            }
+            Ok(Err(e)) => panic!("recv error: {e}"),
+            Err(_) => break,
+        }
+    }
+
+    assert!(
+        received.len() >= 7,
+        "should receive at least 7 of {count} datagrams, got {}",
+        received.len()
+    );
+
+    connection.close(0u32.into(), b"done");
+    endpoint.wait_idle().await;
+    agent.kill().ok();
+}
+
+/// Test 74: UDP forwarding with large datagram.
+///
+/// Sends a 1000-byte datagram (near MTU) through the QUIC datagram path and
+/// verifies data integrity after forwarding.
+#[tokio::test]
+async fn test_udp_forwarding_large_datagram() {
+    use protocol::Packet;
+
+    let mut agent = spawn_agent().expect("failed to spawn agent");
+
+    let agent_addr: SocketAddr = format!("127.0.0.1:{}", agent.info.port).parse().unwrap();
+
+    let udp_socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("failed to bind UDP socket");
+    let udp_port = udp_socket.local_addr().unwrap().port();
+
+    let endpoint = build_client_endpoint_with_datagrams().unwrap();
+    let connection = endpoint
+        .connect(agent_addr, "localhost")
+        .unwrap()
+        .await
+        .unwrap();
+
+    let (_control_send, mut control_recv) = connection.accept_bi().await.unwrap();
+    let _ = recv_msg(&mut control_recv).await.unwrap();
+
+    // Use a 1000-byte payload that fits within the QUIC datagram MTU.
+    let large_data: Vec<u8> = (0..1000).map(|i| (i % 256) as u8).collect();
+    let packet = Packet::UdpData {
+        port: udp_port,
+        data: large_data.clone(),
+    };
+    let encoded = protocol::encode(&packet).expect("encode failed");
+    connection
+        .send_datagram(encoded)
+        .expect("failed to send large datagram");
+
+    // Receive and verify.
+    let mut buf = vec![0u8; 2000];
+    let (len, _addr) = tokio::time::timeout(Duration::from_secs(3), udp_socket.recv_from(&mut buf))
+        .await
+        .expect("timeout waiting for large UDP datagram")
+        .expect("failed to recv large datagram");
+
+    assert_eq!(len, large_data.len(), "datagram length mismatch");
+    assert_eq!(
+        &buf[..len],
+        &large_data[..],
+        "large datagram content mismatch"
+    );
+
+    connection.close(0u32.into(), b"done");
+    endpoint.wait_idle().await;
+    agent.kill().ok();
+}
+
+// ---------------------------------------------------------------------------
+// Port Discovery Message Flow Tests (Linux-only)
+// ---------------------------------------------------------------------------
+
+/// Test 75: PortAdded notification when a new listener appears.
+///
+/// Spawns agent, connects QUIC, consumes handshake, then starts a TCP listener
+/// on a non-ephemeral port and expects a ControlMsg::PortAdded on the control stream.
+#[tokio::test]
+#[cfg(target_os = "linux")]
+async fn test_port_added_notification() {
+    let mut agent = spawn_agent().expect("failed to spawn agent");
+
+    let agent_addr: SocketAddr = format!("127.0.0.1:{}", agent.info.port).parse().unwrap();
+
+    let endpoint = build_client_endpoint().unwrap();
+    let connection = endpoint
+        .connect(agent_addr, "localhost")
+        .unwrap()
+        .await
+        .unwrap();
+
+    let (_control_send, mut control_recv) = connection.accept_bi().await.unwrap();
+    let _ = recv_msg(&mut control_recv).await.unwrap();
+
+    // Start a TCP listener on a non-ephemeral port.
+    let test_listener = tokio::net::TcpListener::bind("127.0.0.1:19876")
+        .await
+        .expect("failed to bind test listener on port 19876");
+
+    // Read control stream with timeout, expect PortAdded.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut found = false;
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout_at(deadline, recv_msg(&mut control_recv)).await {
+            Ok(Ok(ControlMsg::PortAdded { port, proto, .. })) => {
+                if port == 19876 && proto == protocol::Protocol::Tcp {
+                    found = true;
+                    break;
+                }
+                // Keep reading -- might get other port events first.
+            }
+            Ok(Ok(_other)) => {
+                // Other control messages, keep reading.
+            }
+            Ok(Err(_)) | Err(_) => break,
+        }
+    }
+
+    assert!(found, "should have received PortAdded for port 19876");
+
+    drop(test_listener);
+    connection.close(0u32.into(), b"done");
+    endpoint.wait_idle().await;
+    agent.kill().ok();
+}
+
+/// Test 76: PortRemoved notification when a listener disappears.
+///
+/// Same setup as PortAdded, then drops the listener and waits for PortRemoved.
+#[tokio::test]
+#[cfg(target_os = "linux")]
+async fn test_port_removed_notification() {
+    let mut agent = spawn_agent().expect("failed to spawn agent");
+
+    let agent_addr: SocketAddr = format!("127.0.0.1:{}", agent.info.port).parse().unwrap();
+
+    let endpoint = build_client_endpoint().unwrap();
+    let connection = endpoint
+        .connect(agent_addr, "localhost")
+        .unwrap()
+        .await
+        .unwrap();
+
+    let (_control_send, mut control_recv) = connection.accept_bi().await.unwrap();
+    let _ = recv_msg(&mut control_recv).await.unwrap();
+
+    // Start and then drop a TCP listener on a non-ephemeral port.
+    let test_listener = tokio::net::TcpListener::bind("127.0.0.1:19877")
+        .await
+        .expect("failed to bind test listener on port 19877");
+
+    // Wait for PortAdded first.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut got_added = false;
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout_at(deadline, recv_msg(&mut control_recv)).await {
+            Ok(Ok(ControlMsg::PortAdded { port, proto, .. })) => {
+                if port == 19877 && proto == protocol::Protocol::Tcp {
+                    got_added = true;
+                    break;
+                }
+            }
+            Ok(Ok(_)) => {}
+            Ok(Err(_)) | Err(_) => break,
+        }
+    }
+    assert!(got_added, "should have received PortAdded for port 19877");
+
+    // Drop the listener to trigger PortRemoved.
+    drop(test_listener);
+
+    // Wait for PortRemoved.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut got_removed = false;
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout_at(deadline, recv_msg(&mut control_recv)).await {
+            Ok(Ok(ControlMsg::PortRemoved { port, proto })) => {
+                if port == 19877 && proto == protocol::Protocol::Tcp {
+                    got_removed = true;
+                    break;
+                }
+            }
+            Ok(Ok(_)) => {}
+            Ok(Err(_)) | Err(_) => break,
+        }
+    }
+    assert!(
+        got_removed,
+        "should have received PortRemoved for port 19877"
+    );
+
+    connection.close(0u32.into(), b"done");
+    endpoint.wait_idle().await;
+    agent.kill().ok();
 }

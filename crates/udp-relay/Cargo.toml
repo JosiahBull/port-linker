@@ -1,0 +1,11 @@
+[package]
+name = "udp-relay"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "port-linker-relay"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { workspace = true, default-features = false, features = ["rt", "macros", "net", "time"] }
