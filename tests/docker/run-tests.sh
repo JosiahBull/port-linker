@@ -73,7 +73,19 @@ for container in plk-jump1 plk-jump2 plk-target; do
     docker exec "$container" chown testuser:testuser /home/testuser/.ssh/authorized_keys
 done
 
-# Step 4.6: Verify SSH connectivity to jump1 using native ssh.
+# Step 4.6: Verify key injection and SSH connectivity.
+info "verifying key injection..."
+info "Host key fingerprint:"
+ssh-keygen -l -f "$SSH_KEY" 2>&1 || true
+info "Container authorized_keys fingerprint:"
+docker exec plk-jump1 ssh-keygen -l -f /home/testuser/.ssh/authorized_keys 2>&1 || true
+info "Container .ssh listing:"
+docker exec plk-jump1 ls -la /home/testuser/.ssh/ 2>&1 || true
+info "Container home listing:"
+docker exec plk-jump1 ls -la /home/testuser/ 2>&1 || true
+info "Host private key permissions:"
+ls -la "$SSH_KEY" 2>&1 || true
+
 info "verifying SSH connectivity to jump1 (172.20.0.10)..."
 if ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
        -o BatchMode=yes -o ConnectTimeout=5 \
@@ -81,9 +93,8 @@ if ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
     pass "SSH connectivity to jump1"
 else
     fail "Cannot SSH to jump1"
-    ssh -v -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-        -o BatchMode=yes -o ConnectTimeout=5 \
-        -i "$SSH_KEY" testuser@172.20.0.10 echo "SSH OK" 2>&1 || true
+    info "sshd logs from container:"
+    docker logs plk-jump1 2>&1 | tail -50 || true
 fi
 
 # Step 5: Run scenarios.
