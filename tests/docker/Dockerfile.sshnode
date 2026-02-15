@@ -9,8 +9,11 @@ RUN apk add --no-cache \
     socat \
     && mkdir -p /run/sshd
 
-# Create test user
+# Create test user and unlock the account.
+# Alpine's adduser -D creates a locked account (no password), and OpenSSH
+# refuses pubkey auth for locked users. `passwd -u` unlocks it.
 RUN adduser -D -s /bin/bash testuser \
+    && passwd -u testuser \
     && mkdir -p /home/testuser/.ssh \
     && chmod 700 /home/testuser/.ssh \
     && chown testuser:testuser /home/testuser/.ssh

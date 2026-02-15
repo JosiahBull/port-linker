@@ -10,5 +10,5 @@ GatewayPorts no
 X11Forwarding no
 PrintMotd no
 AcceptEnv LANG LC_*
-LogLevel DEBUG
+LogLevel INFO
 Subsystem sftp /usr/lib/ssh/sftp-server
