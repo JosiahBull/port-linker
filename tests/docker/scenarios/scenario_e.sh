@@ -17,8 +17,8 @@ if [ ! -x "$plk_bin" ]; then
 fi
 
 info "running port-linker with --remote testuser@jump1 (direct, no ProxyJump)"
-output=$(SSH_AUTH_SOCK="" "$plk_bin" \
-    --remote "testuser@172.20.0.10" \
+output=$(SSH_AUTH_SOCK="" RUST_LOG=debug "$plk_bin" \
+    --remote "testuser@jump1" \
     --ssh-host-key-verification accept-all \
     --echo-only 2>&1) && rc=$? || rc=$?
 

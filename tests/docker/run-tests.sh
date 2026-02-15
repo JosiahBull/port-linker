@@ -28,17 +28,56 @@ SCENARIO="${1:-all}"
 info "checking SSH keys..."
 bash "$SCRIPT_DIR/ssh/setup-keys.sh"
 
-# Step 2: Install SSH config so port-linker can resolve Docker hostnames.
-# Convert relative IdentityFile paths to absolute paths based on REPO_ROOT.
-info "installing test SSH config..."
-mkdir -p ~/.ssh
-sed "s|\\./tests/docker/|$REPO_ROOT/tests/docker/|g" "$SCRIPT_DIR/ssh/ssh_config" > ~/.ssh/config
-chmod 600 ~/.ssh/config
+# Step 2: Write SSH config so the CLI can resolve Docker container hostnames.
+# The CLI reads ~/.ssh/config to discover ProxyJump chains and identity files.
+KEY_FILE="$SCRIPT_DIR/ssh/keys/id_ed25519"
+SSH_DIR="$HOME/.ssh"
+SSH_CONFIG="$SSH_DIR/config"
+PLK_MARKER="# --- port-linker integration tests ---"
+
+info "writing SSH config for Docker test hosts..."
+mkdir -p "$SSH_DIR"
+chmod 700 "$SSH_DIR"
+
+# Remove any previous port-linker test block.
+if [ -f "$SSH_CONFIG" ]; then
+    sed -i.bak "/$PLK_MARKER/,/$PLK_MARKER/d" "$SSH_CONFIG"
+    rm -f "$SSH_CONFIG.bak"
+fi
+
+cat >> "$SSH_CONFIG" <<EOF
+$PLK_MARKER
+Host jump1
+    Hostname 172.20.0.10
+    User testuser
+    IdentityFile $KEY_FILE
+    StrictHostKeyChecking no
+    UserKnownHostsFile /dev/null
+
+Host jump2
+    Hostname 172.20.1.20
+    User testuser
+    IdentityFile $KEY_FILE
+    ProxyJump jump1
+    StrictHostKeyChecking no
+    UserKnownHostsFile /dev/null
+
+Host target
+    Hostname 172.20.2.20
+    User testuser
+    IdentityFile $KEY_FILE
+    ProxyJump jump1,jump2
+    StrictHostKeyChecking no
+    UserKnownHostsFile /dev/null
+$PLK_MARKER
+EOF
+chmod 600 "$SSH_CONFIG"
 
 # Verify the key file exists.
-if [ ! -f "$SCRIPT_DIR/ssh/keys/id_ed25519" ]; then
-    fail "SSH key not found at $SCRIPT_DIR/ssh/keys/id_ed25519"
+if [ ! -f "$KEY_FILE" ]; then
+    fail "SSH key not found at $KEY_FILE"
 fi
+chmod 600 "$KEY_FILE"
 
 # Step 3: Build containers.
 info "building Docker containers..."
@@ -66,7 +105,6 @@ sleep 2
 # Docker volume mounts may use cached layers; ensure the freshly generated
 # public key is present in every container's authorized_keys.
 info "injecting SSH authorized keys into containers..."
-SSH_KEY="$SCRIPT_DIR/ssh/keys/id_ed25519"
 for container in plk-jump1 plk-jump2 plk-target; do
     docker cp "$SCRIPT_DIR/ssh/keys/id_ed25519.pub" "$container:/home/testuser/.ssh/authorized_keys"
     docker exec "$container" chmod 600 /home/testuser/.ssh/authorized_keys
@@ -77,7 +115,7 @@ done
 info "verifying SSH connectivity to jump1 (172.20.0.10)..."
 if ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
        -o BatchMode=yes -o ConnectTimeout=5 \
-       -i "$SSH_KEY" testuser@172.20.0.10 echo "SSH OK" 2>&1; then
+       -i "$KEY_FILE" testuser@172.20.0.10 echo "SSH OK" 2>&1; then
     pass "SSH connectivity to jump1"
 else
     fail "Cannot SSH to jump1"
@@ -115,6 +153,13 @@ case "$SCENARIO" in
         run_scenario "D-TCP (single hop TCP)" "$SCRIPT_DIR/scenarios/scenario_d_tcp.sh"
         run_scenario "E (direct/regression)" "$SCRIPT_DIR/scenarios/scenario_e.sh"
         ;;
+    ci)
+        # CI-compatible subset: skip UDP relay scenarios (QUIC over UDP relay
+        # chains requires real network topology, not Docker bridge networks).
+        run_scenario "C (no UDP)" "$SCRIPT_DIR/scenarios/scenario_c.sh"
+        run_scenario "D-TCP (single hop TCP)" "$SCRIPT_DIR/scenarios/scenario_d_tcp.sh"
+        run_scenario "E (direct/regression)" "$SCRIPT_DIR/scenarios/scenario_e.sh"
+        ;;
     a) run_scenario "A" "$SCRIPT_DIR/scenarios/scenario_a.sh" ;;
     b) run_scenario "B" "$SCRIPT_DIR/scenarios/scenario_b.sh" ;;
     c) run_scenario "C" "$SCRIPT_DIR/scenarios/scenario_c.sh" ;;
@@ -123,7 +168,7 @@ case "$SCENARIO" in
     e) run_scenario "E" "$SCRIPT_DIR/scenarios/scenario_e.sh" ;;
     *)
         echo "Unknown scenario: $SCENARIO"
-        echo "Usage: $0 {all|a|b|c|d-udp|d-tcp|e}"
+        echo "Usage: $0 {all|ci|a|b|c|d-udp|d-tcp|e}"
         exit 1
         ;;
 esac
@@ -142,6 +187,12 @@ fi
 if [ "${KEEP_CONTAINERS:-}" != "1" ]; then
     info "tearing down containers..."
     docker compose -f "$COMPOSE_FILE" down -v
+
+    # Remove test SSH config block.
+    if [ -f "$SSH_CONFIG" ]; then
+        sed -i.bak "/$PLK_MARKER/,/$PLK_MARKER/d" "$SSH_CONFIG"
+        rm -f "$SSH_CONFIG.bak"
+    fi
 else
     info "KEEP_CONTAINERS=1, leaving containers running"
     info "Teardown manually with: docker compose -f $COMPOSE_FILE down -v"

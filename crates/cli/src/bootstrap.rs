@@ -401,8 +401,7 @@ async fn execute_and_handshake(agent: &RemoteAgent) -> Result<AgentHandshake> {
             } else if let Some(bp) = line.strip_prefix("BRIDGE_PORT=") {
                 bridge_port = bp.trim().parse().ok();
             }
-            // BRIDGE_PORT is optional, so don't wait for it.
-            got_ready && port.is_some() && token.is_some()
+            got_ready && port.is_some() && token.is_some() && bridge_port.is_some()
         })
         .await?;
 

@@ -295,6 +295,14 @@ async fn run_with_phoenix_restart(args: &Args) -> Result<()> {
         let session_result =
             run_single_session(args, agent_addr, Some(&remote_agent), transport_ctx).await;
 
+        if args.echo_only && session_result.is_ok() {
+            // Force-exit immediately. The echo test has passed; the SSH
+            // session drop and remote agent cleanup can block indefinitely
+            // on the tunnel reader tasks, so skip all teardown.
+            info!("echo-only: test passed, exiting");
+            std::process::exit(0);
+        }
+
         // Step 3: Cleanup the old agent.
         remote_agent.cleanup().await;
 
@@ -814,15 +822,11 @@ async fn run_single_session(
     }
 
     if args.echo_only {
-        // Gracefully close.
-        connection.close(0u32.into(), b"done");
-        endpoint.wait_idle().await;
-        // In echo-only mode, cleanup is handled by the caller (Phoenix loop
-        // or direct --agent mode).
-        if let Some(agent) = remote_agent {
-            agent.cleanup().await;
-        }
-        return Ok(());
+        // Echo test passed. Force-exit immediately — the SSH session
+        // teardown and remote agent cleanup can block indefinitely on
+        // tunnel reader tasks, and we have nothing left to verify.
+        info!("echo-only: test passed, exiting");
+        std::process::exit(0);
     }
 
     // Initialize the binding manager for port forwarding.
