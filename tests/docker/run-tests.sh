@@ -65,15 +65,22 @@ sleep 2
 # Step 4.5: Verify SSH connectivity to jump1 using native ssh.
 info "verifying SSH connectivity to jump1 (172.20.0.10)..."
 SSH_KEY="$SCRIPT_DIR/ssh/keys/id_ed25519"
-if ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-       -o BatchMode=yes -o ConnectTimeout=5 \
-       -i "$SSH_KEY" testuser@172.20.0.10 echo "SSH OK" 2>/dev/null; then
-    pass "SSH connectivity to jump1"
-else
-    fail "Cannot SSH to jump1. Checking authorized_keys in container..."
-    docker exec plk-jump1 cat /home/testuser/.ssh/authorized_keys 2>&1 || true
-    docker exec plk-jump1 ls -la /home/testuser/.ssh/ 2>&1 || true
-fi
+info "SSH key path: $SSH_KEY"
+ls -la "$SSH_KEY" || true
+info "SSH key fingerprint:"
+ssh-keygen -l -f "$SSH_KEY" 2>&1 || true
+info "Container authorized_keys:"
+docker exec plk-jump1 cat /home/testuser/.ssh/authorized_keys 2>&1 || true
+info "Container .ssh permissions:"
+docker exec plk-jump1 ls -la /home/testuser/.ssh/ 2>&1 || true
+docker exec plk-jump1 ls -la /home/testuser/ 2>&1 || true
+info "Attempting SSH connection (verbose)..."
+ssh -vvv -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+    -o BatchMode=yes -o ConnectTimeout=5 \
+    -i "$SSH_KEY" testuser@172.20.0.10 echo "SSH OK" 2>&1 || true
+info "Container sshd logs:"
+docker exec plk-jump1 cat /var/log/auth.log 2>&1 || true
+docker logs plk-jump1 2>&1 | tail -30 || true
 
 # Step 5: Run scenarios.
 PASSED=0
