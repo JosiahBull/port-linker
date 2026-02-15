@@ -62,6 +62,19 @@ done
 # Give SSH a moment to fully initialize.
 sleep 2
 
+# Step 4.5: Verify SSH connectivity to jump1 using native ssh.
+info "verifying SSH connectivity to jump1 (172.20.0.10)..."
+SSH_KEY="$SCRIPT_DIR/ssh/keys/id_ed25519"
+if ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+       -o BatchMode=yes -o ConnectTimeout=5 \
+       -i "$SSH_KEY" testuser@172.20.0.10 echo "SSH OK" 2>/dev/null; then
+    pass "SSH connectivity to jump1"
+else
+    fail "Cannot SSH to jump1. Checking authorized_keys in container..."
+    docker exec plk-jump1 cat /home/testuser/.ssh/authorized_keys 2>&1 || true
+    docker exec plk-jump1 ls -la /home/testuser/.ssh/ 2>&1 || true
+fi
+
 # Step 5: Run scenarios.
 PASSED=0
 FAILED=0

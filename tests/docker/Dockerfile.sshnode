@@ -12,7 +12,8 @@ RUN apk add --no-cache \
 # Create test user
 RUN adduser -D -s /bin/bash testuser \
     && mkdir -p /home/testuser/.ssh \
-    && chmod 700 /home/testuser/.ssh
+    && chmod 700 /home/testuser/.ssh \
+    && chown testuser:testuser /home/testuser/.ssh
 
 # Copy SSH config
 COPY ssh/sshd_config /etc/ssh/sshd_config
