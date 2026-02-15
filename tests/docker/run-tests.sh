@@ -62,25 +62,29 @@ done
 # Give SSH a moment to fully initialize.
 sleep 2
 
-# Step 4.5: Verify SSH connectivity to jump1 using native ssh.
-info "verifying SSH connectivity to jump1 (172.20.0.10)..."
+# Step 4.5: Inject authorized keys directly into containers.
+# Docker volume mounts may use cached layers; ensure the freshly generated
+# public key is present in every container's authorized_keys.
+info "injecting SSH authorized keys into containers..."
 SSH_KEY="$SCRIPT_DIR/ssh/keys/id_ed25519"
-info "SSH key path: $SSH_KEY"
-ls -la "$SSH_KEY" || true
-info "SSH key fingerprint:"
-ssh-keygen -l -f "$SSH_KEY" 2>&1 || true
-info "Container authorized_keys:"
-docker exec plk-jump1 cat /home/testuser/.ssh/authorized_keys 2>&1 || true
-info "Container .ssh permissions:"
-docker exec plk-jump1 ls -la /home/testuser/.ssh/ 2>&1 || true
-docker exec plk-jump1 ls -la /home/testuser/ 2>&1 || true
-info "Attempting SSH connection (verbose)..."
-ssh -vvv -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-    -o BatchMode=yes -o ConnectTimeout=5 \
-    -i "$SSH_KEY" testuser@172.20.0.10 echo "SSH OK" 2>&1 || true
-info "Container sshd logs:"
-docker exec plk-jump1 cat /var/log/auth.log 2>&1 || true
-docker logs plk-jump1 2>&1 | tail -30 || true
+for container in plk-jump1 plk-jump2 plk-target; do
+    docker cp "$SCRIPT_DIR/ssh/keys/id_ed25519.pub" "$container:/home/testuser/.ssh/authorized_keys"
+    docker exec "$container" chmod 600 /home/testuser/.ssh/authorized_keys
+    docker exec "$container" chown testuser:testuser /home/testuser/.ssh/authorized_keys
+done
+
+# Step 4.6: Verify SSH connectivity to jump1 using native ssh.
+info "verifying SSH connectivity to jump1 (172.20.0.10)..."
+if ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+       -o BatchMode=yes -o ConnectTimeout=5 \
+       -i "$SSH_KEY" testuser@172.20.0.10 echo "SSH OK" 2>&1; then
+    pass "SSH connectivity to jump1"
+else
+    fail "Cannot SSH to jump1"
+    ssh -v -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+        -o BatchMode=yes -o ConnectTimeout=5 \
+        -i "$SSH_KEY" testuser@172.20.0.10 echo "SSH OK" 2>&1 || true
+fi
 
 # Step 5: Run scenarios.
 PASSED=0

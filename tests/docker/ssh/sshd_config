@@ -4,7 +4,6 @@ PermitRootLogin no
 PubkeyAuthentication yes
 PasswordAuthentication no
 ChallengeResponseAuthentication no
-UsePAM no
 AllowTcpForwarding yes
 GatewayPorts no
 X11Forwarding no
