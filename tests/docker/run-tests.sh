@@ -28,11 +28,17 @@ SCENARIO="${1:-all}"
 info "checking SSH keys..."
 bash "$SCRIPT_DIR/ssh/setup-keys.sh"
 
-# Step 2: Build containers.
+# Step 2: Install SSH config so port-linker can resolve Docker hostnames.
+info "installing test SSH config..."
+mkdir -p ~/.ssh
+cp "$SCRIPT_DIR/ssh/ssh_config" ~/.ssh/config
+chmod 600 ~/.ssh/config
+
+# Step 3: Build containers.
 info "building Docker containers..."
 docker compose -f "$COMPOSE_FILE" build
 
-# Step 3: Start containers.
+# Step 4: Start containers.
 info "starting containers..."
 docker compose -f "$COMPOSE_FILE" up -d
 
@@ -50,7 +56,7 @@ done
 # Give SSH a moment to fully initialize.
 sleep 2
 
-# Step 4: Run scenarios.
+# Step 5: Run scenarios.
 PASSED=0
 FAILED=0
 ERRORS=""
@@ -93,7 +99,7 @@ case "$SCENARIO" in
         ;;
 esac
 
-# Step 5: Summary.
+# Step 6: Summary.
 echo ""
 echo "========================================="
 echo "  Results: $PASSED passed, $FAILED failed"
@@ -103,7 +109,7 @@ if [ $FAILED -gt 0 ]; then
     echo -e "\nFailed scenarios:\n$ERRORS"
 fi
 
-# Step 6: Teardown (unless KEEP_CONTAINERS is set).
+# Step 7: Teardown (unless KEEP_CONTAINERS is set).
 if [ "${KEEP_CONTAINERS:-}" != "1" ]; then
     info "tearing down containers..."
     docker compose -f "$COMPOSE_FILE" down -v

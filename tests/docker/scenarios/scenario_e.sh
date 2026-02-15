@@ -11,7 +11,7 @@ reset_firewalls
 
 # Run port-linker directly to jump1 (which is directly reachable).
 # This tests that the existing direct connection path still works.
-local plk_bin="$REPO_ROOT/target/debug/port-linker"
+plk_bin="$REPO_ROOT/target/debug/port-linker"
 if [ ! -x "$plk_bin" ]; then
     plk_bin="$REPO_ROOT/target/release/port-linker"
 fi
