@@ -36,7 +36,9 @@ pub fn resolve_ssh_config(host: &str, user_override: Option<&str>) -> SshHostCon
         proxy_jump: None,
     };
 
-    let config_path = match dirs::home_dir() {
+    use common::platform::{CurrentPlatform, Platform};
+
+    let config_path = match CurrentPlatform::home_dir() {
         Some(home) => home.join(".ssh").join("config"),
         None => return apply_user_override(defaults, user_override),
     };
@@ -272,8 +274,10 @@ fn glob_match(pattern: &[u8], text: &[u8]) -> bool {
 
 /// Expand `~` at the start of a path to the user's home directory.
 fn expand_tilde(path: &str) -> String {
+    use common::platform::{CurrentPlatform, Platform};
+
     if let Some(rest) = path.strip_prefix("~/")
-        && let Some(home) = dirs::home_dir()
+        && let Some(home) = CurrentPlatform::home_dir()
     {
         return home.join(rest).to_string_lossy().into_owned();
     }
@@ -401,13 +405,14 @@ pub(super) fn default_identity_files_pub() -> Vec<PathBuf> {
 }
 
 fn whoami() -> String {
-    std::env::var("USER")
-        .or_else(|_| std::env::var("LOGNAME"))
-        .unwrap_or_else(|_| "root".to_string())
+    use common::platform::{CurrentPlatform, Platform};
+    CurrentPlatform::username()
 }
 
 fn default_identity_files() -> Vec<PathBuf> {
-    let Some(home) = dirs::home_dir() else {
+    use common::platform::{CurrentPlatform, Platform};
+
+    let Some(home) = CurrentPlatform::home_dir() else {
         return Vec::new();
     };
     let ssh_dir = home.join(".ssh");

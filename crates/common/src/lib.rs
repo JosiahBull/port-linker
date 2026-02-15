@@ -1,5 +1,6 @@
 pub mod ephemeral;
 mod error;
+pub mod platform;
 pub mod process;
 
 pub use error::Error;

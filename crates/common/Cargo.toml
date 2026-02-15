@@ -5,4 +5,10 @@ edition.workspace = true
 
 [dependencies]
 thiserror.workspace = true
+dirs.workspace = true
+protocol = { path = "../protocol" }
+tracing.workspace = true
+notify-rust.workspace = true
+
+[target.'cfg(unix)'.dependencies]
 libc.workspace = true
