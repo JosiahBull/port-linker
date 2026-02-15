@@ -29,10 +29,16 @@ info "checking SSH keys..."
 bash "$SCRIPT_DIR/ssh/setup-keys.sh"
 
 # Step 2: Install SSH config so port-linker can resolve Docker hostnames.
+# Convert relative IdentityFile paths to absolute paths based on REPO_ROOT.
 info "installing test SSH config..."
 mkdir -p ~/.ssh
-cp "$SCRIPT_DIR/ssh/ssh_config" ~/.ssh/config
+sed "s|\\./tests/docker/|$REPO_ROOT/tests/docker/|g" "$SCRIPT_DIR/ssh/ssh_config" > ~/.ssh/config
 chmod 600 ~/.ssh/config
+
+# Verify the key file exists.
+if [ ! -f "$SCRIPT_DIR/ssh/keys/id_ed25519" ]; then
+    fail "SSH key not found at $SCRIPT_DIR/ssh/keys/id_ed25519"
+fi
 
 # Step 3: Build containers.
 info "building Docker containers..."
