@@ -605,11 +605,12 @@ async fn setup_tcp_bridge(
     // The bridge listener is on the target host itself, so 127.0.0.1 is correct.
     let tunnel_stream = target_session.open_tunnel("127.0.0.1", bridge_port).await?;
 
-    let socket = quic_over_tcp::TcpUdpSocket::new(tunnel_stream, "127.0.0.1:0".parse().unwrap());
+    // Use the bridge port as the synthetic address so quinn sees a valid (non-zero) port.
+    // The actual routing happens through the TCP tunnel; these addresses are only used
+    // by quinn internally to match datagrams to connections.
+    let bridge_addr: SocketAddr = SocketAddr::new("127.0.0.1".parse().unwrap(), bridge_port);
 
-    // The QUIC endpoint will connect to the synthetic bridge address.
-    // The actual routing happens through the TCP tunnel.
-    let bridge_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+    let socket = quic_over_tcp::TcpUdpSocket::new(tunnel_stream, bridge_addr, bridge_addr);
 
     info!("TCP bridge established");
     Ok((bridge_addr, socket))
