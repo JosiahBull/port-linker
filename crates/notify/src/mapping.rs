@@ -12,9 +12,11 @@ pub struct PortMapping {
 impl PortMapping {
     /// Load port mappings from the default config location
     pub fn load_default() -> Self {
+        use common::platform::{CurrentPlatform, Platform};
+
         let paths = [
-            dirs::config_dir().map(|p| p.join("port-linker").join("ports.toml")),
-            dirs::home_dir().map(|p| p.join(".port-linker.toml")),
+            CurrentPlatform::config_dir().map(|p| p.join("port-linker").join("ports.toml")),
+            CurrentPlatform::home_dir().map(|p| p.join(".port-linker.toml")),
         ];
 
         for path in paths.into_iter().flatten() {

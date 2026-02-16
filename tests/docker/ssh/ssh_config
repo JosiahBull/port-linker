@@ -1,0 +1,28 @@
+# port-linker test SSH config
+# Host aliases for the Docker test network
+
+Host jump1
+    Hostname 172.20.0.10
+    User testuser
+    Port 22
+    IdentityFile ./tests/docker/ssh/keys/id_ed25519
+    StrictHostKeyChecking no
+    UserKnownHostsFile /dev/null
+
+Host jump2
+    Hostname 172.20.1.20
+    User testuser
+    Port 22
+    IdentityFile ./tests/docker/ssh/keys/id_ed25519
+    StrictHostKeyChecking no
+    UserKnownHostsFile /dev/null
+    ProxyJump jump1
+
+Host target
+    Hostname 172.20.2.20
+    User testuser
+    Port 22
+    IdentityFile ./tests/docker/ssh/keys/id_ed25519
+    StrictHostKeyChecking no
+    UserKnownHostsFile /dev/null
+    ProxyJump jump1,jump2

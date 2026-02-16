@@ -42,6 +42,7 @@ protocol = { path = "crates/protocol" }
 common = { path = "crates/common" }
 notify = { path = "crates/notify" }
 assets = { path = "crates/assets" }
+quic-over-tcp = { path = "crates/quic-over-tcp" }
 
 # Serialization
 rkyv = { version = "0.8", features = ["bytecheck"] }

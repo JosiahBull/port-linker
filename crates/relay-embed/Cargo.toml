@@ -1,0 +1,10 @@
+[package]
+name = "relay-embed"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+
+[build-dependencies]
+agent-build = { path = "../agent-build" }
+flate2 = "1"
