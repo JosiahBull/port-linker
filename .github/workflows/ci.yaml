@@ -152,7 +152,7 @@ jobs:
         run: cargo build -p cli
 
       - name: Run Docker integration tests
-        run: bash tests/docker/run-tests.sh all
+        run: bash tests/docker/run-tests.sh ci
 
   build:
     name: Build

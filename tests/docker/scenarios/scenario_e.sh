@@ -11,14 +11,14 @@ reset_firewalls
 
 # Run port-linker directly to jump1 (which is directly reachable).
 # This tests that the existing direct connection path still works.
-local plk_bin="$REPO_ROOT/target/debug/port-linker"
+plk_bin="$REPO_ROOT/target/debug/port-linker"
 if [ ! -x "$plk_bin" ]; then
     plk_bin="$REPO_ROOT/target/release/port-linker"
 fi
 
 info "running port-linker with --remote testuser@jump1 (direct, no ProxyJump)"
-output=$(SSH_AUTH_SOCK="" "$plk_bin" \
-    --remote "testuser@172.20.0.10" \
+output=$(SSH_AUTH_SOCK="" timeout 60 "$plk_bin" \
+    --remote "testuser@jump1" \
     --ssh-host-key-verification accept-all \
     --echo-only 2>&1) && rc=$? || rc=$?
 

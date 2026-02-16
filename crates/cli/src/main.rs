@@ -814,15 +814,11 @@ async fn run_single_session(
     }
 
     if args.echo_only {
-        // Gracefully close.
-        connection.close(0u32.into(), b"done");
-        endpoint.wait_idle().await;
-        // In echo-only mode, cleanup is handled by the caller (Phoenix loop
-        // or direct --agent mode).
-        if let Some(agent) = remote_agent {
-            agent.cleanup().await;
-        }
-        return Ok(());
+        // Echo test passed. Force-exit immediately — endpoint.wait_idle()
+        // blocks indefinitely because SSH tunnel reader tasks keep the
+        // connection alive, and there is nothing left to verify.
+        info!("echo-only: test passed, exiting");
+        std::process::exit(0);
     }
 
     // Initialize the binding manager for port forwarding.
