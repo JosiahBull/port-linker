@@ -295,14 +295,6 @@ async fn run_with_phoenix_restart(args: &Args) -> Result<()> {
         let session_result =
             run_single_session(args, agent_addr, Some(&remote_agent), transport_ctx).await;
 
-        if args.echo_only && session_result.is_ok() {
-            // Force-exit immediately. The echo test has passed; the SSH
-            // session drop and remote agent cleanup can block indefinitely
-            // on the tunnel reader tasks, so skip all teardown.
-            info!("echo-only: test passed, exiting");
-            std::process::exit(0);
-        }
-
         // Step 3: Cleanup the old agent.
         remote_agent.cleanup().await;
 
@@ -605,12 +597,11 @@ async fn setup_tcp_bridge(
     // The bridge listener is on the target host itself, so 127.0.0.1 is correct.
     let tunnel_stream = target_session.open_tunnel("127.0.0.1", bridge_port).await?;
 
-    // Use the bridge port as the synthetic address so quinn sees a valid (non-zero) port.
-    // The actual routing happens through the TCP tunnel; these addresses are only used
-    // by quinn internally to match datagrams to connections.
-    let bridge_addr: SocketAddr = SocketAddr::new("127.0.0.1".parse().unwrap(), bridge_port);
+    let socket = quic_over_tcp::TcpUdpSocket::new(tunnel_stream, "127.0.0.1:0".parse().unwrap());
 
-    let socket = quic_over_tcp::TcpUdpSocket::new(tunnel_stream, bridge_addr, bridge_addr);
+    // The QUIC endpoint will connect to the synthetic bridge address.
+    // The actual routing happens through the TCP tunnel.
+    let bridge_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
 
     info!("TCP bridge established");
     Ok((bridge_addr, socket))
@@ -823,11 +814,15 @@ async fn run_single_session(
     }
 
     if args.echo_only {
-        // Echo test passed. Force-exit immediately — the SSH session
-        // teardown and remote agent cleanup can block indefinitely on
-        // tunnel reader tasks, and we have nothing left to verify.
-        info!("echo-only: test passed, exiting");
-        std::process::exit(0);
+        // Gracefully close.
+        connection.close(0u32.into(), b"done");
+        endpoint.wait_idle().await;
+        // In echo-only mode, cleanup is handled by the caller (Phoenix loop
+        // or direct --agent mode).
+        if let Some(agent) = remote_agent {
+            agent.cleanup().await;
+        }
+        return Ok(());
     }
 
     // Initialize the binding manager for port forwarding.

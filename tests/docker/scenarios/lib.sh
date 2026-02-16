@@ -77,7 +77,7 @@ run_port_linker() {
         fail "port-linker binary not found. Build with: cargo build -p cli"
     fi
 
-    SSH_AUTH_SOCK="" RUST_LOG=debug timeout 60 "$plk_bin" \
+    SSH_AUTH_SOCK="" "$plk_bin" \
         --remote "testuser@target" \
         --ssh-host-key-verification accept-all \
         --echo-only \
