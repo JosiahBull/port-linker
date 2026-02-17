@@ -824,12 +824,9 @@ async fn run_single_session(
         // avoid blocking indefinitely on tunnel reader tasks.
         info!("echo-only: test passed, shutting down");
         connection.close(0u32.into(), b"echo-ok");
-        tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            endpoint.wait_idle(),
-        )
-        .await
-        .ok();
+        tokio::time::timeout(std::time::Duration::from_secs(2), endpoint.wait_idle())
+            .await
+            .ok();
         return Ok(());
     }
 

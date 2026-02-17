@@ -3211,7 +3211,10 @@ async fn test_port_removed_notification() {
             Ok(Err(_)) | Err(_) => break,
         }
     }
-    assert!(got_added, "should have received PortAdded for port {test_port}");
+    assert!(
+        got_added,
+        "should have received PortAdded for port {test_port}"
+    );
 
     // Drop the listener to trigger PortRemoved.
     drop(test_listener);
