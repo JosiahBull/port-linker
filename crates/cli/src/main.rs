@@ -645,6 +645,19 @@ async fn resolve_target_real_ip(ssh: &ssh::SshSession) -> Option<std::net::IpAdd
         }
     }
 
+    // Fallback: PowerShell (Windows targets).
+    let cmd = r#"powershell -NoProfile -Command "(Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.IPAddress -ne '127.0.0.1' -and $_.PrefixOrigin -ne 'WellKnown' } | Select-Object -First 1).IPAddress""#;
+    if let Ok((stdout, _, Some(0))) = ssh.exec(cmd).await {
+        let ip_str = stdout.trim();
+        if !ip_str.is_empty()
+            && let Ok(ip) = ip_str.parse::<std::net::IpAddr>()
+            && !ip.is_loopback()
+        {
+            info!(ip = %ip, "resolved target's actual network IP via PowerShell");
+            return Some(ip);
+        }
+    }
+
     warn!("could not resolve target's actual network IP");
     None
 }

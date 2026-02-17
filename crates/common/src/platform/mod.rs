@@ -21,6 +21,9 @@ pub mod linux;
 #[cfg(target_os = "macos")]
 pub mod macos;
 
+#[cfg(target_os = "windows")]
+pub mod windows;
+
 mod stub;
 
 // Re-export stubs for platforms that need them.
@@ -195,10 +198,32 @@ impl Platform for MacOs {
     }
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(target_os = "windows")]
+pub struct Windows;
+
+#[cfg(target_os = "windows")]
+impl Platform for Windows {
+    type Scanner = windows::IpHelperScanner;
+    type Notifier = windows::ToastNotifier;
+
+    fn find_listener(port: u16, proto: TransportProto) -> Option<ProcessInfo> {
+        windows::process::find_listener(port, proto)
+    }
+    fn kill_process(pid: u32) -> Result<(), String> {
+        windows::process::kill_process(pid)
+    }
+    fn ephemeral_range() -> Option<(u16, u16)> {
+        Some((49152, 65535))
+    }
+    fn username() -> String {
+        windows::username()
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 pub struct Stub;
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 impl Platform for Stub {
     type Scanner = StubScanner;
     type Notifier = StubNotifier;
@@ -227,5 +252,8 @@ pub type CurrentPlatform = Linux;
 #[cfg(target_os = "macos")]
 pub type CurrentPlatform = MacOs;
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(target_os = "windows")]
+pub type CurrentPlatform = Windows;
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 pub type CurrentPlatform = Stub;
