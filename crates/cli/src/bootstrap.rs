@@ -6,10 +6,8 @@ use tracing::{debug, error, info, warn};
 
 use common::{Error, Result};
 
-use crate::ssh::SshSession;
-
-/// Remote cache directory on the target host.
-const CACHE_DIR: &str = "/tmp/.port-linker-cache";
+use crate::remote_platform::{RemotePlatform, detect_remote_platform};
+use crate::ssh::{SshExecutor, SshSession};
 
 /// Number of hex chars from the SHA256 hash used as cache key.
 const HASH_PREFIX_LEN: usize = 16;
@@ -31,6 +29,8 @@ pub struct AgentHandshake {
 pub struct RemoteAgent {
     pub ssh: SshSession,
     pub remote_path: String,
+    /// The detected remote platform (for generating cleanup commands).
+    platform: Box<dyn RemotePlatform>,
     /// Relay processes deployed on jump hosts (for cleanup).
     #[allow(dead_code)]
     pub relay_cleanups: Vec<RelayCleanup>,
@@ -46,10 +46,7 @@ impl RemoteAgent {
     /// Clean up the remote agent: kill process and remove tmpfile.
     pub async fn cleanup(&self) {
         info!("cleaning up remote agent");
-        let kill_cmd = format!(
-            "pkill -f '{}' 2>/dev/null; rm -f '{}'",
-            self.remote_path, self.remote_path
-        );
+        let kill_cmd = self.platform.cleanup_cmd(&self.remote_path);
         if let Err(e) = self.ssh.exec_detached(&kill_cmd).await {
             warn!(%e, "failed to clean up remote agent");
         }
@@ -70,44 +67,51 @@ pub struct RelayInfo {
 /// Similar to `bootstrap_agent`: detect arch, transfer binary, execute,
 /// parse handshake (RELAY_READY/PORT=).
 pub async fn bootstrap_relay(
-    ssh: &SshSession,
+    ssh: &(impl SshExecutor + ?Sized),
     target_addr: &str,
     custom_binary: Option<&std::path::Path>,
 ) -> Result<RelayInfo> {
-    let arch = detect_architecture(ssh).await?;
-    info!(arch = %arch, "detected jump host architecture for relay");
+    let platform = detect_remote_platform(ssh).await;
+    let arch = detect_architecture(ssh, &*platform).await?;
+    info!(arch = %arch, os = platform.os_id(), "detected jump host platform for relay");
 
     let random_suffix = common::generate_token();
-    let remote_path = format!("/tmp/port-linker-relay-{random_suffix}");
+    let ext = platform.binary_ext();
+    let remote_path = format!(
+        "{}/port-linker-relay-{random_suffix}{ext}",
+        platform.temp_dir()
+    );
 
     if let Some(path) = custom_binary {
         info!(path = %path.display(), "using custom relay binary");
         let data = read_file_blocking(path).await?;
-        transfer_raw(ssh, &data, &remote_path).await?;
+        transfer_raw(ssh, &*platform, &data, &remote_path).await?;
     } else {
-        let embedded_gz =
-            relay_embed::get_relay_binary_for_system("linux", &arch).ok_or_else(|| {
+        let embedded_gz = relay_embed::get_relay_binary_for_system(platform.os_id(), &arch)
+            .ok_or_else(|| {
                 Error::Protocol(format!(
-                    "no embedded relay binary for architecture '{arch}'. \
+                    "no embedded relay binary for {}/{arch}. \
                      Available targets: {:?}.",
+                    platform.os_id(),
                     relay_embed::available_relay_targets(),
                 ))
             })?;
 
         let hash_prefix = sha256_hex_prefix(embedded_gz);
-        let cache_path = format!("{CACHE_DIR}/relay-{hash_prefix}");
+        let cache_dir = platform.cache_dir();
+        let cache_path = format!("{cache_dir}/relay-{hash_prefix}");
 
-        if check_remote_cache(ssh, &cache_path).await {
+        if check_remote_cache(ssh, &*platform, &cache_path).await {
             info!(cache = %cache_path, "relay cache hit");
-            symlink_cached(ssh, &cache_path, &remote_path).await?;
+            copy_cached(ssh, &*platform, &cache_path, &remote_path).await?;
         } else {
             info!(
                 arch,
                 compressed_size = embedded_gz.len(),
                 "relay cache miss, transferring"
             );
-            transfer_compressed(ssh, embedded_gz, &remote_path).await?;
-            populate_cache(ssh, &remote_path, &cache_path).await;
+            transfer_compressed(ssh, &*platform, embedded_gz, &remote_path).await?;
+            populate_cache(ssh, &*platform, &remote_path, &cache_path).await;
         }
     }
 
@@ -154,7 +158,7 @@ pub async fn bootstrap_relay(
 
 /// Bootstrap the agent on a remote host via SSH.
 ///
-/// 1. Detect remote architecture
+/// 1. Detect remote platform and architecture
 /// 2. Transfer agent binary (from embedded, cache, or custom path)
 /// 3. Execute agent
 /// 4. Parse handshake (PORT, TOKEN)
@@ -162,17 +166,19 @@ pub async fn bootstrap_agent(
     ssh: SshSession,
     custom_binary: Option<&Path>,
 ) -> Result<(AgentHandshake, RemoteAgent)> {
-    // Step 1: Detect remote architecture.
-    let arch = detect_architecture(&ssh).await?;
-    info!(arch = %arch, "detected remote architecture");
+    // Step 1: Detect remote platform and architecture.
+    let platform = detect_remote_platform(&ssh).await;
+    let arch = detect_architecture(&ssh, &*platform).await?;
+    info!(arch = %arch, os = platform.os_id(), "detected remote platform");
 
     // Step 2: Transfer agent binary.
-    let remote_path = transfer_agent(&ssh, &arch, custom_binary).await?;
+    let remote_path = transfer_agent(&ssh, &*platform, &arch, custom_binary).await?;
     info!(path = %remote_path, "agent deployed");
 
     let remote_agent = RemoteAgent {
         ssh,
         remote_path,
+        platform,
         relay_cleanups: Vec::new(),
     };
 
@@ -199,25 +205,22 @@ pub async fn bootstrap_agent(
 // Architecture detection
 // ---------------------------------------------------------------------------
 
-async fn detect_architecture(ssh: &SshSession) -> Result<String> {
-    let (stdout, stderr, exit_code) = ssh.exec("uname -m").await?;
+async fn detect_architecture(
+    ssh: &(impl SshExecutor + ?Sized),
+    platform: &dyn RemotePlatform,
+) -> Result<String> {
+    let cmd = platform.detect_arch_cmd();
+    let (stdout, stderr, exit_code) = ssh.exec(cmd).await?;
 
     if exit_code != Some(0) {
         return Err(Error::Protocol(format!(
-            "uname -m failed (exit {}): {}",
+            "architecture detection failed (exit {}): {}",
             exit_code.unwrap_or(255),
             stderr.trim()
         )));
     }
 
-    let arch = stdout.trim();
-    match arch {
-        "x86_64" => Ok("x86_64".to_string()),
-        "aarch64" | "arm64" => Ok("aarch64".to_string()),
-        other => Err(Error::Protocol(format!(
-            "unsupported remote architecture: {other}"
-        ))),
-    }
+    platform.normalize_arch(&stdout)
 }
 
 // ---------------------------------------------------------------------------
@@ -229,40 +232,48 @@ async fn detect_architecture(ssh: &SshSession) -> Result<String> {
 /// Strategy (in priority order):
 /// 1. `--agent-binary` override: transfer the user-specified file directly.
 /// 2. Embedded binary with remote cache: check SHA256-keyed cache, transfer
-///    compressed binary on miss, decompress with gunzip on the target.
+///    compressed binary on miss, decompress on the target.
 async fn transfer_agent(
-    ssh: &SshSession,
+    ssh: &(impl SshExecutor + ?Sized),
+    platform: &dyn RemotePlatform,
     arch: &str,
     custom_binary: Option<&Path>,
 ) -> Result<String> {
     let random_suffix = common::generate_token();
-    let remote_path = format!("/tmp/port-linker-agent-{random_suffix}");
+    let ext = platform.binary_ext();
+    let remote_path = format!(
+        "{}/port-linker-agent-{random_suffix}{ext}",
+        platform.temp_dir()
+    );
 
     // Strategy 1: Custom binary override (--agent-binary flag).
     if let Some(path) = custom_binary {
         info!(path = %path.display(), "using custom agent binary");
         let data = read_file_blocking(path).await?;
-        transfer_raw(ssh, &data, &remote_path).await?;
+        transfer_raw(ssh, platform, &data, &remote_path).await?;
         return Ok(remote_path);
     }
 
     // Strategy 2: Embedded binary with remote caching.
-    let embedded_gz = agent_embed::get_binary_for_system("linux", arch).ok_or_else(|| {
-        Error::Protocol(format!(
-            "no embedded agent binary for architecture '{arch}'. \
-             Available targets: {:?}. \
-             Use --agent-binary to provide a custom binary.",
-            agent_embed::available_targets(),
-        ))
-    })?;
+    let embedded_gz =
+        agent_embed::get_binary_for_system(platform.os_id(), arch).ok_or_else(|| {
+            Error::Protocol(format!(
+                "no embedded agent binary for {}/{arch}. \
+                 Available targets: {:?}. \
+                 Use --agent-binary to provide a custom binary.",
+                platform.os_id(),
+                agent_embed::available_targets(),
+            ))
+        })?;
 
     let hash_prefix = sha256_hex_prefix(embedded_gz);
-    let cache_path = format!("{CACHE_DIR}/agent-{hash_prefix}");
+    let cache_dir = platform.cache_dir();
+    let cache_path = format!("{cache_dir}/agent-{hash_prefix}");
 
     // Check remote cache.
-    if check_remote_cache(ssh, &cache_path).await {
-        info!(cache = %cache_path, "cache hit, symlinking");
-        symlink_cached(ssh, &cache_path, &remote_path).await?;
+    if check_remote_cache(ssh, platform, &cache_path).await {
+        info!(cache = %cache_path, "cache hit, copying cached binary");
+        copy_cached(ssh, platform, &cache_path, &remote_path).await?;
         return Ok(remote_path);
     }
 
@@ -272,10 +283,10 @@ async fn transfer_agent(
         compressed_size = embedded_gz.len(),
         "cache miss, transferring compressed agent"
     );
-    transfer_compressed(ssh, embedded_gz, &remote_path).await?;
+    transfer_compressed(ssh, platform, embedded_gz, &remote_path).await?;
 
     // Populate cache in background (best-effort).
-    populate_cache(ssh, &remote_path, &cache_path).await;
+    populate_cache(ssh, platform, &remote_path, &cache_path).await;
 
     Ok(remote_path)
 }
@@ -291,18 +302,27 @@ fn sha256_hex_prefix(data: &[u8]) -> String {
 // Remote cache operations
 // ---------------------------------------------------------------------------
 
-/// Check if the cached agent binary exists on the remote host.
-async fn check_remote_cache(ssh: &SshSession, cache_path: &str) -> bool {
-    let cmd = format!("test -x '{cache_path}' && echo OK");
+/// Check if the cached binary exists on the remote host.
+async fn check_remote_cache(
+    ssh: &(impl SshExecutor + ?Sized),
+    platform: &dyn RemotePlatform,
+    cache_path: &str,
+) -> bool {
+    let cmd = platform.check_cache_cmd(cache_path);
     match ssh.exec(&cmd).await {
         Ok((stdout, _, Some(0))) => stdout.trim() == "OK",
         _ => false,
     }
 }
 
-/// Create a copy from the cached binary to the agent path.
-async fn symlink_cached(ssh: &SshSession, cache_path: &str, remote_path: &str) -> Result<()> {
-    let cmd = format!("cp '{cache_path}' '{remote_path}' && chmod +x '{remote_path}'");
+/// Copy from the cached binary to the target path.
+async fn copy_cached(
+    ssh: &(impl SshExecutor + ?Sized),
+    platform: &dyn RemotePlatform,
+    cache_path: &str,
+    remote_path: &str,
+) -> Result<()> {
+    let cmd = platform.copy_cached_cmd(cache_path, remote_path);
     let (_stdout, stderr, exit_code) = ssh.exec(&cmd).await?;
 
     if exit_code != Some(0) {
@@ -316,12 +336,14 @@ async fn symlink_cached(ssh: &SshSession, cache_path: &str, remote_path: &str) -
     Ok(())
 }
 
-/// Populate the remote cache with the deployed agent binary (best-effort).
-async fn populate_cache(ssh: &SshSession, remote_path: &str, cache_path: &str) {
-    let cmd = format!(
-        "mkdir -p '{CACHE_DIR}' && cp '{remote_path}' '{cache_path}' && \
-         find '{CACHE_DIR}' -name 'agent-*' -mtime +7 -delete 2>/dev/null; true"
-    );
+/// Populate the remote cache with the deployed binary (best-effort).
+async fn populate_cache(
+    ssh: &(impl SshExecutor + ?Sized),
+    platform: &dyn RemotePlatform,
+    remote_path: &str,
+    cache_path: &str,
+) {
+    let cmd = platform.populate_cache_cmd(remote_path, cache_path);
     if let Err(e) = ssh.exec_detached(&cmd).await {
         debug!(%e, "failed to populate cache (non-fatal)");
     }
@@ -332,36 +354,49 @@ async fn populate_cache(ssh: &SshSession, remote_path: &str, cache_path: &str) {
 // ---------------------------------------------------------------------------
 
 /// Transfer a gzip-compressed binary and decompress on the remote host.
-async fn transfer_compressed(ssh: &SshSession, gz_data: &[u8], remote_path: &str) -> Result<()> {
-    let cmd = format!("gunzip -c > '{remote_path}' && chmod +x '{remote_path}'");
+async fn transfer_compressed(
+    ssh: &(impl SshExecutor + ?Sized),
+    platform: &dyn RemotePlatform,
+    gz_data: &[u8],
+    remote_path: &str,
+) -> Result<()> {
+    let cmd = platform.transfer_compressed_cmd(remote_path);
     let (_stdout, stderr, exit_code) = ssh.exec_with_stdin(&cmd, gz_data).await?;
 
     if exit_code != Some(0) {
         return Err(Error::Protocol(format!(
-            "compressed agent transfer failed (exit {}): {}",
+            "compressed transfer failed (exit {}): {}",
             exit_code.unwrap_or(255),
             stderr.trim()
         )));
     }
 
-    debug!(remote_path, "compressed agent transferred and decompressed");
+    debug!(
+        remote_path,
+        "compressed binary transferred and decompressed"
+    );
     Ok(())
 }
 
 /// Transfer a raw (uncompressed) binary to the remote host.
-async fn transfer_raw(ssh: &SshSession, data: &[u8], remote_path: &str) -> Result<()> {
-    let cmd = format!("cat > '{remote_path}' && chmod +x '{remote_path}'");
+async fn transfer_raw(
+    ssh: &(impl SshExecutor + ?Sized),
+    platform: &dyn RemotePlatform,
+    data: &[u8],
+    remote_path: &str,
+) -> Result<()> {
+    let cmd = platform.transfer_raw_cmd(remote_path);
     let (_stdout, stderr, exit_code) = ssh.exec_with_stdin(&cmd, data).await?;
 
     if exit_code != Some(0) {
         return Err(Error::Protocol(format!(
-            "agent transfer failed (exit {}): {}",
+            "binary transfer failed (exit {}): {}",
             exit_code.unwrap_or(255),
             stderr.trim()
         )));
     }
 
-    debug!(remote_path, "agent binary transferred");
+    debug!(remote_path, "binary transferred");
     Ok(())
 }
 
@@ -401,7 +436,7 @@ async fn execute_and_handshake(agent: &RemoteAgent) -> Result<AgentHandshake> {
             } else if let Some(bp) = line.strip_prefix("BRIDGE_PORT=") {
                 bridge_port = bp.trim().parse().ok();
             }
-            // BRIDGE_PORT is optional, so don't wait for it.
+            // BRIDGE_PORT is optional for backward compatibility with older agents.
             got_ready && port.is_some() && token.is_some()
         })
         .await?;
@@ -440,6 +475,198 @@ async fn execute_and_handshake(agent: &RemoteAgent) -> Result<AgentHandshake> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ssh::SshExecutor;
+
+    /// Mock SSH executor for testing bootstrap functions without a live SSH server.
+    ///
+    /// Commands are matched by substring against the `pattern` field.
+    /// Responses are returned in order of first match.
+    struct MockSshExecutor {
+        responses: Vec<MockResponse>,
+    }
+
+    struct MockResponse {
+        pattern: &'static str,
+        stdout: String,
+        stderr: String,
+        exit_code: Option<u32>,
+    }
+
+    impl MockSshExecutor {
+        fn new() -> Self {
+            Self {
+                responses: Vec::new(),
+            }
+        }
+
+        fn on(mut self, pattern: &'static str, stdout: &str, exit_code: u32) -> Self {
+            self.responses.push(MockResponse {
+                pattern,
+                stdout: stdout.to_string(),
+                stderr: String::new(),
+                exit_code: Some(exit_code),
+            });
+            self
+        }
+
+        fn on_err(mut self, pattern: &'static str, stderr: &str, exit_code: u32) -> Self {
+            self.responses.push(MockResponse {
+                pattern,
+                stdout: String::new(),
+                stderr: stderr.to_string(),
+                exit_code: Some(exit_code),
+            });
+            self
+        }
+
+        fn on_fail(mut self, pattern: &'static str) -> Self {
+            self.responses.push(MockResponse {
+                pattern,
+                stdout: String::new(),
+                stderr: "command failed".to_string(),
+                exit_code: Some(1),
+            });
+            self
+        }
+
+        fn find_response(&self, command: &str) -> (String, String, Option<u32>) {
+            for resp in &self.responses {
+                if command.contains(resp.pattern) {
+                    return (resp.stdout.clone(), resp.stderr.clone(), resp.exit_code);
+                }
+            }
+            // Default: command not found
+            (String::new(), "mock: no match".to_string(), Some(127))
+        }
+    }
+
+    impl SshExecutor for MockSshExecutor {
+        async fn exec(&self, command: &str) -> common::Result<(String, String, Option<u32>)> {
+            Ok(self.find_response(command))
+        }
+
+        async fn exec_with_stdin(
+            &self,
+            command: &str,
+            _data: &[u8],
+        ) -> common::Result<(String, String, Option<u32>)> {
+            Ok(self.find_response(command))
+        }
+
+        async fn exec_and_read_lines(
+            &self,
+            command: &str,
+            _timeout: Duration,
+            mut predicate: impl FnMut(&str) -> bool + Send,
+        ) -> common::Result<Vec<String>> {
+            let (stdout, _, _) = self.find_response(command);
+            let mut lines = Vec::new();
+            for line in stdout.lines() {
+                let done = predicate(line);
+                lines.push(line.to_string());
+                if done {
+                    return Ok(lines);
+                }
+            }
+            Ok(lines)
+        }
+
+        async fn exec_detached(&self, _command: &str) -> common::Result<()> {
+            Ok(())
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests using MockSshExecutor
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_detect_remote_platform_linux() {
+        let mock = MockSshExecutor::new()
+            .on("uname -s", "Linux\n", 0)
+            .on("TMPDIR", "/tmp", 0);
+        let platform = crate::remote_platform::detect_remote_platform(&mock).await;
+        assert_eq!(platform.os_id(), "linux");
+    }
+
+    #[tokio::test]
+    async fn test_detect_remote_platform_darwin() {
+        let mock = MockSshExecutor::new()
+            .on("uname -s", "Darwin\n", 0)
+            .on("TMPDIR", "/tmp", 0);
+        let platform = crate::remote_platform::detect_remote_platform(&mock).await;
+        assert_eq!(platform.os_id(), "darwin");
+    }
+
+    #[tokio::test]
+    async fn test_detect_remote_platform_fallback() {
+        let mock = MockSshExecutor::new().on_fail("uname");
+        let platform = crate::remote_platform::detect_remote_platform(&mock).await;
+        // Falls back to Linux.
+        assert_eq!(platform.os_id(), "linux");
+    }
+
+    #[tokio::test]
+    async fn test_detect_architecture_linux() {
+        let mock = MockSshExecutor::new().on("uname -m", "x86_64\n", 0);
+        let platform = crate::remote_platform::test_helpers::unix_platform();
+        let arch = detect_architecture(&mock, &platform).await.unwrap();
+        assert_eq!(arch, "x86_64");
+    }
+
+    #[tokio::test]
+    async fn test_detect_architecture_arm64() {
+        let mock = MockSshExecutor::new().on("uname -m", "arm64\n", 0);
+        let platform = crate::remote_platform::test_helpers::unix_platform();
+        let arch = detect_architecture(&mock, &platform).await.unwrap();
+        assert_eq!(arch, "aarch64");
+    }
+
+    #[tokio::test]
+    async fn test_detect_architecture_failure() {
+        let mock = MockSshExecutor::new().on_err("uname -m", "not found", 1);
+        let platform = crate::remote_platform::test_helpers::unix_platform();
+        let result = detect_architecture(&mock, &platform).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_transfer_compressed_success() {
+        let mock = MockSshExecutor::new().on("gunzip", "", 0);
+        let platform = crate::remote_platform::test_helpers::unix_platform();
+        let result = transfer_compressed(&mock, &platform, b"fake-gz-data", "/tmp/agent-xyz").await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_transfer_compressed_failure() {
+        let mock = MockSshExecutor::new().on_err("gunzip", "disk full", 1);
+        let platform = crate::remote_platform::test_helpers::unix_platform();
+        let result = transfer_compressed(&mock, &platform, b"fake-gz-data", "/tmp/agent-xyz").await;
+        assert!(result.is_err());
+        let err_msg = format!("{:?}", result.unwrap_err());
+        assert!(err_msg.contains("disk full") || err_msg.contains("transfer failed"));
+    }
+
+    #[tokio::test]
+    async fn test_check_remote_cache_hit() {
+        let mock = MockSshExecutor::new().on("test -x", "OK\n", 0);
+        let platform = crate::remote_platform::test_helpers::unix_platform();
+        let hit = check_remote_cache(&mock, &platform, "/tmp/cache/agent-hash").await;
+        assert!(hit);
+    }
+
+    #[tokio::test]
+    async fn test_check_remote_cache_miss() {
+        let mock = MockSshExecutor::new().on_fail("test -x");
+        let platform = crate::remote_platform::test_helpers::unix_platform();
+        let hit = check_remote_cache(&mock, &platform, "/tmp/cache/agent-hash").await;
+        assert!(!hit);
+    }
+
+    // -----------------------------------------------------------------------
+    // Original tests (unchanged)
+    // -----------------------------------------------------------------------
 
     #[test]
     fn parse_handshake_lines() {
@@ -561,24 +788,19 @@ mod tests {
     }
 
     #[test]
-    fn test_transfer_command_format() {
+    fn test_transfer_command_format_via_platform() {
+        use crate::remote_platform::RemotePlatform;
+        let unix = crate::remote_platform::test_helpers::unix_platform();
         let remote_path = "/tmp/test-agent-123";
-        let cmd = format!("cat > '{}' && chmod +x '{}'", remote_path, remote_path);
+
+        let cmd = unix.transfer_raw_cmd(remote_path);
         assert!(cmd.contains("cat >"));
         assert!(cmd.contains("chmod +x"));
         assert!(cmd.contains(remote_path));
-    }
 
-    #[test]
-    fn test_cleanup_command_format() {
-        let remote_path = "/tmp/test-agent-456";
-        let cmd = format!(
-            "pkill -f '{}' 2>/dev/null; rm -f '{}'",
-            remote_path, remote_path
-        );
-        assert!(cmd.contains("pkill -f"));
+        let cmd = unix.cleanup_cmd(remote_path);
+        assert!(cmd.contains("pkill"));
         assert!(cmd.contains("rm -f"));
-        assert!(cmd.contains("2>/dev/null"));
         assert!(cmd.contains(remote_path));
     }
 
@@ -586,7 +808,7 @@ mod tests {
     fn test_embedded_binary_lookup() {
         // Unsupported targets should return None.
         assert!(agent_embed::get_binary_for_system("linux", "riscv64").is_none());
-        assert!(agent_embed::get_binary_for_system("windows", "x86_64").is_none());
+        assert!(agent_embed::get_binary_for_system("freebsd", "x86_64").is_none());
 
         // Supported targets return Some (non-empty) or None (empty placeholder).
         // Either way, no panic.
@@ -612,33 +834,40 @@ mod tests {
     }
 
     #[test]
-    fn test_cache_path_format() {
+    fn test_cache_path_format_via_platform() {
+        use crate::remote_platform::RemotePlatform;
+        let unix = crate::remote_platform::test_helpers::unix_platform();
+
         let hash = sha256_hex_prefix(b"test-binary-data");
-        let cache_path = format!("{CACHE_DIR}/agent-{hash}");
+        let cache_dir = unix.cache_dir();
+        let cache_path = format!("{cache_dir}/agent-{hash}");
         assert!(cache_path.starts_with("/tmp/.port-linker-cache/agent-"));
         assert_eq!(
             cache_path.len(),
-            CACHE_DIR.len() + "/agent-".len() + HASH_PREFIX_LEN
+            cache_dir.len() + "/agent-".len() + HASH_PREFIX_LEN
         );
     }
 
     #[test]
-    fn test_compressed_transfer_command() {
+    fn test_compressed_transfer_command_via_platform() {
+        use crate::remote_platform::RemotePlatform;
+        let unix = crate::remote_platform::test_helpers::unix_platform();
         let remote_path = "/tmp/port-linker-agent-abc123";
-        let cmd = format!("gunzip -c > '{remote_path}' && chmod +x '{remote_path}'");
-        assert!(cmd.contains("gunzip -c"));
+
+        let cmd = unix.transfer_compressed_cmd(remote_path);
+        assert!(cmd.contains("gunzip"));
         assert!(cmd.contains("chmod +x"));
         assert!(cmd.contains(remote_path));
     }
 
     #[test]
-    fn test_cache_populate_command() {
+    fn test_cache_populate_command_via_platform() {
+        use crate::remote_platform::RemotePlatform;
+        let unix = crate::remote_platform::test_helpers::unix_platform();
         let remote_path = "/tmp/port-linker-agent-abc";
         let cache_path = "/tmp/.port-linker-cache/agent-deadbeef12345678";
-        let cmd = format!(
-            "mkdir -p '{CACHE_DIR}' && cp '{remote_path}' '{cache_path}' && \
-             find '{CACHE_DIR}' -name 'agent-*' -mtime +7 -delete 2>/dev/null; true"
-        );
+
+        let cmd = unix.populate_cache_cmd(remote_path, cache_path);
         assert!(cmd.contains("mkdir -p"));
         assert!(cmd.contains(remote_path));
         assert!(cmd.contains(cache_path));

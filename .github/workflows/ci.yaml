@@ -127,7 +127,7 @@ jobs:
   test-docker:
     name: Docker Integration Tests
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     needs: [check, clippy]
     concurrency:
       group: ci-test-docker-${{ github.repository }}-${{ github.ref }}

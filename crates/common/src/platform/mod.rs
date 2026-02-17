@@ -104,7 +104,8 @@ pub trait Platform: Send + Sync + 'static {
     /// Find which process is listening on `port` with the given protocol.
     fn find_listener(port: u16, proto: TransportProto) -> Option<ProcessInfo>;
 
-    /// Kill a process by PID. Sends SIGTERM then SIGKILL on Unix.
+    /// Kill a process by PID. Sends SIGTERM then SIGKILL on Unix,
+    /// calls TerminateProcess on Windows.
     fn kill_process(pid: u32) -> Result<(), String>;
 
     // -- Ephemeral port range --

@@ -63,6 +63,37 @@ kill_remote_processes() {
     done
 }
 
+# Verify TCP echo through a host:port.
+verify_tcp_echo() {
+    local host="$1" port="$2"
+    local test_string="PLK_ECHO_$(date +%s)"
+    local result
+    result=$(echo "$test_string" | socat - "TCP:${host}:${port},connect-timeout=5" 2>/dev/null)
+    [ "$result" = "$test_string" ]
+}
+
+# Run port-linker in background (forwarding mode, not --echo-only).
+# Sets PLK_BG_PID to the backgrounded PID.
+run_port_linker_bg() {
+    local extra_args=("$@")
+    local plk_bin="$REPO_ROOT/target/debug/port-linker"
+
+    if [ ! -x "$plk_bin" ]; then
+        plk_bin="$REPO_ROOT/target/release/port-linker"
+    fi
+
+    if [ ! -x "$plk_bin" ]; then
+        fail "port-linker binary not found. Build with: cargo build -p cli"
+    fi
+
+    SSH_AUTH_SOCK="" RUST_LOG=debug "$plk_bin" \
+        --remote "testuser@target" \
+        --ssh-host-key-verification accept-all \
+        "${extra_args[@]}" >"/tmp/plk-bg-$$.log" 2>&1 &
+    PLK_BG_PID=$!
+    info "port-linker started in background (PID: $PLK_BG_PID)"
+}
+
 # Run port-linker with the test SSH config and capture output.
 # Returns the exit code.
 run_port_linker() {
@@ -77,7 +108,7 @@ run_port_linker() {
         fail "port-linker binary not found. Build with: cargo build -p cli"
     fi
 
-    SSH_AUTH_SOCK="" timeout 60 "$plk_bin" \
+    SSH_AUTH_SOCK="" RUST_LOG=debug timeout 60 "$plk_bin" \
         --remote "testuser@target" \
         --ssh-host-key-verification accept-all \
         --echo-only \

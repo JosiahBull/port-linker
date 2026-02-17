@@ -287,16 +287,21 @@ impl ToolchainInfo {
 
 /// Build for all configured targets.
 ///
+/// Builds are parallelized across targets using separate target directories
+/// to avoid cargo lock conflicts.
+///
 /// Returns a map of target triple to build result.
 pub fn build_for_targets(config: &BuildConfig) -> HashMap<String, BuildResult> {
     let toolchain = ToolchainInfo::detect();
-    let mut results = HashMap::new();
 
-    // Use a separate target directory to avoid cargo lock conflicts
-    let build_target_dir = config.workspace_root.join("target").join("cross-build");
+    let base_target_dir = config.workspace_root.join("target").join("cross-build");
 
-    // Create placeholder files for all targets first
-    // This ensures include_bytes! doesn't fail even if builds fail
+    // Create placeholder files for all targets first, before spawning any
+    // build threads. This ensures include_bytes! doesn't fail even if builds
+    // fail. There is no race with the parallel builds below because
+    // std::thread::scope provides a happens-before guarantee: all work here
+    // completes before any spawned thread starts, and each thread writes to
+    // its own target-specific output file.
     for target in &config.targets {
         let dest = config
             .out_dir
@@ -306,13 +311,27 @@ pub fn build_for_targets(config: &BuildConfig) -> HashMap<String, BuildResult> {
         }
     }
 
-    // Build each target
-    for target in &config.targets {
-        let result = build_single_target(config, target, &toolchain, &build_target_dir);
-        results.insert(target.triple.clone(), result);
-    }
+    // Build all targets in parallel using threads with per-target directories.
+    let toolchain_ref = &toolchain;
+    std::thread::scope(|s| {
+        let handles: Vec<_> = config
+            .targets
+            .iter()
+            .map(|target| {
+                let build_target_dir = base_target_dir.join(&target.triple);
+                s.spawn(move || {
+                    let result =
+                        build_single_target(config, target, toolchain_ref, &build_target_dir);
+                    (target.triple.clone(), result)
+                })
+            })
+            .collect();
 
-    results
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("build thread panicked"))
+            .collect()
+    })
 }
 
 /// Generate the output filename for a target.
@@ -578,11 +597,18 @@ fn find_binary(
     profile_dir: &str,
     binary_name: &str,
 ) -> Option<PathBuf> {
+    // Windows targets produce .exe binaries.
+    let actual_name = if target.contains("windows") {
+        format!("{binary_name}.exe")
+    } else {
+        binary_name.to_string()
+    };
+
     // Try the expected profile directory first
     let path = build_target_dir
         .join(target)
         .join(profile_dir)
-        .join(binary_name);
+        .join(&actual_name);
 
     if path.exists() {
         return Some(path);
@@ -592,7 +618,7 @@ fn find_binary(
     let release_path = build_target_dir
         .join(target)
         .join("release")
-        .join(binary_name);
+        .join(&actual_name);
 
     if release_path.exists() {
         return Some(release_path);

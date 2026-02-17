@@ -20,12 +20,24 @@ where
 }
 
 /// Deserialize a `T` from the raw bytes produced by [`encode`].
+///
+/// Handles potentially unaligned input (e.g. from QUIC datagrams) by copying
+/// to an aligned buffer when the input pointer isn't properly aligned.
 pub fn decode<T>(bytes: &[u8]) -> Result<T, BoxError>
 where
     T: Archive,
     T::Archived: for<'a> CheckBytes<HighValidator<'a, rkyv::rancor::Error>>
         + Deserialize<T, rkyv::rancor::Strategy<Pool, rkyv::rancor::Error>>,
 {
+    // rkyv requires aligned input. Network buffers (QUIC datagrams, etc.) may
+    // not satisfy this, so copy into an AlignedVec when needed.
+    let align = std::mem::align_of::<T::Archived>();
+    if !(bytes.as_ptr() as usize).is_multiple_of(align) {
+        let mut aligned: AlignedVec = AlignedVec::with_capacity(bytes.len());
+        aligned.extend_from_slice(bytes);
+        let value = rkyv::from_bytes::<T, rkyv::rancor::Error>(&aligned)?;
+        return Ok(value);
+    }
     let value = rkyv::from_bytes::<T, rkyv::rancor::Error>(bytes)?;
     Ok(value)
 }
