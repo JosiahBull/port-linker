@@ -541,6 +541,9 @@ async fn try_udp_relay_auto(
     let (relay_addr, relay_infos) = setup_udp_relay_chain(args, jump_sessions, agent_addr).await?;
 
     // Probe the first relay to check if UDP is reachable.
+    // NOTE: This only validates the first hop. If UDP is blocked at a later
+    // hop, the probe succeeds but QUIC will fail. The auto transport strategy
+    // handles this by falling back to TCP bridge on QUIC connection failure.
     let probe_timeout = std::time::Duration::from_secs(args.relay_probe_timeout);
     info!(
         addr = %relay_addr,
@@ -814,11 +817,11 @@ async fn run_single_session(
     }
 
     if args.echo_only {
-        // Echo test passed. Force-exit immediately — endpoint.wait_idle()
+        // Echo test passed. Skip further setup — endpoint.wait_idle()
         // blocks indefinitely because SSH tunnel reader tasks keep the
         // connection alive, and there is nothing left to verify.
         info!("echo-only: test passed, exiting");
-        std::process::exit(0);
+        return Ok(());
     }
 
     // Initialize the binding manager for port forwarding.

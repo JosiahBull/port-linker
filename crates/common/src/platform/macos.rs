@@ -152,7 +152,7 @@ impl super::Notifier for MacOsNotifier {
         let icon_str;
         if let Some(icon_path) = icon {
             icon_str = icon_path.display().to_string();
-            args.extend_from_slice(&["-appIcon", &icon_str]);
+            args.extend_from_slice(&["-contentImage", &icon_str]);
         }
         if let Ok(output) = Command::new("terminal-notifier")
             .args(&args)

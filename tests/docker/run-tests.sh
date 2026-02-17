@@ -41,10 +41,10 @@ info "writing SSH config for Docker test hosts..."
 mkdir -p "$SSH_DIR"
 chmod 700 "$SSH_DIR"
 
-# Remove any previous port-linker test block.
+# Remove any previous port-linker test block (portable across GNU/BSD sed).
 if [ -f "$SSH_CONFIG" ]; then
-    sed -i.bak "/$PLK_MARKER/,/$PLK_MARKER/d" "$SSH_CONFIG"
-    rm -f "$SSH_CONFIG.bak"
+    sed -e "/$PLK_MARKER/,/$PLK_MARKER/d" "$SSH_CONFIG" > "$SSH_CONFIG.tmp"
+    mv "$SSH_CONFIG.tmp" "$SSH_CONFIG"
 fi
 
 cat >> "$SSH_CONFIG" <<EOF
@@ -89,19 +89,16 @@ docker compose -f "$COMPOSE_FILE" build
 info "starting containers..."
 docker compose -f "$COMPOSE_FILE" up -d
 
-# Wait for SSH to be ready on all nodes.
+# Wait for SSH to be ready on all nodes by attempting actual connections.
 info "waiting for SSH on all nodes..."
 for container in plk-jump1 plk-jump2 plk-target; do
     for i in $(seq 1 30); do
-        if docker exec "$container" pgrep -f sshd >/dev/null 2>&1; then
+        if docker exec "$container" sh -c 'echo | nc -w1 127.0.0.1 22' >/dev/null 2>&1; then
             break
         fi
         sleep 1
     done
 done
-
-# Give SSH a moment to fully initialize.
-sleep 2
 
 # Step 4.5: Inject authorized keys directly into containers.
 # Docker volume mounts may use cached layers; ensure the freshly generated
@@ -188,10 +185,10 @@ if [ "${KEEP_CONTAINERS:-}" != "1" ]; then
     info "tearing down containers..."
     docker compose -f "$COMPOSE_FILE" down -v
 
-    # Remove test SSH config block.
+    # Remove test SSH config block (portable across GNU/BSD sed).
     if [ -f "$SSH_CONFIG" ]; then
-        sed -i.bak "/$PLK_MARKER/,/$PLK_MARKER/d" "$SSH_CONFIG"
-        rm -f "$SSH_CONFIG.bak"
+        sed -e "/$PLK_MARKER/,/$PLK_MARKER/d" "$SSH_CONFIG" > "$SSH_CONFIG.tmp"
+        mv "$SSH_CONFIG.tmp" "$SSH_CONFIG"
     fi
 else
     info "KEEP_CONTAINERS=1, leaving containers running"

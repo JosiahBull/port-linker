@@ -106,6 +106,13 @@ async fn writer_task<W: AsyncWrite + Unpin>(
     mut rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
 ) {
     while let Some(payload) = rx.recv().await {
+        if payload.len() > MAX_DATAGRAM_SIZE {
+            warn!(
+                len = payload.len(),
+                "TcpUdpSocket dropping oversized datagram (max {MAX_DATAGRAM_SIZE})"
+            );
+            continue;
+        }
         let len_bytes = (payload.len() as u16).to_be_bytes();
         if let Err(e) = writer.write_all(&len_bytes).await {
             debug!("TcpUdpSocket write header error: {e}");

@@ -448,6 +448,10 @@ async fn run_tcp_bridge(tcp_stream: tokio::net::TcpStream, quic_port: u16) {
 
         loop {
             match udp2.recv(&mut buf).await {
+                Ok(len) if len > 65535 => {
+                    warn!(len, "TCP bridge: dropping oversized UDP datagram");
+                    continue;
+                }
                 Ok(len) => {
                     let header = (len as u16).to_be_bytes();
                     if let Err(e) = tcp_write.write_all(&header).await {

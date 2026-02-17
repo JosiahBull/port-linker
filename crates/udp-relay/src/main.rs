@@ -84,6 +84,7 @@ async fn run(target_addr: SocketAddr) -> Result<(), Box<dyn std::error::Error>> 
                 let data = &buf[..len];
 
                 // Handle probe request from any source.
+                // Activity is updated above so probes also reset the idle timeout.
                 if data == PROBE_REQUEST {
                     let _ = socket.send_to(PROBE_ACK, src).await;
                     continue;
