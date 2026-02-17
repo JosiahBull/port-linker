@@ -106,7 +106,7 @@ impl RemotePlatform for RemoteUnix {
         let cp = shell_escape(cache_path);
         format!(
             "mkdir -p '{cd}' && cp '{rp}' '{cp}' && \
-             find '{cd}' -name 'agent-*' -mtime +7 -delete 2>/dev/null; true"
+             find '{cd}' \\( -name 'agent-*' -o -name 'relay-*' \\) -mtime +7 -delete 2>/dev/null; true"
         )
     }
 

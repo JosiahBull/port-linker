@@ -31,10 +31,9 @@ where
 {
     // rkyv requires aligned input. Network buffers (QUIC datagrams, etc.) may
     // not satisfy this, so copy into an AlignedVec when needed.
-    // AlignedVec default alignment is 16 bytes.
-    const ALIGN: usize = 16;
-    if !(bytes.as_ptr() as usize).is_multiple_of(ALIGN) {
-        let mut aligned: AlignedVec<16> = AlignedVec::with_capacity(bytes.len());
+    let align = std::mem::align_of::<T::Archived>();
+    if !(bytes.as_ptr() as usize).is_multiple_of(align) {
+        let mut aligned: AlignedVec = AlignedVec::with_capacity(bytes.len());
         aligned.extend_from_slice(bytes);
         let value = rkyv::from_bytes::<T, rkyv::rancor::Error>(&aligned)?;
         return Ok(value);

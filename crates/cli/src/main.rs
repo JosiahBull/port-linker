@@ -296,9 +296,6 @@ async fn run_with_phoenix_restart(args: &Args) -> Result<()> {
         let session_result =
             run_single_session(args, agent_addr, Some(&remote_agent), transport_ctx).await;
 
-        // Note: in echo-only mode, run_single_session calls process::exit(0)
-        // directly and never returns here.
-
         // Step 3: Cleanup the old agent.
         remote_agent.cleanup().await;
 
@@ -822,11 +819,18 @@ async fn run_single_session(
     }
 
     if args.echo_only {
-        // Echo test passed. Force-exit immediately — the SSH session
-        // teardown and remote agent cleanup can block indefinitely on
-        // tunnel reader tasks, and we have nothing left to verify.
-        info!("echo-only: test passed, exiting");
-        std::process::exit(0);
+        // Echo test passed. Close the QUIC connection and return to allow
+        // normal teardown. The endpoint.wait_idle() has a short timeout to
+        // avoid blocking indefinitely on tunnel reader tasks.
+        info!("echo-only: test passed, shutting down");
+        connection.close(0u32.into(), b"echo-ok");
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            endpoint.wait_idle(),
+        )
+        .await
+        .ok();
+        return Ok(());
     }
 
     // Initialize the binding manager for port forwarding.

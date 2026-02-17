@@ -3137,10 +3137,11 @@ async fn test_port_added_notification() {
     let (_control_send, mut control_recv) = connection.accept_bi().await.unwrap();
     let _ = recv_msg(&mut control_recv).await.unwrap();
 
-    // Start a TCP listener on a non-ephemeral port.
-    let test_listener = tokio::net::TcpListener::bind("127.0.0.1:19876")
+    // Start a TCP listener on a dynamic port.
+    let test_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
-        .expect("failed to bind test listener on port 19876");
+        .expect("failed to bind test listener");
+    let test_port = test_listener.local_addr().unwrap().port();
 
     // Read control stream with timeout, expect PortAdded.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -3148,7 +3149,7 @@ async fn test_port_added_notification() {
     while tokio::time::Instant::now() < deadline {
         match tokio::time::timeout_at(deadline, recv_msg(&mut control_recv)).await {
             Ok(Ok(ControlMsg::PortAdded { port, proto, .. })) => {
-                if port == 19876 && proto == protocol::Protocol::Tcp {
+                if port == test_port && proto == protocol::Protocol::Tcp {
                     found = true;
                     break;
                 }
@@ -3161,7 +3162,7 @@ async fn test_port_added_notification() {
         }
     }
 
-    assert!(found, "should have received PortAdded for port 19876");
+    assert!(found, "should have received PortAdded for port {test_port}");
 
     drop(test_listener);
     connection.close(0u32.into(), b"done");
@@ -3189,10 +3190,11 @@ async fn test_port_removed_notification() {
     let (_control_send, mut control_recv) = connection.accept_bi().await.unwrap();
     let _ = recv_msg(&mut control_recv).await.unwrap();
 
-    // Start and then drop a TCP listener on a non-ephemeral port.
-    let test_listener = tokio::net::TcpListener::bind("127.0.0.1:19877")
+    // Start and then drop a TCP listener on a dynamic port.
+    let test_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
-        .expect("failed to bind test listener on port 19877");
+        .expect("failed to bind test listener");
+    let test_port = test_listener.local_addr().unwrap().port();
 
     // Wait for PortAdded first.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -3200,7 +3202,7 @@ async fn test_port_removed_notification() {
     while tokio::time::Instant::now() < deadline {
         match tokio::time::timeout_at(deadline, recv_msg(&mut control_recv)).await {
             Ok(Ok(ControlMsg::PortAdded { port, proto, .. })) => {
-                if port == 19877 && proto == protocol::Protocol::Tcp {
+                if port == test_port && proto == protocol::Protocol::Tcp {
                     got_added = true;
                     break;
                 }
@@ -3209,7 +3211,7 @@ async fn test_port_removed_notification() {
             Ok(Err(_)) | Err(_) => break,
         }
     }
-    assert!(got_added, "should have received PortAdded for port 19877");
+    assert!(got_added, "should have received PortAdded for port {test_port}");
 
     // Drop the listener to trigger PortRemoved.
     drop(test_listener);
@@ -3220,7 +3222,7 @@ async fn test_port_removed_notification() {
     while tokio::time::Instant::now() < deadline {
         match tokio::time::timeout_at(deadline, recv_msg(&mut control_recv)).await {
             Ok(Ok(ControlMsg::PortRemoved { port, proto })) => {
-                if port == 19877 && proto == protocol::Protocol::Tcp {
+                if port == test_port && proto == protocol::Protocol::Tcp {
                     got_removed = true;
                     break;
                 }
@@ -3231,7 +3233,7 @@ async fn test_port_removed_notification() {
     }
     assert!(
         got_removed,
-        "should have received PortRemoved for port 19877"
+        "should have received PortRemoved for port {test_port}"
     );
 
     connection.close(0u32.into(), b"done");
