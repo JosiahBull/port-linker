@@ -8,7 +8,6 @@ license.workspace = true
 
 [dependencies]
 assets = { workspace = true }
-notify-rust.workspace = true
+common = { path = "../common" }
 tracing.workspace = true
 thiserror.workspace = true
-dirs.workspace = true

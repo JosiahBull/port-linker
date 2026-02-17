@@ -663,7 +663,9 @@ dependencies = [
  "dirs",
  "notify",
  "protocol",
+ "quic-over-tcp",
  "quinn",
+ "relay-embed",
  "ring",
  "russh",
  "rustls",
@@ -715,8 +717,12 @@ dependencies = [
 name = "common"
 version = "0.3.0"
 dependencies = [
+ "dirs",
  "libc",
+ "notify-rust",
+ "protocol",
  "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]
@@ -2014,8 +2020,7 @@ name = "notify"
 version = "0.3.0"
 dependencies = [
  "assets",
- "dirs",
- "notify-rust",
+ "common",
  "thiserror 2.0.18",
  "tracing",
 ]
@@ -2520,6 +2525,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "quic-over-tcp"
+version = "0.3.0"
+dependencies = [
+ "bytes",
+ "quinn",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "quick-error"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2720,6 +2735,14 @@ name = "regex-syntax"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a96887878f22d7bad8a3b6dc5b7440e0ada9a245242924394987b21cf2210a4c"
+
+[[package]]
+name = "relay-embed"
+version = "0.3.0"
+dependencies = [
+ "agent-build",
+ "flate2",
+]
 
 [[package]]
 name = "rend"
@@ -3770,6 +3793,13 @@ name = "typenum"
 version = "1.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "562d481066bde0658276a35467c4af00bdc6ee726305698a55b86e61d7ad82bb"
+
+[[package]]
+name = "udp-relay"
+version = "0.3.0"
+dependencies = [
+ "tokio",
+]
 
 [[package]]
 name = "uds_windows"

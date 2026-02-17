@@ -1,0 +1,33 @@
+FROM alpine:3.19
+
+# Install SSH server, iptables for firewall testing, bash, socat for echo servers
+RUN apk add --no-cache \
+    openssh-server \
+    openssh-client \
+    iptables \
+    bash \
+    socat \
+    && mkdir -p /run/sshd
+
+# Create test user and set a password to unlock the account.
+# Alpine's adduser -D creates a locked account (no password), and OpenSSH
+# refuses pubkey auth for locked users. Setting a password unlocks it.
+RUN adduser -D -s /bin/bash testuser \
+    && echo "testuser:testpassword" | chpasswd \
+    && mkdir -p /home/testuser/.ssh \
+    && chmod 700 /home/testuser/.ssh \
+    && chown testuser:testuser /home/testuser/.ssh
+
+# Copy SSH config
+COPY ssh/sshd_config /etc/ssh/sshd_config
+
+# Generate host keys
+RUN ssh-keygen -A
+
+# Entry point script
+COPY docker-entrypoint.sh /docker-entrypoint.sh
+RUN chmod +x /docker-entrypoint.sh
+
+EXPOSE 22
+
+ENTRYPOINT ["/docker-entrypoint.sh"]

@@ -1,0 +1,14 @@
+# port-linker test SSHD config
+Port 22
+PermitRootLogin no
+PubkeyAuthentication yes
+AuthorizedKeysFile .ssh/authorized_keys
+PasswordAuthentication no
+ChallengeResponseAuthentication no
+AllowTcpForwarding yes
+GatewayPorts no
+X11Forwarding no
+PrintMotd no
+AcceptEnv LANG LC_*
+LogLevel INFO
+Subsystem sftp /usr/lib/ssh/sftp-server

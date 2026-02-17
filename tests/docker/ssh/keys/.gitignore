@@ -1,0 +1,3 @@
+# SSH keys are generated at test time, never committed.
+*
+!.gitignore

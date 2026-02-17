@@ -80,6 +80,14 @@ async fn run(log_rx: tokio::sync::mpsc::Receiver<protocol::AgentLogEvent>) -> Re
     let local_addr = endpoint.local_addr().map_err(Error::Io)?;
     let port = local_addr.port();
 
+    // 3b. Bind a TCP bridge listener for QUIC-over-TCP fallback.
+    // This allows the host to tunnel QUIC datagrams over an SSH direct-tcpip
+    // channel when UDP is blocked between host and agent.
+    let bridge_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .map_err(Error::Io)?;
+    let bridge_port = bridge_listener.local_addr().map_err(Error::Io)?.port();
+
     // 4. Generate a one-time connection token.
     // The token doubles as a session ID for log correlation (Architecture Section 7.2).
     let token = common::generate_token();
@@ -90,6 +98,7 @@ async fn run(log_rx: tokio::sync::mpsc::Receiver<protocol::AgentLogEvent>) -> Re
         writeln!(stdout, "AGENT_READY").map_err(Error::Io)?;
         writeln!(stdout, "PORT={port}").map_err(Error::Io)?;
         writeln!(stdout, "TOKEN={token}").map_err(Error::Io)?;
+        writeln!(stdout, "BRIDGE_PORT={bridge_port}").map_err(Error::Io)?;
         stdout.flush().map_err(Error::Io)?;
     }
 
@@ -98,7 +107,26 @@ async fn run(log_rx: tokio::sync::mpsc::Receiver<protocol::AgentLogEvent>) -> Re
     let session_span = tracing::info_span!("session", session_id = %token);
     let _session_guard = session_span.enter();
 
-    info!(port, "agent listening, waiting for connection");
+    info!(port, bridge_port, "agent listening, waiting for connection");
+
+    // Spawn the TCP bridge task.
+    // Accepts TCP connections and proxies length-prefixed UDP datagrams
+    // to/from the local QUIC endpoint.
+    let quic_port = port;
+    tokio::spawn(async move {
+        loop {
+            match bridge_listener.accept().await {
+                Ok((tcp_stream, peer)) => {
+                    info!(%peer, "TCP bridge: accepted connection");
+                    tokio::spawn(run_tcp_bridge(tcp_stream, quic_port));
+                }
+                Err(e) => {
+                    warn!(%e, "TCP bridge: accept failed");
+                    break;
+                }
+            }
+        }
+    });
 
     // 6. Accept one QUIC connection.
     let incoming = endpoint
@@ -355,6 +383,104 @@ async fn handle_udp_datagram(datagram: Bytes, cache: Arc<RwLock<HashMap<u16, Arc
             debug!("received non-UdpData packet as datagram, ignoring");
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// TCP bridge for QUIC-over-TCP fallback
+// ---------------------------------------------------------------------------
+
+/// Run the TCP bridge: proxy length-prefixed UDP datagrams between a TCP
+/// stream and the local QUIC endpoint via a local UDP socket.
+///
+/// Framing: 2-byte BE length prefix + raw datagram payload per frame.
+async fn run_tcp_bridge(tcp_stream: tokio::net::TcpStream, quic_port: u16) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let _ = tcp_stream.set_nodelay(true);
+    let (mut tcp_read, mut tcp_write) = tcp_stream.into_split();
+
+    // Create a local UDP socket to talk to the QUIC endpoint.
+    let udp = match UdpSocket::bind("127.0.0.1:0").await {
+        Ok(s) => Arc::new(s),
+        Err(e) => {
+            error!(%e, "TCP bridge: failed to bind local UDP socket");
+            return;
+        }
+    };
+
+    let quic_addr: SocketAddr = ([127, 0, 0, 1], quic_port).into();
+    if let Err(e) = udp.connect(quic_addr).await {
+        error!(%e, "TCP bridge: failed to connect UDP to QUIC endpoint");
+        return;
+    }
+
+    let udp2 = udp.clone();
+
+    // TCP -> UDP: read length-prefixed datagrams from TCP, send to QUIC endpoint.
+    let tcp_to_udp = async move {
+        let mut header = [0u8; 2];
+        let mut buf = vec![0u8; 65535];
+
+        loop {
+            if let Err(e) = tcp_read.read_exact(&mut header).await {
+                debug!("TCP bridge: TCP read closed: {e}");
+                break;
+            }
+            let len = u16::from_be_bytes(header) as usize;
+            if len == 0 || len > 65535 {
+                warn!(len, "TCP bridge: invalid frame length");
+                break;
+            }
+            if let Err(e) = tcp_read.read_exact(&mut buf[..len]).await {
+                debug!("TCP bridge: TCP read payload error: {e}");
+                break;
+            }
+            if let Err(e) = udp.send(&buf[..len]).await {
+                debug!("TCP bridge: UDP send error: {e}");
+                break;
+            }
+        }
+    };
+
+    // UDP -> TCP: read datagrams from QUIC endpoint, send length-prefixed to TCP.
+    let udp_to_tcp = async move {
+        let mut buf = vec![0u8; 65535];
+
+        loop {
+            match udp2.recv(&mut buf).await {
+                Ok(len) if len > 65535 => {
+                    warn!(len, "TCP bridge: dropping oversized UDP datagram");
+                    continue;
+                }
+                Ok(len) => {
+                    let header = (len as u16).to_be_bytes();
+                    if let Err(e) = tcp_write.write_all(&header).await {
+                        debug!("TCP bridge: TCP write header error: {e}");
+                        break;
+                    }
+                    if let Err(e) = tcp_write.write_all(&buf[..len]).await {
+                        debug!("TCP bridge: TCP write payload error: {e}");
+                        break;
+                    }
+                    if let Err(e) = tcp_write.flush().await {
+                        debug!("TCP bridge: TCP flush error: {e}");
+                        break;
+                    }
+                }
+                Err(e) => {
+                    debug!("TCP bridge: UDP recv error: {e}");
+                    break;
+                }
+            }
+        }
+    };
+
+    tokio::select! {
+        _ = tcp_to_udp => {}
+        _ = udp_to_tcp => {}
+    }
+
+    debug!("TCP bridge session ended");
 }
 
 // ---------------------------------------------------------------------------
