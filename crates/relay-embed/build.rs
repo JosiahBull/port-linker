@@ -8,7 +8,9 @@ fn main() {
         .binary_name("port-linker-relay")
         .target(CrossTarget::linux_x86_64().with_custom_profile("agent-release"))
         .target(CrossTarget::linux_aarch64().with_custom_profile("agent-release"))
-        .target(CrossTarget::darwin_aarch64().with_custom_profile("agent-release"));
+        .target(CrossTarget::darwin_aarch64().with_custom_profile("agent-release"))
+        .target(CrossTarget::windows_x86_64().with_custom_profile("agent-release"))
+        .target(CrossTarget::windows_aarch64().with_custom_profile("agent-release"));
 
     let results = build_for_targets(&config);
 

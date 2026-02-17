@@ -91,7 +91,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
 
@@ -164,7 +164,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
 
@@ -178,6 +178,10 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: sudo apt-get update && sudo apt-get install -y upx
 
+      - name: Install UPX (Windows)
+        if: matrix.os == 'windows-latest'
+        run: choco install upx -y
+
       - name: Build release
         run: cargo build --workspace --release
 
@@ -187,9 +191,25 @@ jobs:
           upx --best --lzma target/release/port-linker
           ls -lh target/release/port-linker
 
-      - name: Upload binary artifact
+      - name: Compress binary with UPX (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: |
+          upx --best --lzma target/release/port-linker.exe
+          ls -lh target/release/port-linker.exe
+
+      - name: Upload binary artifact (Unix)
+        if: matrix.os != 'windows-latest'
         uses: actions/upload-artifact@v4
         with:
           name: port-linker-${{ matrix.os }}
           path: target/release/port-linker
+          if-no-files-found: error
+
+      - name: Upload binary artifact (Windows)
+        if: matrix.os == 'windows-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: port-linker-${{ matrix.os }}
+          path: target/release/port-linker.exe
           if-no-files-found: error

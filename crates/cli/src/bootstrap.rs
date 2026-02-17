@@ -599,8 +599,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_detect_remote_platform_windows() {
+        let mock = MockSshExecutor::new().on_err("uname", "not found", 127).on(
+            "powershell",
+            r"C:\Users\Admin\AppData\Local\Temp",
+            0,
+        );
+        let platform = crate::remote_platform::detect_remote_platform(&mock).await;
+        assert_eq!(platform.os_id(), "windows");
+    }
+
+    #[tokio::test]
     async fn test_detect_remote_platform_fallback() {
-        let mock = MockSshExecutor::new().on_fail("uname");
+        let mock = MockSshExecutor::new()
+            .on_fail("uname")
+            .on_fail("powershell");
         let platform = crate::remote_platform::detect_remote_platform(&mock).await;
         // Falls back to Linux.
         assert_eq!(platform.os_id(), "linux");
@@ -814,6 +827,8 @@ mod tests {
         // Either way, no panic.
         let _ = agent_embed::get_binary_for_system("linux", "x86_64");
         let _ = agent_embed::get_binary_for_system("linux", "aarch64");
+        let _ = agent_embed::get_binary_for_system("windows", "x86_64");
+        let _ = agent_embed::get_binary_for_system("windows", "aarch64");
     }
 
     #[test]

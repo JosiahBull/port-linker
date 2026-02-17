@@ -45,7 +45,7 @@ pub trait RemotePlatform: Send + Sync {
     /// Normalize a raw architecture string from the remote.
     fn normalize_arch(&self, raw: &str) -> Result<String>;
 
-    /// OS identifier for binary lookup (e.g., "linux", "darwin").
+    /// OS identifier for binary lookup (e.g., "linux", "darwin", "windows").
     fn os_id(&self) -> &str;
 
     /// Binary file extension on this platform ("" or ".exe").
@@ -143,6 +143,89 @@ impl RemotePlatform for RemoteUnix {
 }
 
 // ---------------------------------------------------------------------------
+// Windows remote
+// ---------------------------------------------------------------------------
+
+/// Windows remote.
+pub struct RemoteWindows {
+    temp: String,
+    cache: String,
+}
+
+impl RemotePlatform for RemoteWindows {
+    fn detect_arch_cmd(&self) -> &str {
+        "powershell -NoProfile -Command \"if ($env:PROCESSOR_ARCHITECTURE -eq 'AMD64') { 'x86_64' } elseif ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'aarch64' } else { $env:PROCESSOR_ARCHITECTURE }\""
+    }
+
+    fn transfer_compressed_cmd(&self, path: &str) -> String {
+        format!(
+            "powershell -NoProfile -Command \"\
+            $input | Set-Content -Path '{path}.gz' -Encoding Byte; \
+            $fs = [IO.File]::OpenRead('{path}.gz'); \
+            $gz = New-Object IO.Compression.GzipStream($fs, [IO.Compression.CompressionMode]::Decompress); \
+            $out = [IO.File]::Create('{path}'); \
+            $gz.CopyTo($out); $out.Close(); $gz.Close(); $fs.Close(); \
+            Remove-Item '{path}.gz'\""
+        )
+    }
+
+    fn transfer_raw_cmd(&self, path: &str) -> String {
+        format!(
+            "powershell -NoProfile -Command \"$input | Set-Content -Path '{path}' -Encoding Byte\""
+        )
+    }
+
+    fn check_cache_cmd(&self, cache_path: &str) -> String {
+        format!("powershell -NoProfile -Command \"if (Test-Path '{cache_path}') {{ 'OK' }}\"")
+    }
+
+    fn copy_cached_cmd(&self, cache_path: &str, remote_path: &str) -> String {
+        format!("powershell -NoProfile -Command \"Copy-Item '{cache_path}' '{remote_path}'\"")
+    }
+
+    fn populate_cache_cmd(&self, remote_path: &str, cache_path: &str) -> String {
+        let cache_dir = &self.cache;
+        format!(
+            "powershell -NoProfile -Command \"\
+            New-Item -ItemType Directory -Force -Path '{cache_dir}' | Out-Null; \
+            Copy-Item '{remote_path}' '{cache_path}'; \
+            Get-ChildItem '{cache_dir}' -Filter 'agent-*' | Where-Object {{ $_.LastWriteTime -lt (Get-Date).AddDays(-7) }} | Remove-Item -Force\""
+        )
+    }
+
+    fn cleanup_cmd(&self, path: &str) -> String {
+        let filename = path.rsplit(['/', '\\']).next().unwrap_or(path);
+        format!("taskkill /F /IM \"{filename}\" 2>nul & del /F /Q \"{path}\" 2>nul")
+    }
+
+    fn cache_dir(&self) -> &str {
+        &self.cache
+    }
+
+    fn temp_dir(&self) -> &str {
+        &self.temp
+    }
+
+    fn normalize_arch(&self, raw: &str) -> Result<String> {
+        match raw.trim() {
+            "x86_64" | "AMD64" => Ok("x86_64".into()),
+            "aarch64" | "ARM64" => Ok("aarch64".into()),
+            other => Err(Error::Protocol(format!(
+                "unsupported architecture: {other}"
+            ))),
+        }
+    }
+
+    fn os_id(&self) -> &str {
+        "windows"
+    }
+
+    fn binary_ext(&self) -> &str {
+        ".exe"
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Runtime detection via SSH probe
 // ---------------------------------------------------------------------------
 
@@ -175,6 +258,19 @@ pub async fn detect_remote_platform(ssh: &(impl SshExecutor + ?Sized)) -> Box<dy
         }
     }
 
+    // Try PowerShell (Windows).
+    if let Ok((stdout, _, Some(0))) = ssh
+        .exec("powershell -NoProfile -Command \"$env:TEMP\"")
+        .await
+    {
+        let temp = stdout.trim().to_string();
+        if !temp.is_empty() {
+            let cache = format!("{temp}\\.port-linker-cache");
+            info!(temp = %temp, "detected Windows remote platform");
+            return Box::new(RemoteWindows { temp, cache });
+        }
+    }
+
     // Default to Unix with /tmp.
     warn!("could not detect remote OS, defaulting to Linux");
     Box::new(RemoteUnix {
@@ -198,6 +294,14 @@ pub mod test_helpers {
             os: "linux".into(),
         }
     }
+
+    /// Create a default Windows remote platform for tests.
+    pub fn windows_platform() -> RemoteWindows {
+        RemoteWindows {
+            temp: r"C:\Users\Admin\AppData\Local\Temp".into(),
+            cache: r"C:\Users\Admin\AppData\Local\Temp\.port-linker-cache".into(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -216,6 +320,16 @@ mod tests {
     }
 
     #[test]
+    fn remote_windows_os_id() {
+        let w = RemoteWindows {
+            temp: r"C:\Users\Admin\AppData\Local\Temp".into(),
+            cache: r"C:\Users\Admin\AppData\Local\Temp\.port-linker-cache".into(),
+        };
+        assert_eq!(w.os_id(), "windows");
+        assert_eq!(w.binary_ext(), ".exe");
+    }
+
+    #[test]
     fn remote_unix_normalize_arch() {
         let u = RemoteUnix {
             temp: "/tmp".into(),
@@ -226,6 +340,19 @@ mod tests {
         assert_eq!(u.normalize_arch("aarch64").unwrap(), "aarch64");
         assert_eq!(u.normalize_arch("arm64").unwrap(), "aarch64");
         assert!(u.normalize_arch("riscv64").is_err());
+    }
+
+    #[test]
+    fn remote_windows_normalize_arch() {
+        let w = RemoteWindows {
+            temp: "C:\\temp".into(),
+            cache: "C:\\temp\\.port-linker-cache".into(),
+        };
+        assert_eq!(w.normalize_arch("x86_64").unwrap(), "x86_64");
+        assert_eq!(w.normalize_arch("AMD64").unwrap(), "x86_64");
+        assert_eq!(w.normalize_arch("aarch64").unwrap(), "aarch64");
+        assert_eq!(w.normalize_arch("ARM64").unwrap(), "aarch64");
+        assert!(w.normalize_arch("IA64").is_err());
     }
 
     #[test]
@@ -254,6 +381,76 @@ mod tests {
         let cmd = u.cleanup_cmd("/tmp/agent-xyz");
         assert!(cmd.contains("pkill"));
         assert!(cmd.contains("rm -f"));
+    }
+
+    #[test]
+    fn remote_windows_cleanup_cmd() {
+        let w = RemoteWindows {
+            temp: "C:\\temp".into(),
+            cache: "C:\\temp\\.port-linker-cache".into(),
+        };
+        let cmd = w.cleanup_cmd("C:\\temp\\agent-xyz.exe");
+        assert!(cmd.contains("taskkill"));
+        assert!(cmd.contains("del"));
+    }
+
+    #[test]
+    fn remote_windows_detect_arch_cmd() {
+        let w = RemoteWindows {
+            temp: "C:\\temp".into(),
+            cache: "C:\\temp\\.port-linker-cache".into(),
+        };
+        let cmd = w.detect_arch_cmd();
+        assert!(cmd.contains("PROCESSOR_ARCHITECTURE"));
+    }
+
+    #[test]
+    fn windows_transfer_compressed_cmd() {
+        let w = test_helpers::windows_platform();
+        let cmd = w.transfer_compressed_cmd(r"C:\temp\agent-abc.exe");
+        assert!(cmd.contains("GzipStream"), "should use gzip decompression");
+        assert!(cmd.contains("Set-Content"), "should write via Set-Content");
+        assert!(
+            cmd.contains("agent-abc.exe"),
+            "should contain the remote path"
+        );
+    }
+
+    #[test]
+    fn windows_transfer_raw_cmd() {
+        let w = test_helpers::windows_platform();
+        let cmd = w.transfer_raw_cmd(r"C:\temp\agent-abc.exe");
+        assert!(cmd.contains("Set-Content"), "should write via Set-Content");
+        assert!(cmd.contains("Encoding Byte"), "should use byte encoding");
+    }
+
+    #[test]
+    fn windows_copy_cached_cmd() {
+        let w = test_helpers::windows_platform();
+        let cmd = w.copy_cached_cmd(r"C:\temp\cache\agent-hash", r"C:\temp\agent-abc.exe");
+        assert!(cmd.contains("Copy-Item"), "should use Copy-Item");
+        assert!(cmd.contains("agent-hash"), "should contain cache path");
+        assert!(cmd.contains("agent-abc.exe"), "should contain remote path");
+    }
+
+    #[test]
+    fn windows_populate_cache_cmd() {
+        let w = test_helpers::windows_platform();
+        let cmd = w.populate_cache_cmd(r"C:\temp\agent-abc.exe", r"C:\temp\cache\agent-hash");
+        assert!(cmd.contains("New-Item"), "should create directory");
+        assert!(
+            cmd.contains("AddDays(-7)"),
+            "should prune entries older than 7 days"
+        );
+        assert!(cmd.contains("Copy-Item"), "should copy binary to cache");
+    }
+
+    #[test]
+    fn windows_check_cache_cmd() {
+        let w = test_helpers::windows_platform();
+        let cmd = w.check_cache_cmd(r"C:\temp\cache\agent-hash");
+        assert!(cmd.contains("Test-Path"), "should use Test-Path");
+        assert!(cmd.contains("agent-hash"), "should contain cache path");
     }
 
     #[test]

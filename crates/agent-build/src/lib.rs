@@ -70,6 +70,16 @@ impl CrossTarget {
         Self::new("aarch64-apple-darwin").with_cross_fallback()
     }
 
+    /// Windows x86_64 target (MSVC).
+    pub fn windows_x86_64() -> Self {
+        Self::new("x86_64-pc-windows-msvc")
+    }
+
+    /// Windows ARM64 target (MSVC).
+    pub fn windows_aarch64() -> Self {
+        Self::new("aarch64-pc-windows-msvc")
+    }
+
     /// Set a custom cargo profile for release builds.
     pub fn with_custom_profile<S: Into<String>>(mut self, profile: S) -> Self {
         self.custom_profile = Some(profile.into());

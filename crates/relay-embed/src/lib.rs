@@ -22,11 +22,21 @@ const RELAY_AARCH64_LINUX_GZ: &[u8] = include_bytes!(concat!(
 const RELAY_AARCH64_DARWIN_GZ: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/relay-aarch64-apple-darwin.gz"));
 
+const RELAY_X86_64_WINDOWS_GZ: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/relay-x86_64-pc-windows-msvc.gz"));
+
+const RELAY_AARCH64_WINDOWS_GZ: &[u8] = include_bytes!(concat!(
+    env!("OUT_DIR"),
+    "/relay-aarch64-pc-windows-msvc.gz"
+));
+
 /// All target triples that this crate can potentially embed.
 pub const SUPPORTED_TARGETS: &[&str] = &[
     "x86_64-unknown-linux-musl",
     "aarch64-unknown-linux-musl",
     "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+    "aarch64-pc-windows-msvc",
 ];
 
 /// Return the gzip-compressed relay binary for the given OS and architecture.
@@ -41,6 +51,8 @@ pub fn get_relay_binary_for_system(os: &str, arch: &str) -> Option<&'static [u8]
         ("linux", "x86_64") => RELAY_X86_64_LINUX_GZ,
         ("linux", "aarch64") => RELAY_AARCH64_LINUX_GZ,
         ("macos" | "darwin", "aarch64") => RELAY_AARCH64_DARWIN_GZ,
+        ("windows", "x86_64") => RELAY_X86_64_WINDOWS_GZ,
+        ("windows", "aarch64") => RELAY_AARCH64_WINDOWS_GZ,
         _ => return None,
     };
 
@@ -59,6 +71,12 @@ pub fn available_relay_targets() -> Vec<&'static str> {
     }
     if !RELAY_AARCH64_DARWIN_GZ.is_empty() {
         targets.push("aarch64-apple-darwin");
+    }
+    if !RELAY_X86_64_WINDOWS_GZ.is_empty() {
+        targets.push("x86_64-pc-windows-msvc");
+    }
+    if !RELAY_AARCH64_WINDOWS_GZ.is_empty() {
+        targets.push("aarch64-pc-windows-msvc");
     }
 
     targets
@@ -89,8 +107,14 @@ mod tests {
     }
 
     #[test]
+    fn windows_targets_accessible() {
+        let _ = get_relay_binary_for_system("windows", "x86_64");
+        let _ = get_relay_binary_for_system("windows", "aarch64");
+    }
+
+    #[test]
     fn supported_targets_is_complete() {
-        assert_eq!(SUPPORTED_TARGETS.len(), 3);
+        assert_eq!(SUPPORTED_TARGETS.len(), 5);
     }
 
     #[test]
