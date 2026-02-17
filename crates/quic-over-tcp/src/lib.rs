@@ -101,7 +101,10 @@ impl TcpUdpSocket {
 }
 
 /// Background task that writes length-prefixed datagrams to the TCP stream.
-async fn writer_task<W: AsyncWrite + Unpin>(mut writer: W, mut rx: tokio::sync::mpsc::Receiver<Vec<u8>>) {
+async fn writer_task<W: AsyncWrite + Unpin>(
+    mut writer: W,
+    mut rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
+) {
     while let Some(payload) = rx.recv().await {
         let len_bytes = (payload.len() as u16).to_be_bytes();
         if let Err(e) = writer.write_all(&len_bytes).await {
@@ -135,7 +138,10 @@ async fn reader_task<R: AsyncRead + Unpin>(mut reader: R, inner: Arc<Mutex<Inner
 
         let len = u16::from_be_bytes(header_buf) as usize;
         if len == 0 || len > MAX_DATAGRAM_SIZE {
-            warn!(len, "TcpUdpSocket reader: invalid frame length, closing socket");
+            warn!(
+                len,
+                "TcpUdpSocket reader: invalid frame length, closing socket"
+            );
             let mut inner = inner.lock().await;
             inner.closed = true;
             if let Some(waker) = inner.recv_waker.take() {
