@@ -30,6 +30,7 @@ pub fn find_listener(port: u16, proto: TransportProto) -> Option<ProcessInfo> {
 }
 
 /// Send SIGTERM to a process, wait up to 1 second, then SIGKILL if still alive.
+/// On Windows, calls TerminateProcess.
 ///
 /// Returns `Ok(())` if the process was successfully terminated,
 /// `Err` with a description if termination failed.

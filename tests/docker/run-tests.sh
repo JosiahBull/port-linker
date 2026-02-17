@@ -151,6 +151,7 @@ case "$SCENARIO" in
         run_scenario "D-UDP (single hop UDP)" "$SCRIPT_DIR/scenarios/scenario_d_udp.sh"
         run_scenario "D-TCP (single hop TCP)" "$SCRIPT_DIR/scenarios/scenario_d_tcp.sh"
         run_scenario "E (direct/regression)" "$SCRIPT_DIR/scenarios/scenario_e.sh"
+        run_scenario "F (data flow)" "$SCRIPT_DIR/scenarios/scenario_f_dataflow.sh"
         ;;
     ci)
         # CI-compatible subset: skip multi-hop scenarios that require UDP relay
@@ -163,9 +164,10 @@ case "$SCENARIO" in
     d-udp|d_udp) run_scenario "D-UDP" "$SCRIPT_DIR/scenarios/scenario_d_udp.sh" ;;
     d-tcp|d_tcp) run_scenario "D-TCP" "$SCRIPT_DIR/scenarios/scenario_d_tcp.sh" ;;
     e) run_scenario "E" "$SCRIPT_DIR/scenarios/scenario_e.sh" ;;
+    f) run_scenario "F" "$SCRIPT_DIR/scenarios/scenario_f_dataflow.sh" ;;
     *)
         echo "Unknown scenario: $SCENARIO"
-        echo "Usage: $0 {all|ci|a|b|c|d-udp|d-tcp|e}"
+        echo "Usage: $0 {all|ci|a|b|c|d-udp|d-tcp|e|f}"
         exit 1
         ;;
 esac

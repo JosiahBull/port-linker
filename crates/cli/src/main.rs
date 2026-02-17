@@ -2,6 +2,7 @@ mod binding_manager;
 mod bootstrap;
 mod logging;
 mod notifications;
+mod remote_platform;
 mod ssh;
 
 use std::net::SocketAddr;
@@ -295,12 +296,20 @@ async fn run_with_phoenix_restart(args: &Args) -> Result<()> {
         let session_result =
             run_single_session(args, agent_addr, Some(&remote_agent), transport_ctx).await;
 
+        if args.echo_only && session_result.is_ok() {
+            // Force-exit immediately. The echo test has passed; the SSH
+            // session drop and remote agent cleanup can block indefinitely
+            // on the tunnel reader tasks, so skip all teardown.
+            info!("echo-only: test passed, exiting");
+            std::process::exit(0);
+        }
+
         // Step 3: Cleanup the old agent.
         remote_agent.cleanup().await;
 
         match session_result {
             Ok(()) => {
-                // Clean exit (echo-only mode or graceful shutdown).
+                // Clean exit (graceful shutdown).
                 info!("session ended cleanly");
                 return Ok(());
             }
@@ -600,11 +609,12 @@ async fn setup_tcp_bridge(
     // The bridge listener is on the target host itself, so 127.0.0.1 is correct.
     let tunnel_stream = target_session.open_tunnel("127.0.0.1", bridge_port).await?;
 
-    let socket = quic_over_tcp::TcpUdpSocket::new(tunnel_stream, "127.0.0.1:0".parse().unwrap());
+    // Use the bridge port as the synthetic address so quinn sees a valid (non-zero) port.
+    // The actual routing happens through the TCP tunnel; these addresses are only used
+    // by quinn internally to match datagrams to connections.
+    let bridge_addr: SocketAddr = SocketAddr::new("127.0.0.1".parse().unwrap(), bridge_port);
 
-    // The QUIC endpoint will connect to the synthetic bridge address.
-    // The actual routing happens through the TCP tunnel.
-    let bridge_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+    let socket = quic_over_tcp::TcpUdpSocket::new(tunnel_stream, bridge_addr, bridge_addr);
 
     info!("TCP bridge established");
     Ok((bridge_addr, socket))
@@ -817,11 +827,11 @@ async fn run_single_session(
     }
 
     if args.echo_only {
-        // Echo test passed. Skip further setup — endpoint.wait_idle()
-        // blocks indefinitely because SSH tunnel reader tasks keep the
-        // connection alive, and there is nothing left to verify.
+        // Echo test passed. Force-exit immediately — the SSH session
+        // teardown and remote agent cleanup can block indefinitely on
+        // tunnel reader tasks, and we have nothing left to verify.
         info!("echo-only: test passed, exiting");
-        return Ok(());
+        std::process::exit(0);
     }
 
     // Initialize the binding manager for port forwarding.

@@ -12,13 +12,12 @@
 use std::collections::VecDeque;
 use std::io::{self, IoSliceMut};
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 
 use bytes::BytesMut;
 use quinn::udp::{RecvMeta, Transmit};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
 /// Maximum framed datagram size (2-byte length prefix -> max 65535).
@@ -27,11 +26,6 @@ const MAX_DATAGRAM_SIZE: usize = 65535;
 /// Frame header size (2-byte BE length prefix).
 const FRAME_HEADER_SIZE: usize = 2;
 
-/// A synthetic local address used for `RecvMeta`.
-fn synthetic_addr() -> SocketAddr {
-    "127.0.0.1:0".parse().unwrap()
-}
-
 /// Inner mutable state for the `TcpUdpSocket`.
 struct Inner {
     recv_queue: VecDeque<Vec<u8>>,
@@ -39,17 +33,15 @@ struct Inner {
     closed: bool,
 }
 
-/// Bounded channel capacity for outgoing datagrams.
-const WRITE_CHANNEL_CAPACITY: usize = 256;
-
 /// A `quinn::AsyncUdpSocket` implementation over a TCP stream.
 ///
 /// Frames UDP datagrams with a 2-byte BE length prefix for transport
 /// over TCP (or any `AsyncRead + AsyncWrite` stream, such as an SSH channel).
 pub struct TcpUdpSocket {
     inner: Arc<Mutex<Inner>>,
-    write_tx: tokio::sync::mpsc::Sender<Vec<u8>>,
+    send_tx: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
     local_addr: SocketAddr,
+    remote_addr: SocketAddr,
 }
 
 impl std::fmt::Debug for TcpUdpSocket {
@@ -60,18 +52,19 @@ impl std::fmt::Debug for TcpUdpSocket {
     }
 }
 
-// Safety: The inner state is protected by tokio::sync::Mutex which is Send+Sync.
-// The writer is wrapped in Arc<Mutex<...>> with Send bounds.
-unsafe impl Send for TcpUdpSocket {}
-unsafe impl Sync for TcpUdpSocket {}
-
 impl TcpUdpSocket {
     /// Create a new `TcpUdpSocket` wrapping an async stream.
     ///
-    /// Spawns a background reader task that reads length-prefixed datagrams
-    /// from the stream and queues them for `poll_recv`, and a background
-    /// writer task that drains a bounded channel of outgoing datagrams.
-    pub fn new<S>(stream: S, local_addr: SocketAddr) -> Arc<Self>
+    /// Spawns background reader and writer tasks. The reader reads
+    /// length-prefixed datagrams from the stream and queues them for
+    /// `poll_recv`. The writer processes outgoing frames from `try_send`
+    /// via an mpsc channel, ensuring FIFO ordering.
+    ///
+    /// `local_addr` is reported by `local_addr()`. `remote_addr` is used as
+    /// the source address in `RecvMeta` so that quinn can associate incoming
+    /// datagrams with the correct connection. Both addresses must have non-zero
+    /// ports to satisfy quinn's validation.
+    pub fn new<S>(stream: S, local_addr: SocketAddr, remote_addr: SocketAddr) -> Arc<Self>
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
@@ -83,46 +76,20 @@ impl TcpUdpSocket {
             closed: false,
         }));
 
-        let (write_tx, write_rx) = tokio::sync::mpsc::channel(WRITE_CHANNEL_CAPACITY);
+        let (send_tx, send_rx) = tokio::sync::mpsc::unbounded_channel();
 
         let socket = Arc::new(TcpUdpSocket {
             inner: inner.clone(),
-            write_tx,
+            send_tx,
             local_addr,
+            remote_addr,
         });
 
-        // Spawn background reader.
+        // Spawn background reader and writer tasks.
         tokio::spawn(reader_task(read_half, inner));
-        // Spawn background writer.
-        tokio::spawn(writer_task(write_half, write_rx));
+        tokio::spawn(writer_task(write_half, send_rx));
 
         socket
-    }
-}
-
-/// Background task that writes length-prefixed datagrams to the TCP stream.
-async fn writer_task<W: AsyncWrite + Unpin>(
-    mut writer: W,
-    mut rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
-) {
-    while let Some(payload) = rx.recv().await {
-        if payload.len() > MAX_DATAGRAM_SIZE {
-            warn!(
-                len = payload.len(),
-                "TcpUdpSocket dropping oversized datagram (max {MAX_DATAGRAM_SIZE})"
-            );
-            continue;
-        }
-        let len_bytes = (payload.len() as u16).to_be_bytes();
-        if let Err(e) = writer.write_all(&len_bytes).await {
-            debug!("TcpUdpSocket write header error: {e}");
-            return;
-        }
-        if let Err(e) = writer.write_all(&payload).await {
-            debug!("TcpUdpSocket write payload error: {e}");
-            return;
-        }
-        let _ = writer.flush().await;
     }
 }
 
@@ -135,7 +102,7 @@ async fn reader_task<R: AsyncRead + Unpin>(mut reader: R, inner: Arc<Mutex<Inner
         // Read the 2-byte length prefix.
         if let Err(e) = reader.read_exact(&mut header_buf).await {
             debug!("TcpUdpSocket reader: stream closed: {e}");
-            let mut inner = inner.lock().await;
+            let mut inner = inner.lock().expect("recv lock poisoned");
             inner.closed = true;
             if let Some(waker) = inner.recv_waker.take() {
                 waker.wake();
@@ -149,7 +116,7 @@ async fn reader_task<R: AsyncRead + Unpin>(mut reader: R, inner: Arc<Mutex<Inner
                 len,
                 "TcpUdpSocket reader: invalid frame length, closing socket"
             );
-            let mut inner = inner.lock().await;
+            let mut inner = inner.lock().expect("recv lock poisoned");
             inner.closed = true;
             if let Some(waker) = inner.recv_waker.take() {
                 waker.wake();
@@ -161,7 +128,7 @@ async fn reader_task<R: AsyncRead + Unpin>(mut reader: R, inner: Arc<Mutex<Inner
         read_buf.resize(len, 0);
         if let Err(e) = reader.read_exact(&mut read_buf[..len]).await {
             debug!("TcpUdpSocket reader: stream closed during payload: {e}");
-            let mut inner = inner.lock().await;
+            let mut inner = inner.lock().expect("recv lock poisoned");
             inner.closed = true;
             if let Some(waker) = inner.recv_waker.take() {
                 waker.wake();
@@ -172,12 +139,33 @@ async fn reader_task<R: AsyncRead + Unpin>(mut reader: R, inner: Arc<Mutex<Inner
         let datagram = read_buf[..len].to_vec();
         read_buf.clear();
 
-        let mut inner = inner.lock().await;
+        let mut inner = inner.lock().expect("recv lock poisoned");
         inner.recv_queue.push_back(datagram);
         if let Some(waker) = inner.recv_waker.take() {
             waker.wake();
         }
     }
+}
+
+/// Background task that writes length-prefixed frames to the TCP stream.
+///
+/// Receives pre-framed data from the mpsc channel (already includes the
+/// 2-byte length prefix) and writes it to the stream in order.
+async fn writer_task<W: AsyncWrite + Unpin>(
+    mut writer: W,
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+) {
+    while let Some(frame) = rx.recv().await {
+        if let Err(e) = writer.write_all(&frame).await {
+            debug!("TcpUdpSocket writer: write error: {e}");
+            return;
+        }
+        if let Err(e) = writer.flush().await {
+            debug!("TcpUdpSocket writer: flush error: {e}");
+            return;
+        }
+    }
+    debug!("TcpUdpSocket writer: channel closed");
 }
 
 impl quinn::AsyncUdpSocket for TcpUdpSocket {
@@ -196,17 +184,18 @@ impl quinn::AsyncUdpSocket for TcpUdpSocket {
             ));
         }
 
-        // Enqueue the datagram for the background writer task.
-        // try_send is non-blocking; if the channel is full we report WouldBlock
-        // so QUIC can apply backpressure.
-        self.write_tx.try_send(data.to_vec()).map_err(|e| match e {
-            tokio::sync::mpsc::error::TrySendError::Full(_) => {
-                io::Error::new(io::ErrorKind::WouldBlock, "write channel full")
-            }
-            tokio::sync::mpsc::error::TrySendError::Closed(_) => {
-                io::Error::new(io::ErrorKind::BrokenPipe, "writer task closed")
-            }
-        })
+        // Build the framed message: [2-byte BE length][payload].
+        let mut frame = Vec::with_capacity(FRAME_HEADER_SIZE + data.len());
+        frame.extend_from_slice(&(data.len() as u16).to_be_bytes());
+        frame.extend_from_slice(data);
+
+        // Send to the writer task via the channel. This is non-blocking
+        // and preserves FIFO ordering.
+        self.send_tx
+            .send(frame)
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "TCP writer task closed"))?;
+
+        Ok(())
     }
 
     fn poll_recv(
@@ -215,16 +204,7 @@ impl quinn::AsyncUdpSocket for TcpUdpSocket {
         bufs: &mut [IoSliceMut<'_>],
         meta: &mut [RecvMeta],
     ) -> Poll<io::Result<usize>> {
-        // We need to check the queue in a non-async way.
-        // Use try_lock to avoid blocking.
-        let mut inner = match self.inner.try_lock() {
-            Ok(guard) => guard,
-            Err(_) => {
-                // Can't acquire lock, return pending and rely on the lock
-                // holder (reader_task) to wake us when it pushes a datagram.
-                return Poll::Pending;
-            }
-        };
+        let mut inner = self.inner.lock().expect("recv lock poisoned");
 
         if inner.recv_queue.is_empty() {
             if inner.closed {
@@ -243,7 +223,7 @@ impl quinn::AsyncUdpSocket for TcpUdpSocket {
             let len = datagram.len().min(bufs[i].len());
             bufs[i][..len].copy_from_slice(&datagram[..len]);
             meta[i] = RecvMeta {
-                addr: synthetic_addr(),
+                addr: self.remote_addr,
                 len,
                 stride: len,
                 ecn: None,
@@ -281,7 +261,7 @@ struct TcpUdpPoller {
 
 impl quinn::UdpPoller for TcpUdpPoller {
     fn poll_writable(self: std::pin::Pin<&mut Self>, _cx: &mut Context) -> Poll<io::Result<()>> {
-        // TCP is always writable (writes are queued).
+        // TCP is always writable (writes are queued via channel).
         Poll::Ready(Ok(()))
     }
 }
@@ -289,12 +269,6 @@ impl quinn::UdpPoller for TcpUdpPoller {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_synthetic_addr() {
-        let addr = synthetic_addr();
-        assert!(addr.ip().is_loopback());
-    }
 
     #[test]
     fn test_frame_header_size() {
