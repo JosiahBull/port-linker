@@ -19,7 +19,9 @@ NC='\033[0m'
 
 info() { echo -e "${YELLOW}INFO${NC}: $1"; }
 pass() { echo -e "${GREEN}PASS${NC}: $1"; }
-fail() { echo -e "${RED}FAIL${NC}: $1"; }
+fail() { echo -e "${RED}FAIL${NC}: $1"; exit 1; }
+# Non-fatal failure reporter for per-scenario results (does not exit).
+scenario_fail() { echo -e "${RED}FAIL${NC}: $1"; }
 
 # Parse arguments.
 SCENARIO="${1:-all}"
@@ -137,7 +139,7 @@ run_scenario() {
         pass "Scenario $name"
         PASSED=$((PASSED + 1))
     else
-        fail "Scenario $name"
+        scenario_fail "Scenario $name"
         FAILED=$((FAILED + 1))
         ERRORS="$ERRORS  - Scenario $name\n"
     fi

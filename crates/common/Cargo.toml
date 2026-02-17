@@ -8,7 +8,9 @@ thiserror.workspace = true
 dirs.workspace = true
 protocol = { path = "../protocol" }
 tracing.workspace = true
-notify-rust.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+notify-rust.workspace = true

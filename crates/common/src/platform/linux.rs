@@ -293,6 +293,7 @@ impl super::Notifier for NotifyRustNotifier {
         body: &str,
         is_error: bool,
         with_sound: bool,
+        icon: Option<&std::path::Path>,
     ) -> Result<(), String> {
         use notify_rust::{Hint, Notification, Urgency};
 
@@ -302,6 +303,10 @@ impl super::Notifier for NotifyRustNotifier {
             .summary(title)
             .body(body)
             .appname("port-linker");
+
+        if let Some(icon_path) = icon {
+            notification.icon(&icon_path.display().to_string());
+        }
 
         if is_error {
             notification.urgency(Urgency::Critical);

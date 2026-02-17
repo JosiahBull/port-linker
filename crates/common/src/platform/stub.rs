@@ -54,6 +54,7 @@ impl super::Notifier for StubNotifier {
         _body: &str,
         _is_error: bool,
         _with_sound: bool,
+        _icon: Option<&std::path::Path>,
     ) -> Result<(), String> {
         Ok(())
     }
@@ -74,7 +75,7 @@ mod tests {
     #[test]
     fn test_stub_notifier_succeeds() {
         let notifier = StubNotifier;
-        let result = notifier.show("title", "body", false, true);
+        let result = notifier.show("title", "body", false, true, None);
         assert!(result.is_ok(), "stub notifier should always succeed");
     }
 }

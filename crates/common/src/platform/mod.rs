@@ -77,8 +77,14 @@ pub trait PortScanner: Send + 'static {
 
 /// Trait for showing desktop notifications.
 pub trait Notifier: Send + Sync + 'static {
-    fn show(&self, title: &str, body: &str, is_error: bool, with_sound: bool)
-    -> Result<(), String>;
+    fn show(
+        &self,
+        title: &str,
+        body: &str,
+        is_error: bool,
+        with_sound: bool,
+        icon: Option<&std::path::Path>,
+    ) -> Result<(), String>;
 }
 
 /// The unified platform abstraction.

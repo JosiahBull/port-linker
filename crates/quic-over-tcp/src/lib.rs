@@ -39,13 +39,16 @@ struct Inner {
     closed: bool,
 }
 
+/// Bounded channel capacity for outgoing datagrams.
+const WRITE_CHANNEL_CAPACITY: usize = 256;
+
 /// A `quinn::AsyncUdpSocket` implementation over a TCP stream.
 ///
 /// Frames UDP datagrams with a 2-byte BE length prefix for transport
 /// over TCP (or any `AsyncRead + AsyncWrite` stream, such as an SSH channel).
 pub struct TcpUdpSocket {
     inner: Arc<Mutex<Inner>>,
-    writer: Arc<Mutex<Box<dyn AsyncWrite + Unpin + Send>>>,
+    write_tx: tokio::sync::mpsc::Sender<Vec<u8>>,
     local_addr: SocketAddr,
 }
 
@@ -66,7 +69,8 @@ impl TcpUdpSocket {
     /// Create a new `TcpUdpSocket` wrapping an async stream.
     ///
     /// Spawns a background reader task that reads length-prefixed datagrams
-    /// from the stream and queues them for `poll_recv`.
+    /// from the stream and queues them for `poll_recv`, and a background
+    /// writer task that drains a bounded channel of outgoing datagrams.
     pub fn new<S>(stream: S, local_addr: SocketAddr) -> Arc<Self>
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -79,16 +83,36 @@ impl TcpUdpSocket {
             closed: false,
         }));
 
+        let (write_tx, write_rx) = tokio::sync::mpsc::channel(WRITE_CHANNEL_CAPACITY);
+
         let socket = Arc::new(TcpUdpSocket {
             inner: inner.clone(),
-            writer: Arc::new(Mutex::new(Box::new(write_half))),
+            write_tx,
             local_addr,
         });
 
         // Spawn background reader.
         tokio::spawn(reader_task(read_half, inner));
+        // Spawn background writer.
+        tokio::spawn(writer_task(write_half, write_rx));
 
         socket
+    }
+}
+
+/// Background task that writes length-prefixed datagrams to the TCP stream.
+async fn writer_task<W: AsyncWrite + Unpin>(mut writer: W, mut rx: tokio::sync::mpsc::Receiver<Vec<u8>>) {
+    while let Some(payload) = rx.recv().await {
+        let len_bytes = (payload.len() as u16).to_be_bytes();
+        if let Err(e) = writer.write_all(&len_bytes).await {
+            debug!("TcpUdpSocket write header error: {e}");
+            return;
+        }
+        if let Err(e) = writer.write_all(&payload).await {
+            debug!("TcpUdpSocket write payload error: {e}");
+            return;
+        }
+        let _ = writer.flush().await;
     }
 }
 
@@ -111,8 +135,13 @@ async fn reader_task<R: AsyncRead + Unpin>(mut reader: R, inner: Arc<Mutex<Inner
 
         let len = u16::from_be_bytes(header_buf) as usize;
         if len == 0 || len > MAX_DATAGRAM_SIZE {
-            warn!(len, "TcpUdpSocket reader: invalid frame length");
-            continue;
+            warn!(len, "TcpUdpSocket reader: invalid frame length, closing socket");
+            let mut inner = inner.lock().await;
+            inner.closed = true;
+            if let Some(waker) = inner.recv_waker.take() {
+                waker.wake();
+            }
+            return;
         }
 
         // Read the payload.
@@ -154,26 +183,17 @@ impl quinn::AsyncUdpSocket for TcpUdpSocket {
             ));
         }
 
-        let writer = self.writer.clone();
-        let len_bytes = (data.len() as u16).to_be_bytes();
-        let payload = data.to_vec();
-
-        // Spawn a task to write the framed datagram.
-        // try_send needs to be non-blocking, so we spawn the write.
-        tokio::spawn(async move {
-            let mut writer = writer.lock().await;
-            if let Err(e) = writer.write_all(&len_bytes).await {
-                debug!("TcpUdpSocket write header error: {e}");
-                return;
+        // Enqueue the datagram for the background writer task.
+        // try_send is non-blocking; if the channel is full we report WouldBlock
+        // so QUIC can apply backpressure.
+        self.write_tx.try_send(data.to_vec()).map_err(|e| match e {
+            tokio::sync::mpsc::error::TrySendError::Full(_) => {
+                io::Error::new(io::ErrorKind::WouldBlock, "write channel full")
             }
-            if let Err(e) = writer.write_all(&payload).await {
-                debug!("TcpUdpSocket write payload error: {e}");
-                return;
+            tokio::sync::mpsc::error::TrySendError::Closed(_) => {
+                io::Error::new(io::ErrorKind::BrokenPipe, "writer task closed")
             }
-            let _ = writer.flush().await;
-        });
-
-        Ok(())
+        })
     }
 
     fn poll_recv(
@@ -187,8 +207,8 @@ impl quinn::AsyncUdpSocket for TcpUdpSocket {
         let mut inner = match self.inner.try_lock() {
             Ok(guard) => guard,
             Err(_) => {
-                // Can't acquire lock, register waker and return pending.
-                cx.waker().wake_by_ref();
+                // Can't acquire lock, return pending and rely on the lock
+                // holder (reader_task) to wake us when it pushes a datagram.
                 return Poll::Pending;
             }
         };

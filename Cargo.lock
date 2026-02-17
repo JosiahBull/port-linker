@@ -2021,8 +2021,6 @@ version = "0.3.0"
 dependencies = [
  "assets",
  "common",
- "dirs",
- "notify-rust",
  "thiserror 2.0.18",
  "tracing",
 ]

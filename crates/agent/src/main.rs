@@ -83,7 +83,7 @@ async fn run(log_rx: tokio::sync::mpsc::Receiver<protocol::AgentLogEvent>) -> Re
     // 3b. Bind a TCP bridge listener for QUIC-over-TCP fallback.
     // This allows the host to tunnel QUIC datagrams over an SSH direct-tcpip
     // channel when UDP is blocked between host and agent.
-    let bridge_listener = tokio::net::TcpListener::bind("0.0.0.0:0")
+    let bridge_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .map_err(Error::Io)?;
     let bridge_port = bridge_listener.local_addr().map_err(Error::Io)?.port();

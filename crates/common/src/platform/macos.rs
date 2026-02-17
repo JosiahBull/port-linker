@@ -143,15 +143,19 @@ impl super::Notifier for MacOsNotifier {
         body: &str,
         is_error: bool,
         with_sound: bool,
+        icon: Option<&std::path::Path>,
     ) -> Result<(), String> {
         use std::process::Command;
 
         // Try terminal-notifier first
+        let mut args = vec!["-title", title, "-message", body];
+        let icon_str;
+        if let Some(icon_path) = icon {
+            icon_str = icon_path.display().to_string();
+            args.extend_from_slice(&["-appIcon", &icon_str]);
+        }
         if let Ok(output) = Command::new("terminal-notifier")
-            .arg("-title")
-            .arg(title)
-            .arg("-message")
-            .arg(body)
+            .args(&args)
             .args(if with_sound {
                 vec!["-sound", if is_error { "Basso" } else { "Pop" }]
             } else {

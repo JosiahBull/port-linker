@@ -34,11 +34,16 @@ fn get_logo_path() -> Option<&'static PathBuf> {
 }
 
 pub fn show_notification(event: &NotificationEvent, with_sound: bool) -> Result<()> {
-    // Ensure logo is cached (best-effort, only affects platforms that use it).
-    let _ = get_logo_path();
+    let icon_path = get_logo_path();
 
     let notifier = <CurrentPlatform as Platform>::Notifier::default();
     notifier
-        .show(&event.title(), &event.body(), event.is_error(), with_sound)
+        .show(
+            &event.title(),
+            &event.body(),
+            event.is_error(),
+            with_sound,
+            icon_path.map(|p| p.as_path()),
+        )
         .map_err(NotifyError::Notification)
 }
