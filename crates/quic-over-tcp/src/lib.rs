@@ -204,7 +204,14 @@ impl quinn::AsyncUdpSocket for TcpUdpSocket {
         bufs: &mut [IoSliceMut<'_>],
         meta: &mut [RecvMeta],
     ) -> Poll<io::Result<usize>> {
-        let mut inner = self.inner.lock().expect("recv lock poisoned");
+        let mut inner = match self.inner.try_lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                // Avoid blocking the async executor; reschedule and retry.
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+        };
 
         if inner.recv_queue.is_empty() {
             if inner.closed {

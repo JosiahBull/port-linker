@@ -53,6 +53,17 @@ pub trait RemotePlatform: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
+// Shell escaping
+// ---------------------------------------------------------------------------
+
+/// Escape a string for safe embedding in single-quoted shell arguments.
+///
+/// Replaces each `'` with `'\''` (end quote, escaped literal quote, reopen quote).
+fn shell_escape(s: &str) -> String {
+    s.replace('\'', "'\\''")
+}
+
+// ---------------------------------------------------------------------------
 // Unix remote (Linux or macOS)
 // ---------------------------------------------------------------------------
 
@@ -69,31 +80,39 @@ impl RemotePlatform for RemoteUnix {
     }
 
     fn transfer_compressed_cmd(&self, path: &str) -> String {
-        format!("gunzip -c > '{path}' && chmod +x '{path}'")
+        let p = shell_escape(path);
+        format!("gunzip -c > '{p}' && chmod +x '{p}'")
     }
 
     fn transfer_raw_cmd(&self, path: &str) -> String {
-        format!("cat > '{path}' && chmod +x '{path}'")
+        let p = shell_escape(path);
+        format!("cat > '{p}' && chmod +x '{p}'")
     }
 
     fn check_cache_cmd(&self, cache_path: &str) -> String {
-        format!("test -x '{cache_path}' && echo OK")
+        let cp = shell_escape(cache_path);
+        format!("test -x '{cp}' && echo OK")
     }
 
     fn copy_cached_cmd(&self, cache_path: &str, remote_path: &str) -> String {
-        format!("cp '{cache_path}' '{remote_path}' && chmod +x '{remote_path}'")
+        let cp = shell_escape(cache_path);
+        let rp = shell_escape(remote_path);
+        format!("cp '{cp}' '{rp}' && chmod +x '{rp}'")
     }
 
     fn populate_cache_cmd(&self, remote_path: &str, cache_path: &str) -> String {
-        let cache_dir = &self.cache;
+        let cd = shell_escape(&self.cache);
+        let rp = shell_escape(remote_path);
+        let cp = shell_escape(cache_path);
         format!(
-            "mkdir -p '{cache_dir}' && cp '{remote_path}' '{cache_path}' && \
-             find '{cache_dir}' -name 'agent-*' -mtime +7 -delete 2>/dev/null; true"
+            "mkdir -p '{cd}' && cp '{rp}' '{cp}' && \
+             find '{cd}' -name 'agent-*' -mtime +7 -delete 2>/dev/null; true"
         )
     }
 
     fn cleanup_cmd(&self, path: &str) -> String {
-        format!("pkill -f '{path}' 2>/dev/null; rm -f '{path}'")
+        let p = shell_escape(path);
+        format!("pkill -f '{p}' 2>/dev/null; rm -f '{p}'")
     }
 
     fn cache_dir(&self) -> &str {

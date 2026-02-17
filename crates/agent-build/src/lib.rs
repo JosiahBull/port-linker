@@ -296,8 +296,12 @@ pub fn build_for_targets(config: &BuildConfig) -> HashMap<String, BuildResult> {
 
     let base_target_dir = config.workspace_root.join("target").join("cross-build");
 
-    // Create placeholder files for all targets first
-    // This ensures include_bytes! doesn't fail even if builds fail
+    // Create placeholder files for all targets first, before spawning any
+    // build threads. This ensures include_bytes! doesn't fail even if builds
+    // fail. There is no race with the parallel builds below because
+    // std::thread::scope provides a happens-before guarantee: all work here
+    // completes before any spawned thread starts, and each thread writes to
+    // its own target-specific output file.
     for target in &config.targets {
         let dest = config
             .out_dir

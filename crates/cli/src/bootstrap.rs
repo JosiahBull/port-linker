@@ -436,7 +436,8 @@ async fn execute_and_handshake(agent: &RemoteAgent) -> Result<AgentHandshake> {
             } else if let Some(bp) = line.strip_prefix("BRIDGE_PORT=") {
                 bridge_port = bp.trim().parse().ok();
             }
-            got_ready && port.is_some() && token.is_some() && bridge_port.is_some()
+            // BRIDGE_PORT is optional for backward compatibility with older agents.
+            got_ready && port.is_some() && token.is_some()
         })
         .await?;
 

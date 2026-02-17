@@ -79,6 +79,7 @@ mod tests {
 
     #[test]
     fn unsupported_os_returns_none() {
+        assert!(get_binary_for_system("windows", "x86_64").is_none());
         assert!(get_binary_for_system("freebsd", "aarch64").is_none());
     }
 

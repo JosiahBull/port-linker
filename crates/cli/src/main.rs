@@ -296,13 +296,8 @@ async fn run_with_phoenix_restart(args: &Args) -> Result<()> {
         let session_result =
             run_single_session(args, agent_addr, Some(&remote_agent), transport_ctx).await;
 
-        if args.echo_only && session_result.is_ok() {
-            // Force-exit immediately. The echo test has passed; the SSH
-            // session drop and remote agent cleanup can block indefinitely
-            // on the tunnel reader tasks, so skip all teardown.
-            info!("echo-only: test passed, exiting");
-            std::process::exit(0);
-        }
+        // Note: in echo-only mode, run_single_session calls process::exit(0)
+        // directly and never returns here.
 
         // Step 3: Cleanup the old agent.
         remote_agent.cleanup().await;
