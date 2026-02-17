@@ -41,7 +41,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Run cargo check
-        run: cargo check --workspace --all-targets --all-features --exclude agent-embed --exclude relay-embed
+        run: cargo check --workspace --all-targets --all-features
 
   fmt:
     name: Format
@@ -79,7 +79,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Run clippy
-        run: cargo clippy --workspace --all-targets --all-features --exclude agent-embed --exclude relay-embed -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
   test-unit:
     name: Unit Tests
@@ -122,7 +122,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Build documentation
-        run: cargo doc --workspace --all-features --no-deps --exclude agent-embed --exclude relay-embed
+        run: cargo doc --workspace --all-features --no-deps
 
   test-docker:
     name: Docker Integration Tests
