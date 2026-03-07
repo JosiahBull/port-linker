@@ -72,6 +72,16 @@ verify_tcp_echo() {
     [ "$result" = "$test_string" ]
 }
 
+# Detect the musl agent binary built separately by CI. In debug mode the
+# embedded binaries are empty (cross-compilation is skipped for speed), so
+# we pass --agent-binary pointing to the musl build when available.
+_resolve_agent_args() {
+    local musl_agent="$REPO_ROOT/target/x86_64-unknown-linux-musl/debug/port-linker-agent"
+    if [ -x "$musl_agent" ]; then
+        echo "--agent-binary" "$musl_agent"
+    fi
+}
+
 # Run port-linker in background (forwarding mode, not --echo-only).
 # Sets PLK_BG_PID to the backgrounded PID.
 run_port_linker_bg() {
@@ -89,6 +99,7 @@ run_port_linker_bg() {
     SSH_AUTH_SOCK="" RUST_LOG=debug "$plk_bin" \
         --remote "testuser@target" \
         --ssh-host-key-verification accept-all \
+        $(_resolve_agent_args) \
         "${extra_args[@]}" >"/tmp/plk-bg-$$.log" 2>&1 &
     PLK_BG_PID=$!
     info "port-linker started in background (PID: $PLK_BG_PID)"
@@ -112,6 +123,7 @@ run_port_linker() {
         --remote "testuser@target" \
         --ssh-host-key-verification accept-all \
         --echo-only \
+        $(_resolve_agent_args) \
         "${extra_args[@]}" 2>&1
 }
 

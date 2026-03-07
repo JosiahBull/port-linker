@@ -16,11 +16,20 @@ if [ ! -x "$plk_bin" ]; then
     plk_bin="$REPO_ROOT/target/release/port-linker"
 fi
 
+# Use the separately-built musl agent binary if available (embedded binaries
+# are empty in debug mode to avoid slow cross-compilation in CI).
+AGENT_ARGS=()
+musl_agent="$REPO_ROOT/target/x86_64-unknown-linux-musl/debug/port-linker-agent"
+if [ -x "$musl_agent" ]; then
+    AGENT_ARGS+=(--agent-binary "$musl_agent")
+fi
+
 info "running port-linker with --remote testuser@jump1 (direct, no ProxyJump)"
 output=$(SSH_AUTH_SOCK="" RUST_LOG=debug timeout 60 "$plk_bin" \
     --remote "testuser@jump1" \
     --ssh-host-key-verification accept-all \
-    --echo-only 2>&1) && rc=$? || rc=$?
+    --echo-only \
+    "${AGENT_ARGS[@]}" 2>&1) && rc=$? || rc=$?
 
 if [ $rc -eq 0 ]; then
     pass "Scenario E: direct connection works (regression test)"
