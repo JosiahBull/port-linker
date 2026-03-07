@@ -63,11 +63,19 @@ enum TransportContext {
     },
 }
 
-/// Maximum number of Phoenix Agent restart attempts before giving up.
-const MAX_RESTART_ATTEMPTS: u32 = 5;
+/// Maximum number of consecutive bootstrap failures before giving up
+/// (when no session has ever been established).
+const MAX_INITIAL_ATTEMPTS: u32 = 5;
 
-/// Delay between restart attempts (seconds).
-const RESTART_DELAY_SECS: u64 = 3;
+/// Delay between initial bootstrap retries (seconds).
+const INITIAL_RETRY_DELAY_SECS: u64 = 3;
+
+/// Maximum number of reconnection attempts after a previously successful
+/// session is lost. At one attempt per minute this gives ~4 hours.
+const MAX_RECONNECT_ATTEMPTS: u32 = 240;
+
+/// Delay between reconnection attempts after a session loss (seconds).
+const RECONNECT_DELAY_SECS: u64 = 60;
 
 // ---------------------------------------------------------------------------
 // CLI arguments
@@ -251,13 +259,28 @@ async fn main() -> Result<()> {
 ///
 /// If the QUIC connection drops (agent crash, network failure), the host
 /// automatically cleans up, re-deploys the agent via SSH, and resumes
-/// port forwarding. Gives up after [`MAX_RESTART_ATTEMPTS`] consecutive
-/// failures.
+/// port forwarding.
+///
+/// **Retry policy:**
+/// - Before the first successful session: retries up to
+///   [`MAX_INITIAL_ATTEMPTS`] times with a [`INITIAL_RETRY_DELAY_SECS`]
+///   delay between attempts.
+/// - After a session has been established at least once: retries up to
+///   [`MAX_RECONNECT_ATTEMPTS`] times (≈ 4 hours at 1-minute intervals)
+///   with a [`RECONNECT_DELAY_SECS`] delay. Each successful session
+///   resets the reconnection counter.
 async fn run_with_phoenix_restart(args: &Args) -> Result<()> {
     let remote = args.remote.as_ref().unwrap();
     let mut consecutive_failures: u32 = 0;
+    let mut ever_connected = false;
 
     loop {
+        let (max_attempts, delay_secs) = if ever_connected {
+            (MAX_RECONNECT_ATTEMPTS, RECONNECT_DELAY_SECS)
+        } else {
+            (MAX_INITIAL_ATTEMPTS, INITIAL_RETRY_DELAY_SECS)
+        };
+
         info!(
             remote = %remote,
             attempt = consecutive_failures + 1,
@@ -278,19 +301,24 @@ async fn run_with_phoenix_restart(args: &Args) -> Result<()> {
                 error!(
                     %e,
                     attempt = consecutive_failures,
-                    max = MAX_RESTART_ATTEMPTS,
+                    max = max_attempts,
                     "SSH bootstrap failed"
                 );
-                if consecutive_failures >= MAX_RESTART_ATTEMPTS {
+                if consecutive_failures >= max_attempts {
                     return Err(Error::Protocol(format!(
-                        "gave up after {MAX_RESTART_ATTEMPTS} consecutive restart failures: {e}"
+                        "gave up after {consecutive_failures} consecutive restart failures: {e}"
                     )));
                 }
-                warn!(delay = RESTART_DELAY_SECS, "waiting before retry");
-                tokio::time::sleep(std::time::Duration::from_secs(RESTART_DELAY_SECS)).await;
+                warn!(delay = delay_secs, "waiting before retry");
+                tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
                 continue;
             }
         };
+
+        // Bootstrap succeeded — reset the failure counter so that previous
+        // transient failures don't count against the reconnection budget.
+        consecutive_failures = 0;
+        ever_connected = true;
 
         // Step 2: Run the session.
         let session_result =
@@ -310,18 +338,18 @@ async fn run_with_phoenix_restart(args: &Args) -> Result<()> {
                 warn!(
                     %e,
                     attempt = consecutive_failures,
-                    max = MAX_RESTART_ATTEMPTS,
+                    max = MAX_RECONNECT_ATTEMPTS,
                     "session lost, attempting Phoenix restart"
                 );
 
-                if consecutive_failures >= MAX_RESTART_ATTEMPTS {
+                if consecutive_failures >= MAX_RECONNECT_ATTEMPTS {
                     return Err(Error::Protocol(format!(
-                        "gave up after {MAX_RESTART_ATTEMPTS} consecutive restart failures: {e}"
+                        "gave up after {consecutive_failures} consecutive restart failures: {e}"
                     )));
                 }
 
-                warn!(delay = RESTART_DELAY_SECS, "waiting before restart");
-                tokio::time::sleep(std::time::Duration::from_secs(RESTART_DELAY_SECS)).await;
+                warn!(delay = RECONNECT_DELAY_SECS, "waiting before restart");
+                tokio::time::sleep(std::time::Duration::from_secs(RECONNECT_DELAY_SECS)).await;
             }
         }
     }
