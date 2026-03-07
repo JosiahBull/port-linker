@@ -302,6 +302,25 @@ impl ToolchainInfo {
 ///
 /// Returns a map of target triple to build result.
 pub fn build_for_targets(config: &BuildConfig) -> HashMap<String, BuildResult> {
+    // In debug mode, skip cross-compilation entirely. Embedded binaries are only
+    // useful in release builds; attempting to cross-compile in debug mode spawns
+    // many cargo subprocesses that recompile all proc-macros from scratch (each
+    // target gets its own CARGO_TARGET_DIR), which easily exceeds CI timeouts.
+    if !config.is_release {
+        return config
+            .targets
+            .iter()
+            .map(|target| {
+                (
+                    target.triple.clone(),
+                    BuildResult::Failed {
+                        reason: "Skipping cross-compilation in debug mode".to_string(),
+                    },
+                )
+            })
+            .collect();
+    }
+
     let toolchain = ToolchainInfo::detect();
 
     let base_target_dir = config.workspace_root.join("target").join("cross-build");
