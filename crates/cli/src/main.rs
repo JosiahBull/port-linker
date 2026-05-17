@@ -63,11 +63,26 @@ enum TransportContext {
     },
 }
 
-/// Maximum number of Phoenix Agent restart attempts before giving up.
-const MAX_RESTART_ATTEMPTS: u32 = 5;
+/// Initial delay between restart attempts (seconds). Each subsequent failure
+/// doubles this delay until [`MAX_RESTART_DELAY_SECS`] is reached.
+const INITIAL_RESTART_DELAY_SECS: u64 = 3;
 
-/// Delay between restart attempts (seconds).
-const RESTART_DELAY_SECS: u64 = 3;
+/// Maximum delay between restart attempts (seconds). The exponential backoff
+/// is capped here, after which retries continue indefinitely at this interval.
+const MAX_RESTART_DELAY_SECS: u64 = 300;
+
+/// Compute the exponential backoff delay for a given (1-based) consecutive
+/// failure count, capped at [`MAX_RESTART_DELAY_SECS`].
+fn restart_backoff_secs(consecutive_failures: u32) -> u64 {
+    // Cap the exponent so the shift cannot overflow `u64`. Anything past ~20
+    // would saturate the cap anyway.
+    let exp = consecutive_failures.saturating_sub(1).min(20);
+    let multiplier = 1u64.checked_shl(exp).unwrap_or(u64::MAX);
+    INITIAL_RESTART_DELAY_SECS
+        .checked_mul(multiplier)
+        .unwrap_or(MAX_RESTART_DELAY_SECS)
+        .min(MAX_RESTART_DELAY_SECS)
+}
 
 // ---------------------------------------------------------------------------
 // CLI arguments
@@ -251,8 +266,8 @@ async fn main() -> Result<()> {
 ///
 /// If the QUIC connection drops (agent crash, network failure), the host
 /// automatically cleans up, re-deploys the agent via SSH, and resumes
-/// port forwarding. Gives up after [`MAX_RESTART_ATTEMPTS`] consecutive
-/// failures.
+/// port forwarding. Retries indefinitely with exponential backoff capped
+/// at [`MAX_RESTART_DELAY_SECS`].
 async fn run_with_phoenix_restart(args: &Args) -> Result<()> {
     let remote = args.remote.as_ref().unwrap();
     let mut consecutive_failures: u32 = 0;
@@ -260,7 +275,7 @@ async fn run_with_phoenix_restart(args: &Args) -> Result<()> {
     loop {
         info!(
             remote = %remote,
-            attempt = consecutive_failures + 1,
+            attempt = consecutive_failures.saturating_add(1),
             "bootstrapping agent via SSH"
         );
 
@@ -274,27 +289,24 @@ async fn run_with_phoenix_restart(args: &Args) -> Result<()> {
         } = match bootstrap_result {
             Ok(result) => result,
             Err(e) => {
-                consecutive_failures += 1;
+                consecutive_failures = consecutive_failures.saturating_add(1);
+                let delay = restart_backoff_secs(consecutive_failures);
                 error!(
                     %e,
                     attempt = consecutive_failures,
-                    max = MAX_RESTART_ATTEMPTS,
-                    "SSH bootstrap failed"
+                    delay,
+                    "SSH bootstrap failed; retrying with backoff"
                 );
-                if consecutive_failures >= MAX_RESTART_ATTEMPTS {
-                    return Err(Error::Protocol(format!(
-                        "gave up after {MAX_RESTART_ATTEMPTS} consecutive restart failures: {e}"
-                    )));
-                }
-                warn!(delay = RESTART_DELAY_SECS, "waiting before retry");
-                tokio::time::sleep(std::time::Duration::from_secs(RESTART_DELAY_SECS)).await;
+                tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
                 continue;
             }
         };
 
         // Step 2: Run the session.
+        let session_start = std::time::Instant::now();
         let session_result =
             run_single_session(args, agent_addr, Some(&remote_agent), transport_ctx).await;
+        let session_lasted = session_start.elapsed();
 
         // Step 3: Cleanup the old agent.
         remote_agent.cleanup().await;
@@ -306,22 +318,21 @@ async fn run_with_phoenix_restart(args: &Args) -> Result<()> {
                 return Ok(());
             }
             Err(e) => {
-                consecutive_failures += 1;
+                // Reset backoff if the session was stable for longer than the
+                // max delay — a dropped long-running session should reconnect
+                // quickly, not at the capped interval.
+                if session_lasted >= std::time::Duration::from_secs(MAX_RESTART_DELAY_SECS) {
+                    consecutive_failures = 0;
+                }
+                consecutive_failures = consecutive_failures.saturating_add(1);
+                let delay = restart_backoff_secs(consecutive_failures);
                 warn!(
                     %e,
                     attempt = consecutive_failures,
-                    max = MAX_RESTART_ATTEMPTS,
-                    "session lost, attempting Phoenix restart"
+                    delay,
+                    "session lost, retrying with backoff"
                 );
-
-                if consecutive_failures >= MAX_RESTART_ATTEMPTS {
-                    return Err(Error::Protocol(format!(
-                        "gave up after {MAX_RESTART_ATTEMPTS} consecutive restart failures: {e}"
-                    )));
-                }
-
-                warn!(delay = RESTART_DELAY_SECS, "waiting before restart");
-                tokio::time::sleep(std::time::Duration::from_secs(RESTART_DELAY_SECS)).await;
+                tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
             }
         }
     }

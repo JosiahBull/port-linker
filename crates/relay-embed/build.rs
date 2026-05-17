@@ -11,8 +11,10 @@ fn main() {
         .target(CrossTarget::darwin_aarch64().with_custom_profile("agent-release"));
 
     let results = build_for_targets(&config);
+    let is_release = config.is_release;
 
-    // Gzip-compress successful builds, write empty placeholders for failures.
+    // Gzip-compress successful builds; fail hard in release mode on any failure.
+    let mut failures = Vec::new();
     for target in &config.targets {
         let raw_path = config.out_dir.join(agent_build::output_filename(
             &config.package,
@@ -37,11 +39,25 @@ fn main() {
             continue;
         }
 
-        // Failed or empty build — write empty placeholder.
-        fs::write(&gz_path, b"").unwrap();
-        eprintln!(
-            "cargo:warning=No relay binary for {}, using empty placeholder",
-            target.triple
+        if is_release {
+            failures.push(target.triple.clone());
+        } else {
+            // Debug builds: write empty placeholder so compilation can proceed.
+            fs::write(&gz_path, b"").unwrap();
+            eprintln!(
+                "cargo:warning=No relay binary for {}, using empty placeholder (debug build)",
+                target.triple
+            );
+        }
+    }
+
+    if !failures.is_empty() {
+        panic!(
+            "Failed to build relay binaries for targets: {}. \
+             Release builds require all targets to succeed. \
+             Ensure nightly + rust-src are installed and cross-rs + Docker are available \
+             for Linux musl targets.",
+            failures.join(", ")
         );
     }
 

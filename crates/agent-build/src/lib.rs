@@ -250,6 +250,7 @@ impl ToolchainInfo {
 
     fn check_nightly() -> bool {
         Command::new("rustup")
+            .env_remove("RUSTUP_TOOLCHAIN")
             .args(["run", "nightly", "rustc", "--version"])
             .output()
             .map(|o| o.status.success())
@@ -258,7 +259,8 @@ impl ToolchainInfo {
 
     fn check_rust_src() -> bool {
         Command::new("rustup")
-            .args(["+nightly", "component", "list", "--installed"])
+            .env_remove("RUSTUP_TOOLCHAIN")
+            .args(["component", "list", "--installed", "--toolchain", "nightly"])
             .output()
             .map(|o| {
                 String::from_utf8_lossy(&o.stdout)
@@ -361,15 +363,12 @@ fn build_single_target(
     let use_build_std = config.is_release && toolchain.can_use_build_std();
 
     if config.is_release && !toolchain.can_use_build_std() {
-        eprintln!(
-            "cargo:warning=Nightly toolchain with rust-src not available for {}, \
-             agent binary will be an empty placeholder. Install nightly and rust-src \
-             for embedded agent support.",
+        panic!(
+            "Nightly toolchain with rust-src not available for {}. \
+             Release builds require nightly + rust-src for build-std support. \
+             Install with: rustup toolchain install nightly && rustup +nightly component add rust-src",
             target.triple
         );
-        return BuildResult::Failed {
-            reason: "Nightly toolchain with rust-src not available".to_string(),
-        };
     }
 
     // Try native cargo first
@@ -384,7 +383,7 @@ fn build_single_target(
                     target.triple, reason
                 );
 
-                match try_cross(config, target, build_target_dir, use_build_std) {
+                match try_cross(config, target, build_target_dir) {
                     Ok(profile) => (true, profile),
                     Err(reason) => {
                         eprintln!(
@@ -456,11 +455,6 @@ fn try_native_cargo(
 ) -> Result<String, String> {
     let mut args: Vec<String> = Vec::new();
 
-    // Use nightly if build-std is enabled
-    if use_build_std {
-        args.push("+nightly".to_string());
-    }
-
     args.push("build".to_string());
 
     // Determine profile
@@ -502,9 +496,25 @@ fn try_native_cargo(
         args.push(config.features.join(","));
     }
 
-    let mut cmd = Command::new("cargo");
+    // When build-std is enabled, use `rustup run nightly cargo` instead of
+    // `cargo +nightly`. The `+toolchain` syntax only works with the rustup
+    // proxy, but build scripts inherit the parent cargo's environment which
+    // sets RUSTUP_TOOLCHAIN and RUSTC, bypassing the proxy and forcing the
+    // stable compiler.
+    let mut cmd = if use_build_std {
+        let mut c = Command::new("rustup");
+        c.args(["run", "nightly", "cargo"]);
+        c
+    } else {
+        Command::new("cargo")
+    };
     cmd.current_dir(&config.workspace_root)
         .env("CARGO_TARGET_DIR", build_target_dir)
+        .env_remove("RUSTUP_TOOLCHAIN")
+        .env_remove("RUSTC")
+        .env_remove("RUSTC_WRAPPER")
+        .env_remove("RUSTC_WORKSPACE_WRAPPER")
+        .env_remove("RUSTDOC")
         .args(&args);
 
     if !config.rustflags.is_empty() {
@@ -524,26 +534,17 @@ fn try_cross(
     config: &BuildConfig,
     target: &CrossTarget,
     build_target_dir: &Path,
-    use_build_std: bool,
 ) -> Result<String, String> {
     let mut args = Vec::new();
 
-    // Use nightly if build-std is enabled
-    if use_build_std {
-        args.push("+nightly".to_string());
-    }
-
     args.push("build".to_string());
 
+    // cross manages its own Docker-based toolchain, so we don't pass -Z
+    // build-std flags. Just use --release or the custom profile directly.
     let profile_dir = if config.is_release {
-        if use_build_std {
-            if let Some(ref custom) = target.custom_profile {
-                args.extend(["--profile".to_string(), custom.clone()]);
-                custom.clone()
-            } else {
-                args.push("--release".to_string());
-                "release".to_string()
-            }
+        if let Some(ref custom) = target.custom_profile {
+            args.extend(["--profile".to_string(), custom.clone()]);
+            custom.clone()
         } else {
             args.push("--release".to_string());
             "release".to_string()
@@ -551,15 +552,6 @@ fn try_cross(
     } else {
         "debug".to_string()
     };
-
-    // Add build-std flags
-    if use_build_std {
-        args.extend(["-Z".to_string(), "build-std=std,panic_abort".to_string()]);
-        args.extend([
-            "-Z".to_string(),
-            "build-std-features=optimize_for_size".to_string(),
-        ]);
-    }
 
     args.extend([
         "-p".to_string(),
@@ -576,6 +568,11 @@ fn try_cross(
     let mut cmd = Command::new("cross");
     cmd.current_dir(&config.workspace_root)
         .env("CARGO_TARGET_DIR", build_target_dir)
+        .env_remove("RUSTUP_TOOLCHAIN")
+        .env_remove("RUSTC")
+        .env_remove("RUSTC_WRAPPER")
+        .env_remove("RUSTC_WORKSPACE_WRAPPER")
+        .env_remove("RUSTDOC")
         .args(&args);
 
     if !config.rustflags.is_empty() {
