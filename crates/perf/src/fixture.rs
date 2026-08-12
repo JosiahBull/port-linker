@@ -20,6 +20,14 @@ use crate::shim::LatencyShim;
 /// How long to wait for the agent to print its handshake banner.
 const AGENT_STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How long to wait for the QUIC handshake through the latency shim. Generous
+/// relative to any RTT a benchmark imposes, so exceeding it means datagrams are
+/// not flowing at all rather than merely flowing slowly.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Handshake attempts before giving up. See [`Tunnel::handshake`].
+const HANDSHAKE_ATTEMPTS: u32 = 2;
+
 // ---------------------------------------------------------------------------
 // Agent subprocess
 // ---------------------------------------------------------------------------
@@ -193,6 +201,9 @@ fn client_config() -> Result<quinn::ClientConfig> {
     transport.max_concurrent_bidi_streams(4096u32.into());
     transport.datagram_receive_buffer_size(Some(1_048_576));
     transport.keep_alive_interval(Some(Duration::from_secs(10)));
+    // Deliberately not raising max_idle_timeout above the shipped default: the
+    // point is to measure the transport production uses. Startup robustness is
+    // handled by the bounded, retried handshake instead.
     config.transport_config(Arc::new(transport));
 
     Ok(config)
@@ -325,11 +336,7 @@ impl Tunnel {
         let mut endpoint = Endpoint::client("0.0.0.0:0".parse::<SocketAddr>().unwrap())?;
         endpoint.set_default_client_config(client_config()?);
 
-        let connection = endpoint
-            .connect(target, "localhost")
-            .map_err(|e| e.to_string())?
-            .await
-            .map_err(|e| format!("QUIC connect failed: {e}"))?;
+        let connection = Self::handshake(&endpoint, target, rtt).await?;
 
         // The agent opens the control stream and sends its handshake, then keeps
         // pushing port events down it. It also opens a unidirectional stream for
@@ -370,6 +377,48 @@ impl Tunnel {
             _control_send: control_send,
             drains,
         })
+    }
+
+    /// Complete the QUIC handshake, retrying once.
+    ///
+    /// A benchmark's startup is not what it measures, and a stalled handshake on
+    /// an oversubscribed machine is a setup failure rather than a result: if the
+    /// scheduler cannot run the shim's timers promptly, an early packet loss
+    /// pushes quinn into exponential retransmit backoff and the handshake can
+    /// exceed any fixed bound. One retry removes that flake without touching a
+    /// single measurement or assertion.
+    async fn handshake(
+        endpoint: &Endpoint,
+        target: SocketAddr,
+        rtt: Duration,
+    ) -> Result<Connection> {
+        let mut last_error = String::new();
+
+        for attempt in 1..=HANDSHAKE_ATTEMPTS {
+            let connecting = endpoint
+                .connect(target, "localhost")
+                .map_err(|e| e.to_string())?;
+
+            match tokio::time::timeout(HANDSHAKE_TIMEOUT, connecting).await {
+                Ok(Ok(connection)) => return Ok(connection),
+                Ok(Err(e)) => last_error = format!("handshake failed: {e}"),
+                Err(_) => {
+                    last_error = format!("handshake did not complete within {HANDSHAKE_TIMEOUT:?}");
+                }
+            }
+
+            if attempt < HANDSHAKE_ATTEMPTS {
+                tracing::warn!(attempt, %last_error, "retrying QUIC handshake");
+            }
+        }
+
+        Err(format!(
+            "QUIC {last_error} after {HANDSHAKE_ATTEMPTS} attempts (imposed RTT \
+             {rtt:?}). The agent or the latency shim is not passing datagrams — \
+             check that the machine is not so oversubscribed that the shim's \
+             timers cannot run."
+        )
+        .into())
     }
 
     pub fn connection(&self) -> Connection {

@@ -17,10 +17,24 @@
 //! imposing latency, or stops measuring connection setup, that assertion fails
 //! and the whole suite is known to be untrustworthy.
 
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use perf::{Bench, ms};
+use tokio::sync::Mutex;
 use tunnel::StreamSetup;
+
+/// Benchmarks run one at a time.
+///
+/// Two reasons. Methodologically, concurrent benchmarks contend for the cores
+/// and timers they are measuring, which inflates exactly the latencies under
+/// test. Practically, each one starts an agent subprocess, a latency shim, and a
+/// multi-threaded runtime; three at once oversubscribed a small CI runner badly
+/// enough to stall a QUIC handshake past its idle timeout.
+///
+/// The lock lives here rather than relying on `--test-threads=1` so the property
+/// holds however the suite is invoked.
+static BENCH_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 /// Large enough that scheduling jitter and debug-build overhead are a small
 /// fraction of it, small enough to keep the suite quick.
@@ -44,8 +58,9 @@ const MIN_LEGACY_SETUP_RTTS: f64 = 0.60;
 /// the init frame and the client's first bytes together instead of waiting for
 /// the agent's status byte. If someone reintroduces a wait on the critical path,
 /// the setup overhead jumps back to ~1 x RTT and this fails.
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn optimistic_setup_costs_no_round_trip() {
+    let _serial = BENCH_LOCK.lock().await;
     let bench = Bench::start(RTT).await.expect("bench startup");
     let measured = bench
         .run(StreamSetup::Optimistic, ITERATIONS)
@@ -79,8 +94,9 @@ async fn optimistic_setup_costs_no_round_trip() {
 /// This measures the pre-optimisation code path and asserts it *is* slow. It is
 /// the guard against a vacuous suite: without it, a harness that imposed no
 /// latency, or that timed the wrong thing, would sail through the test above.
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn benchmark_detects_the_round_trip_it_removes() {
+    let _serial = BENCH_LOCK.lock().await;
     let bench = Bench::start(RTT).await.expect("bench startup");
     let measured = bench
         .run(StreamSetup::WaitForStatus, ITERATIONS)
@@ -103,8 +119,9 @@ async fn benchmark_detects_the_round_trip_it_removes() {
 /// Separate runs could differ for reasons unrelated to the code — a different
 /// congestion window, a differently loaded machine. Measuring both modes over
 /// one tunnel makes the comparison attributable to the setup mode alone.
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn optimistic_setup_beats_waiting_for_status() {
+    let _serial = BENCH_LOCK.lock().await;
     let bench = Bench::start(RTT).await.expect("bench startup");
 
     let baseline = bench
