@@ -12,8 +12,10 @@ The project is organized as a Cargo workspace to share protocol definitions whil
 | :--- | :--- | :--- |
 | `cli` | Host entry point. Handles SSH bootstrapping, UI (prompts), and local binding. | `monoio`, `russh`, `dialoguer`, `quinn` |
 | `agent` | Remote binary. Scans OS network state and pipes traffic. | `monoio`, `quinn`, `procfs` (linux) |
+| `tunnel` | Data plane. Both halves of per-connection TCP forwarding, plus the shared frame codec. | `quinn`, `protocol` |
 | `protocol` | Shared types and serialization logic. | `rkyv`, `bytes` |
 | `common` | Shared utilities (PID lookup, socket logic). | `socket2`, `libc` |
+| `perf` | Latency benchmarks and performance regression tests (not shipped). | `quinn`, `tunnel` |
 
 ### 2.1 Why Monoio on the Agent?
 
@@ -267,6 +269,62 @@ authenticated too and do not register a client. The host performs this handshake
 on the very socket it then hands to `quinn`, so registration and traffic share a
 source address. Relayed bytes remain end-to-end encrypted between Host and Agent.
 
+### 5.4 TCP Stream Setup Costs No Round Trip
+
+Both halves of the per-connection forwarding protocol live in the `tunnel` crate,
+so the wire contract is stated once and can be driven directly by tests and
+benchmarks.
+
+```text
+host                                             agent
+  |-- open_bi (local, no round trip) ------------->|
+  |-- framed TcpStreamInit { port } -------------->|
+  |-- raw application bytes ... ----------------->|  connect(127.0.0.1:port)
+  |<-- 1 status byte: 0x00 ok / 0x01 error --------|
+  |<-- (on error) framed TcpStreamError, finish ---|
+  |=== raw bidirectional copy =====================|
+```
+
+Opening a QUIC stream is **local** — QUIC creates it implicitly with the first
+`STREAM` frame, and both ends allow 4096 concurrent bidirectional streams, so
+stream credit is never the constraint. The cost that *is* real is the agent's
+status byte: waiting for it before reading the local socket puts a full round trip
+in front of every connection.
+
+The Host therefore does not wait. It sends the init frame and immediately begins
+streaming application bytes behind it, reading the status byte off the critical
+path. The client's first request rides in the same flight as the init frame. The
+Agent needs no buffer for those early bytes: the framed read consumes exactly the
+init frame, and QUIC flow control holds the remainder until the copy loop starts.
+
+*   **Measured effect** (`crates/perf`, synthetic 60 ms RTT): median time from
+    local `connect()` to first response byte falls from **128.9 ms to 65.2 ms**.
+    Setup overhead — first-request latency minus steady-state request latency —
+    falls from 1.08 × RTT to 0.01 × RTT. The saving is one full round trip and
+    holds at 20 ms and 150 ms RTT.
+*   **Wire compatibility.** The byte sequence is unchanged; only the Host's
+    waiting changes. A framed read cannot over-read into the bytes behind it, so
+    old and new Hosts and Agents interoperate in both directions. No protocol
+    version bump.
+*   **Failure path.** If the Agent cannot connect it sends the error status and a
+    `TcpStreamError` diagnostic, then `STOP_SENDING` so bytes the Host
+    optimistically sent do not pile up against the flow-control window. Those
+    bytes are discarded with the connection — they were never delivered anywhere —
+    and the Host closes the local socket so the client observes the failure.
+*   **Not connection pooling.** Pre-warming Agent-to-service TCP connections was
+    considered and rejected: it saves only the loopback `connect()` (~100 µs
+    against a wide-area RTT) while consuming `max_connections` slots on target
+    services, exposing clients to sockets the service has since idle-timed-out,
+    and leaving greetings sitting in unread buffers for server-speaks-first
+    protocols. A used connection can never be recycled either, since the
+    application may have left it mid-protocol.
+
+Half-close is propagated as soon as each direction completes, on both ends. This
+matters for any protocol that ends a response by closing (HTTP/1.0,
+`Connection: close`): deferring it to when the forwarding task returns deadlocks,
+because the task cannot return until the other direction sees the peer close, and
+the peer is waiting for the FIN that was being deferred.
+
 ## 6. Conflict Resolution & Interactive Killing
 
 This is the tool's signature feature.
@@ -319,7 +377,50 @@ Given the OS-level interactions, `port-linker` requires a rigorous testing matri
 *   **Protocol Fuzzing:** Use `cargo-fuzz` on `rkyv` deserialization to ensure the Host cannot be crashed by malformed packets from a compromised Agent.
 *   **Parser Logic:** Feed the Agent's scanner mocked `/proc/net/tcp` and `/proc/net/udp` files (including edge cases like IPv6 mapping) to verify diffing logic.
 
-### 8.2 Integration & E2E Scenarios
+### 8.2 Data Plane Tests (`crates/tunnel/tests`)
+
+The forwarding protocol is tested with both halves in one process — a real QUIC
+connection between two local endpoints, with the Agent side answering streams via
+the same `serve_tcp_stream` the Agent binary calls. No subprocess, no SSH, no
+latency, so the suite runs in well under a second.
+
+The harness can substitute a deliberately misbehaving Agent (one that never
+replies, sends an unrecognised status byte, or resets the stream), which is how the
+Host's failure handling is covered. Every test is bounded by a timeout: a
+forwarding bug shows up as a hang far more often than as a wrong byte, and an
+unbounded await would wedge CI instead of naming the culprit.
+
+Coverage is grouped by what it defends: data integrity and ordering of the
+optimistically-sent early bytes, server-speaks-first protocols, half-close in both
+directions, failure paths reachable only because bytes are now in flight before the
+Agent confirms, and byte-for-byte equivalence between the two setup modes.
+
+### 8.3 Performance Regression Tests (`crates/perf`)
+
+Latency is measured against a real Agent subprocess through a
+`LatencyShim` — a userspace UDP relay that delays every datagram by half the
+configured RTT. Because the tunnel is QUIC over UDP, this delays the transport
+exactly as a wide-area path would, with no root, no `tc netem`, and no container,
+identically on macOS and Linux.
+
+Two properties keep the assertions trustworthy:
+
+*   **Thresholds are multiples of RTT, never absolute milliseconds.** Each sample
+    also times a second request on the already-established connection, which is the
+    round trip alone; the difference isolates setup cost and cancels out machine
+    speed. A threshold in milliseconds would really be a statement about the CI
+    runner.
+*   **The suite asserts in both directions.** A benchmark that silently measured
+    nothing would pass any upper bound, so `StreamSetup::WaitForStatus` is retained
+    as the pre-optimisation baseline and the suite asserts that it *is* a round trip
+    slower. If the harness stops imposing latency or stops measuring setup, that
+    assertion fails and the rest is known to be untrustworthy.
+
+`cargo run -p perf -- --rtt-ms 60 --iterations 20` runs the same scenario ad hoc and
+prints an A/B table. New scenarios reuse `fixture::{Tunnel, EchoService,
+ForwardedPort}` and report through `stats::Stats`.
+
+### 8.4 Integration & E2E Scenarios
 These tests run in a CI pipeline using Linux containers for both Host and Target. When testing locally they should use `docker`. The entire test suite MUST run in 20 seconds or less to allow for rapid development. Use of ENV variables to inject mocks is acceptable.
 
 1.  **The "Late Bind" Case:**

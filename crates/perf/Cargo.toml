@@ -1,0 +1,21 @@
+[package]
+name = "perf"
+version.workspace = true
+edition.workspace = true
+description = "Latency benchmarks and performance regression tests for the port-linker data plane"
+publish = false
+
+[[bin]]
+name = "port-linker-perf"
+path = "src/main.rs"
+
+[dependencies]
+tunnel = { path = "../tunnel" }
+protocol = { path = "../protocol" }
+common = { path = "../common" }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+quinn.workspace = true
+rustls.workspace = true
+rustls-pki-types.workspace = true
+clap.workspace = true
+tracing.workspace = true
