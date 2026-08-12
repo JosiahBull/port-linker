@@ -178,6 +178,9 @@ impl BuildConfig {
         let out_dir = env::var("OUT_DIR").unwrap_or_default();
         let is_release = env::var("PROFILE").map(|p| p == "release").unwrap_or(false);
 
+        // Rebuild when the caller starts or stops supplying pre-built binaries.
+        println!("cargo:rerun-if-env-changed=PLK_PREBUILT_DIR");
+
         Self::new(package)
             .workspace_root(workspace_root)
             .out_dir(out_dir)
@@ -348,6 +351,46 @@ pub fn watch_sources(paths: &[&str]) {
     }
 }
 
+/// Locate a caller-supplied binary for `target`, if one was provided.
+///
+/// `PLK_PREBUILT_DIR` names a directory holding binaries named by
+/// [`output_filename`], e.g. `agent-aarch64-apple-darwin`. Targets with no
+/// matching file fall through to being built locally, so a partially populated
+/// directory still works.
+fn find_prebuilt(config: &BuildConfig, target: &CrossTarget) -> Option<PathBuf> {
+    let dir = env::var("PLK_PREBUILT_DIR").ok()?;
+    if dir.is_empty() {
+        return None;
+    }
+
+    let candidate = Path::new(&dir).join(output_filename(&config.package, &target.triple));
+    match fs::metadata(&candidate) {
+        Ok(meta) if meta.len() > 0 => Some(candidate),
+        _ => None,
+    }
+}
+
+/// Copy a pre-built binary into the output directory.
+fn adopt_prebuilt(source: &Path, dest: &Path, triple: &str) -> BuildResult {
+    if let Some(parent) = dest.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+
+    match fs::copy(source, dest) {
+        Ok(size) => {
+            eprintln!("cargo:warning=Using pre-built binary for {triple} ({size} bytes)");
+            BuildResult::Success {
+                path: dest.to_path_buf(),
+                size: size as usize,
+                compressed: false,
+            }
+        }
+        Err(e) => BuildResult::Failed {
+            reason: format!("failed to copy pre-built binary for {triple}: {e}"),
+        },
+    }
+}
+
 fn build_single_target(
     config: &BuildConfig,
     target: &CrossTarget,
@@ -358,6 +401,17 @@ fn build_single_target(
         .out_dir
         .join(output_filename(&config.package, &target.triple));
     let binary_name = config.binary_name.as_deref().unwrap_or(&config.package);
+
+    // A binary supplied by the caller wins over building one here.
+    //
+    // No single machine can produce every target — a Linux host cannot build
+    // the Apple agent (no SDK, and `cross` publishes no Apple images) and a
+    // macOS host cannot build the Linux musl agents without Docker. CI
+    // therefore builds each agent on a runner that can, and hands the
+    // collected binaries to the CLI build through this directory.
+    if let Some(prebuilt) = find_prebuilt(config, target) {
+        return adopt_prebuilt(&prebuilt, &dest, &target.triple);
+    }
 
     // Determine if we should use nightly with build-std
     let use_build_std = config.is_release && toolchain.can_use_build_std();
