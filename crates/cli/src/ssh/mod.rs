@@ -31,10 +31,12 @@ pub trait SshExecutor: Send + Sync {
         data: &[u8],
     ) -> impl std::future::Future<Output = common::Result<(String, String, Option<u32>)>> + Send;
 
-    /// Execute a command and read stdout line-by-line until a predicate returns true.
+    /// Execute a command, optionally piping `stdin_data` to its stdin, and read
+    /// stdout line-by-line until a predicate returns true.
     fn exec_and_read_lines(
         &self,
         command: &str,
+        stdin_data: Option<&[u8]>,
         timeout: Duration,
         predicate: impl FnMut(&str) -> bool + Send,
     ) -> impl std::future::Future<Output = common::Result<Vec<String>>> + Send;
@@ -62,10 +64,12 @@ impl SshExecutor for SshSession {
     async fn exec_and_read_lines(
         &self,
         command: &str,
+        stdin_data: Option<&[u8]>,
         timeout: Duration,
         predicate: impl FnMut(&str) -> bool + Send,
     ) -> common::Result<Vec<String>> {
-        self.exec_and_read_lines(command, timeout, predicate).await
+        self.exec_and_read_lines(command, stdin_data, timeout, predicate)
+            .await
     }
 
     async fn exec_detached(&self, command: &str) -> common::Result<()> {

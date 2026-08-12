@@ -70,6 +70,7 @@ version = "0.3.0"
 dependencies = [
  "agent-build",
  "flate2",
+ "sha2 0.10.9",
 ]
 
 [[package]]
@@ -721,6 +722,11 @@ dependencies = [
  "libc",
  "notify-rust",
  "protocol",
+ "rcgen",
+ "ring",
+ "rustls",
+ "rustls-pki-types",
+ "subtle",
  "thiserror 2.0.18",
  "tracing",
 ]
@@ -2742,6 +2748,7 @@ version = "0.3.0"
 dependencies = [
  "agent-build",
  "flate2",
+ "sha2 0.10.9",
 ]
 
 [[package]]
@@ -3798,6 +3805,7 @@ checksum = "562d481066bde0658276a35467c4af00bdc6ee726305698a55b86e61d7ad82bb"
 name = "udp-relay"
 version = "0.3.0"
 dependencies = [
+ "subtle",
  "tokio",
 ]
 

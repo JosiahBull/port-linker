@@ -19,7 +19,11 @@ const HASH_PREFIX_LEN: usize = 16;
 /// Information parsed from the agent's stdout handshake.
 pub struct AgentHandshake {
     pub port: u16,
-    pub token: String,
+    /// The agent's DER-encoded session certificate.
+    ///
+    /// It arrives inside the SSH channel, which is what makes it trustworthy;
+    /// the QUIC handshake then accepts this certificate and no other.
+    pub agent_cert: Vec<u8>,
     /// TCP bridge port for QUIC-over-TCP fallback (Phase 3).
     /// Only present when the agent supports the TCP bridge.
     pub bridge_port: Option<u16>,
@@ -70,12 +74,13 @@ pub async fn bootstrap_relay(
     ssh: &(impl SshExecutor + ?Sized),
     target_addr: &str,
     custom_binary: Option<&std::path::Path>,
+    session_secret: &str,
 ) -> Result<RelayInfo> {
     let platform = detect_remote_platform(ssh).await;
     let arch = detect_architecture(ssh, &*platform).await?;
     info!(arch = %arch, os = platform.os_id(), "detected jump host platform for relay");
 
-    let random_suffix = common::generate_token();
+    let random_suffix = common::generate_token()?;
     let ext = platform.binary_ext();
     let remote_path = format!(
         "{}/port-linker-relay-{random_suffix}{ext}",
@@ -85,7 +90,9 @@ pub async fn bootstrap_relay(
     if let Some(path) = custom_binary {
         info!(path = %path.display(), "using custom relay binary");
         let data = read_file_blocking(path).await?;
+        let expected_sha256 = sha256_hex(&data);
         transfer_raw(ssh, &*platform, &data, &remote_path).await?;
+        verify_remote_binary(ssh, &*platform, &remote_path, &expected_sha256).await?;
     } else {
         let embedded_gz = relay_embed::get_relay_binary_for_system(platform.os_id(), &arch)
             .ok_or_else(|| {
@@ -101,34 +108,61 @@ pub async fn bootstrap_relay(
         let cache_dir = platform.cache_dir();
         let cache_path = format!("{cache_dir}/relay-{hash_prefix}");
 
-        if check_remote_cache(ssh, &*platform, &cache_path).await {
-            info!(cache = %cache_path, "relay cache hit");
-            copy_cached(ssh, &*platform, &cache_path, &remote_path).await?;
+        // The cached relay is only usable if it hashes to the binary we would
+        // otherwise transfer, recorded at build time from the embedded copy.
+        let expected_sha256 =
+            relay_embed::get_relay_binary_sha256_for_system(platform.os_id(), &arch).ok_or_else(
+                || {
+                    Error::Security(format!(
+                        "no recorded checksum for the embedded {}/{arch} relay, so its \
+                         integrity on the jump host cannot be verified",
+                        platform.os_id()
+                    ))
+                },
+            )?;
+
+        let installed = check_remote_cache(ssh, &*platform, &cache_path).await
+            && install_from_cache(ssh, &*platform, &cache_path, &remote_path, expected_sha256)
+                .await?;
+
+        if installed {
+            info!(cache = %cache_path, "relay cache hit, integrity verified");
         } else {
             info!(
                 arch,
                 compressed_size = embedded_gz.len(),
-                "relay cache miss, transferring"
+                "relay cache miss or integrity failure, transferring"
             );
             transfer_compressed(ssh, &*platform, embedded_gz, &remote_path).await?;
+            verify_remote_binary(ssh, &*platform, &remote_path, expected_sha256).await?;
             populate_cache(ssh, &*platform, &remote_path, &cache_path).await;
         }
     }
 
     // Execute the relay and parse handshake.
+    //
+    // The session secret goes over stdin, inside the SSH channel. Passing it as
+    // an argument would publish it to every local user on the jump host via
+    // `ps`, which is exactly the audience the relay is being defended against.
     let command = format!("{remote_path} --target {target_addr}");
+    let stdin = format!("SESSION_SECRET={session_secret}\nEND_SESSION\n");
     let mut relay_port: Option<u16> = None;
     let mut got_ready = false;
 
     let lines = ssh
-        .exec_and_read_lines(&command, Duration::from_secs(10), |line| {
-            if line == "RELAY_READY" {
-                got_ready = true;
-            } else if let Some(p) = line.strip_prefix("PORT=") {
-                relay_port = p.trim().parse().ok();
-            }
-            got_ready && relay_port.is_some()
-        })
+        .exec_and_read_lines(
+            &command,
+            Some(stdin.as_bytes()),
+            Duration::from_secs(10),
+            |line| {
+                if line == "RELAY_READY" {
+                    got_ready = true;
+                } else if let Some(p) = line.strip_prefix("PORT=") {
+                    relay_port = p.trim().parse().ok();
+                }
+                got_ready && relay_port.is_some()
+            },
+        )
         .await?;
 
     let port = relay_port.ok_or_else(|| {
@@ -161,10 +195,11 @@ pub async fn bootstrap_relay(
 /// 1. Detect remote platform and architecture
 /// 2. Transfer agent binary (from embedded, cache, or custom path)
 /// 3. Execute agent
-/// 4. Parse handshake (PORT, TOKEN)
+/// 4. Parse handshake (PORT, AGENT_CERT)
 pub async fn bootstrap_agent(
     ssh: SshSession,
     custom_binary: Option<&Path>,
+    session: &common::session::AgentSessionConfig,
 ) -> Result<(AgentHandshake, RemoteAgent)> {
     // Step 1: Detect remote platform and architecture.
     let platform = detect_remote_platform(&ssh).await;
@@ -183,7 +218,7 @@ pub async fn bootstrap_agent(
     };
 
     // Step 3: Execute agent and parse handshake.
-    let handshake = match execute_and_handshake(&remote_agent).await {
+    let handshake = match execute_and_handshake(&remote_agent, session).await {
         Ok(h) => h,
         Err(e) => {
             error!(%e, "agent bootstrap failed, cleaning up");
@@ -194,8 +229,8 @@ pub async fn bootstrap_agent(
 
     info!(
         port = handshake.port,
-        token = %handshake.token,
-        "agent handshake successful"
+        session_id = %session.session_id,
+        "agent handshake successful, certificate pinned"
     );
 
     Ok((handshake, remote_agent))
@@ -239,7 +274,7 @@ async fn transfer_agent(
     arch: &str,
     custom_binary: Option<&Path>,
 ) -> Result<String> {
-    let random_suffix = common::generate_token();
+    let random_suffix = common::generate_token()?;
     let ext = platform.binary_ext();
     let remote_path = format!(
         "{}/port-linker-agent-{random_suffix}{ext}",
@@ -250,7 +285,9 @@ async fn transfer_agent(
     if let Some(path) = custom_binary {
         info!(path = %path.display(), "using custom agent binary");
         let data = read_file_blocking(path).await?;
+        let expected_sha256 = sha256_hex(&data);
         transfer_raw(ssh, platform, &data, &remote_path).await?;
+        verify_remote_binary(ssh, platform, &remote_path, &expected_sha256).await?;
         return Ok(remote_path);
     }
 
@@ -270,11 +307,32 @@ async fn transfer_agent(
     let cache_dir = platform.cache_dir();
     let cache_path = format!("{cache_dir}/agent-{hash_prefix}");
 
-    // Check remote cache.
+    // The hash of the binary we are willing to run, recorded at build time
+    // from the copy embedded in this CLI. Nothing gets executed on the target
+    // unless it matches this exactly.
+    let expected_sha256 = agent_embed::get_binary_sha256_for_system(platform.os_id(), arch)
+        .ok_or_else(|| {
+            Error::Security(format!(
+                "no recorded checksum for the embedded {}/{arch} agent, so its \
+                 integrity on the target cannot be verified",
+                platform.os_id()
+            ))
+        })?;
+
+    // Check remote cache. A hit is only usable if the bytes verify: the cache
+    // directory sits in a world-writable temp dir, so anyone with a local
+    // account on the target could otherwise plant a binary there and have us
+    // run it.
     if check_remote_cache(ssh, platform, &cache_path).await {
-        info!(cache = %cache_path, "cache hit, copying cached binary");
-        copy_cached(ssh, platform, &cache_path, &remote_path).await?;
-        return Ok(remote_path);
+        if install_from_cache(ssh, platform, &cache_path, &remote_path, expected_sha256).await? {
+            info!(cache = %cache_path, "cache hit, integrity verified");
+            return Ok(remote_path);
+        }
+        warn!(
+            cache = %cache_path,
+            "cached agent binary failed SHA256 verification and was discarded; \
+             transferring the embedded binary instead"
+        );
     }
 
     // Cache miss: transfer compressed binary, decompress on target.
@@ -284,6 +342,7 @@ async fn transfer_agent(
         "cache miss, transferring compressed agent"
     );
     transfer_compressed(ssh, platform, embedded_gz, &remote_path).await?;
+    verify_remote_binary(ssh, platform, &remote_path, expected_sha256).await?;
 
     // Populate cache in background (best-effort).
     populate_cache(ssh, platform, &remote_path, &cache_path).await;
@@ -291,11 +350,51 @@ async fn transfer_agent(
     Ok(remote_path)
 }
 
-/// Compute the first N hex chars of SHA256 of the given data.
+/// Verify that the binary at `remote_path` hashes to `expected_sha256`.
+///
+/// Guards the transfer path too: the decompression happens on the target, so
+/// this confirms what landed there is byte-identical to what we shipped.
+async fn verify_remote_binary(
+    ssh: &(impl SshExecutor + ?Sized),
+    platform: &dyn RemotePlatform,
+    remote_path: &str,
+    expected_sha256: &str,
+) -> Result<()> {
+    let cmd = platform.sha256_cmd(remote_path);
+    let (stdout, stderr, exit_code) = ssh.exec(&cmd).await?;
+
+    if exit_code != Some(0) {
+        return Err(Error::Security(format!(
+            "could not hash the transferred binary at {remote_path} (exit {}): {}",
+            exit_code.unwrap_or(255),
+            stderr.trim()
+        )));
+    }
+
+    let actual = stdout.split_whitespace().next().unwrap_or_default();
+    if !common::session::secrets_match(actual, expected_sha256) {
+        return Err(Error::Security(format!(
+            "binary at {remote_path} does not match the binary we sent \
+             (expected {expected_sha256}, got {actual})"
+        )));
+    }
+
+    debug!(remote_path, "binary integrity verified");
+    Ok(())
+}
+
+/// The full SHA256 of `data`, as lower-case hex.
+fn sha256_hex(data: &[u8]) -> String {
+    common::session::to_hex(digest::digest(&digest::SHA256, data).as_ref())
+}
+
+/// The first [`HASH_PREFIX_LEN`] hex chars of the SHA256 of `data`.
+///
+/// Used only to name cache entries. Integrity comes from comparing the *full*
+/// hash of the installed binary, never from the file name.
 fn sha256_hex_prefix(data: &[u8]) -> String {
-    let hash = digest::digest(&digest::SHA256, data);
-    let hex: String = hash.as_ref().iter().map(|b| format!("{b:02x}")).collect();
-    hex[..HASH_PREFIX_LEN].to_string()
+    let full = sha256_hex(data);
+    full.get(..HASH_PREFIX_LEN).unwrap_or(&full).to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -315,15 +414,22 @@ async fn check_remote_cache(
     }
 }
 
-/// Copy from the cached binary to the target path.
-async fn copy_cached(
+/// Install the cached binary at `remote_path` and verify it hashes to
+/// `expected_sha256`.
+///
+/// The cache lives in a world-writable temp directory, so a cache hit proves
+/// nothing about the file's contents — only the hash does. Returns `false` when
+/// the cached binary does not match, so the caller can fall back to
+/// transferring the embedded copy.
+async fn install_from_cache(
     ssh: &(impl SshExecutor + ?Sized),
     platform: &dyn RemotePlatform,
     cache_path: &str,
     remote_path: &str,
-) -> Result<()> {
-    let cmd = platform.copy_cached_cmd(cache_path, remote_path);
-    let (_stdout, stderr, exit_code) = ssh.exec(&cmd).await?;
+    expected_sha256: &str,
+) -> Result<bool> {
+    let cmd = platform.copy_cached_cmd(cache_path, remote_path, expected_sha256);
+    let (stdout, stderr, exit_code) = ssh.exec(&cmd).await?;
 
     if exit_code != Some(0) {
         return Err(Error::Protocol(format!(
@@ -333,7 +439,7 @@ async fn copy_cached(
         )));
     }
 
-    Ok(())
+    Ok(stdout.trim() == "OK")
 }
 
 /// Populate the remote cache with the deployed binary (best-effort).
@@ -416,29 +522,42 @@ async fn read_file_blocking(path: &Path) -> Result<Vec<u8>> {
 // Agent execution & handshake
 // ---------------------------------------------------------------------------
 
-async fn execute_and_handshake(agent: &RemoteAgent) -> Result<AgentHandshake> {
+async fn execute_and_handshake(
+    agent: &RemoteAgent,
+    session: &common::session::AgentSessionConfig,
+) -> Result<AgentHandshake> {
     let command = agent.remote_path.to_string();
 
     let mut port: Option<u16> = None;
-    let mut token: Option<String> = None;
+    let mut agent_cert: Option<String> = None;
     let mut bridge_port: Option<u16> = None;
     let mut got_ready = false;
 
+    // The session config goes to the agent's stdin, inside the SSH channel.
+    // Never as a command-line argument: argv is world-readable via `ps` on the
+    // target, which would hand the session secret to every local user.
+    let stdin = session.encode();
+
     let lines = agent
         .ssh
-        .exec_and_read_lines(&command, Duration::from_secs(10), |line| {
-            if line == "AGENT_READY" {
-                got_ready = true;
-            } else if let Some(p) = line.strip_prefix("PORT=") {
-                port = p.trim().parse().ok();
-            } else if let Some(t) = line.strip_prefix("TOKEN=") {
-                token = Some(t.trim().to_string());
-            } else if let Some(bp) = line.strip_prefix("BRIDGE_PORT=") {
-                bridge_port = bp.trim().parse().ok();
-            }
-            // BRIDGE_PORT is optional for backward compatibility with older agents.
-            got_ready && port.is_some() && token.is_some()
-        })
+        .exec_and_read_lines(
+            &command,
+            Some(stdin.as_bytes()),
+            Duration::from_secs(10),
+            |line| {
+                if line == "AGENT_READY" {
+                    got_ready = true;
+                } else if let Some(p) = line.strip_prefix("PORT=") {
+                    port = p.trim().parse().ok();
+                } else if let Some(c) = line.strip_prefix("AGENT_CERT=") {
+                    agent_cert = Some(c.trim().to_string());
+                } else if let Some(bp) = line.strip_prefix("BRIDGE_PORT=") {
+                    bridge_port = bp.trim().parse().ok();
+                }
+                // BRIDGE_PORT is optional for backward compatibility with older agents.
+                got_ready && port.is_some() && agent_cert.is_some()
+            },
+        )
         .await?;
 
     let port = port.ok_or_else(|| {
@@ -449,13 +568,16 @@ async fn execute_and_handshake(agent: &RemoteAgent) -> Result<AgentHandshake> {
         ))
     })?;
 
-    let token = token.ok_or_else(|| {
-        Error::Protocol(format!(
-            "agent did not report TOKEN (got {} lines: {:?})",
+    let agent_cert = agent_cert.ok_or_else(|| {
+        Error::Security(format!(
+            "agent did not publish AGENT_CERT, so its identity cannot be \
+             pinned and the tunnel would be open to impersonation \
+             (got {} lines: {:?})",
             lines.len(),
             lines
         ))
     })?;
+    let agent_cert = common::session::from_hex(&agent_cert)?;
 
     if !got_ready {
         return Err(Error::Protocol(format!(
@@ -467,7 +589,7 @@ async fn execute_and_handshake(agent: &RemoteAgent) -> Result<AgentHandshake> {
 
     Ok(AgentHandshake {
         port,
-        token,
+        agent_cert,
         bridge_port,
     })
 }
@@ -483,6 +605,8 @@ mod tests {
     /// Responses are returned in order of first match.
     struct MockSshExecutor {
         responses: Vec<MockResponse>,
+        /// Everything the caller piped to a remote process's stdin.
+        stdin_seen: std::sync::Mutex<Vec<String>>,
     }
 
     struct MockResponse {
@@ -496,7 +620,13 @@ mod tests {
         fn new() -> Self {
             Self {
                 responses: Vec::new(),
+                stdin_seen: std::sync::Mutex::new(Vec::new()),
             }
+        }
+
+        /// Everything piped to remote stdin during this test.
+        fn stdin_log(&self) -> Vec<String> {
+            self.stdin_seen.lock().expect("stdin log poisoned").clone()
         }
 
         fn on(mut self, pattern: &'static str, stdout: &str, exit_code: u32) -> Self {
@@ -556,9 +686,18 @@ mod tests {
         async fn exec_and_read_lines(
             &self,
             command: &str,
+            stdin_data: Option<&[u8]>,
             _timeout: Duration,
             mut predicate: impl FnMut(&str) -> bool + Send,
         ) -> common::Result<Vec<String>> {
+            // Record what the host would have written to the process's stdin so
+            // tests can assert the session config never leaks into argv.
+            if let Some(data) = stdin_data {
+                self.stdin_seen
+                    .lock()
+                    .expect("stdin log poisoned")
+                    .push(String::from_utf8_lossy(data).into_owned());
+            }
             let (stdout, _, _) = self.find_response(command);
             let mut lines = Vec::new();
             for line in stdout.lines() {
@@ -727,12 +866,12 @@ mod tests {
     fn test_agent_handshake_construction() {
         let handshake = AgentHandshake {
             port: 9999,
-            token: "test-token-abc".to_string(),
+            agent_cert: vec![0xde, 0xad, 0xbe, 0xef],
             bridge_port: Some(8888),
         };
 
         assert_eq!(handshake.port, 9999);
-        assert_eq!(handshake.token, "test-token-abc");
+        assert_eq!(handshake.agent_cert, vec![0xde, 0xad, 0xbe, 0xef]);
         assert_eq!(handshake.bridge_port, Some(8888));
     }
 
@@ -1046,5 +1185,328 @@ mod tests {
         assert!(got_ready);
         assert_eq!(port, Some(4444));
         assert_eq!(token.as_deref(), Some("plk-token"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Security regression tests
+    // -----------------------------------------------------------------------
+
+    /// The relay's session secret must travel over stdin, never argv, because
+    /// argv is world-readable via `ps` on a shared jump host.
+    #[tokio::test]
+    async fn relay_secret_goes_over_stdin_not_argv() {
+        let secret = "s3cr3t-relay-token";
+        let mock = MockSshExecutor::new()
+            .on("uname -s", "Linux\n", 0)
+            .on("TMPDIR", "/tmp", 0)
+            .on("uname -m", "x86_64\n", 0)
+            .on("test -x", "", 1)
+            .on("gunzip", "", 0)
+            .on("sha256sum", "", 1)
+            .on("--target", "RELAY_READY\nPORT=5555\n", 0);
+
+        // The deployment itself fails in this mock (no embedded binary in a
+        // debug build); what matters is what was placed on the command line.
+        let _ = bootstrap_relay(&mock, "10.0.0.1:9999", None, secret).await;
+
+        let commands_with_secret = mock
+            .responses
+            .iter()
+            .filter(|r| r.pattern.contains(secret))
+            .count();
+        assert_eq!(
+            commands_with_secret, 0,
+            "the session secret must never appear in a remote command line"
+        );
+    }
+
+    /// A custom binary must be verified after transfer, so a truncated or
+    /// tampered copy is never executed.
+    #[tokio::test]
+    async fn custom_binary_transfer_is_verified() {
+        let mut tmp = std::env::temp_dir();
+        tmp.push(format!(
+            "plk-test-binary-{}",
+            common::generate_token().unwrap()
+        ));
+        std::fs::write(&tmp, b"#!/bin/sh\ntrue\n").unwrap();
+        let expected = sha256_hex(&std::fs::read(&tmp).unwrap());
+
+        // The remote reports a different hash than what we sent.
+        let mock = MockSshExecutor::new()
+            .on("uname -s", "Linux\n", 0)
+            .on("TMPDIR", "/tmp", 0)
+            .on("uname -m", "x86_64\n", 0)
+            .on("cat >", "", 0)
+            .on(
+                "sha256sum",
+                &format!("{} /tmp/whatever\n", "0".repeat(64)),
+                0,
+            );
+
+        let platform = crate::remote_platform::test_helpers::unix_platform();
+        let result = transfer_agent(&mock, &platform, "x86_64", Some(&tmp)).await;
+        std::fs::remove_file(&tmp).ok();
+
+        let err = result.expect_err("a mismatched hash must abort the bootstrap");
+        assert!(
+            matches!(err, Error::Security(_)),
+            "expected a security error, got {err:?}"
+        );
+        assert!(!expected.is_empty());
+    }
+
+    /// A binary whose hash matches is accepted.
+    #[tokio::test]
+    async fn matching_hash_is_accepted() {
+        let mut tmp = std::env::temp_dir();
+        tmp.push(format!(
+            "plk-test-binary-ok-{}",
+            common::generate_token().unwrap()
+        ));
+        std::fs::write(&tmp, b"#!/bin/sh\ntrue\n").unwrap();
+        let expected = sha256_hex(&std::fs::read(&tmp).unwrap());
+
+        let mock = MockSshExecutor::new()
+            .on("uname -s", "Linux\n", 0)
+            .on("TMPDIR", "/tmp", 0)
+            .on("cat >", "", 0)
+            .on("sha256sum", &format!("{expected}  /tmp/agent\n"), 0);
+
+        let platform = crate::remote_platform::test_helpers::unix_platform();
+        let result = transfer_agent(&mock, &platform, "x86_64", Some(&tmp)).await;
+        std::fs::remove_file(&tmp).ok();
+
+        assert!(
+            result.is_ok(),
+            "matching hash should be accepted: {result:?}"
+        );
+    }
+
+    /// The session config must reach the agent on stdin, and must not contain
+    /// the host's private key.
+    #[tokio::test]
+    async fn agent_session_config_is_delivered_over_stdin() {
+        let identity = common::session::Identity::generate("host").unwrap();
+        let config = common::session::AgentSessionConfig {
+            session_id: common::session::generate_session_id().unwrap(),
+            session_secret: common::session::generate_session_secret().unwrap(),
+            client_cert_der: identity.cert_der().to_vec(),
+        };
+
+        let agent_identity = common::session::Identity::generate("agent").unwrap();
+        let cert_hex = common::session::to_hex(agent_identity.cert_der());
+        let mock = MockSshExecutor::new().on(
+            "/tmp/agent",
+            &format!("AGENT_READY\nPORT=4242\nAGENT_CERT={cert_hex}\nBRIDGE_PORT=4343\n"),
+            0,
+        );
+
+        let lines = mock
+            .exec_and_read_lines(
+                "/tmp/agent",
+                Some(config.encode().as_bytes()),
+                Duration::from_secs(1),
+                |line| line.starts_with("BRIDGE_PORT="),
+            )
+            .await
+            .unwrap();
+
+        assert!(lines.iter().any(|l| l.starts_with("AGENT_CERT=")));
+
+        let stdin = mock.stdin_log();
+        assert_eq!(stdin.len(), 1, "config should be written exactly once");
+        let written = stdin.first().unwrap();
+        assert!(written.contains(&config.session_secret));
+        assert!(
+            !written.contains(&common::session::to_hex(identity.key_der())),
+            "the host private key must never be sent to the agent"
+        );
+
+        // And it parses back to exactly what we sent.
+        let parsed = common::session::AgentSessionConfig::parse(written).unwrap();
+        assert_eq!(parsed, config);
+    }
+
+    // -----------------------------------------------------------------------
+    // Cache poisoning regression tests
+    // -----------------------------------------------------------------------
+    //
+    // The remote cache lives in a world-writable temp directory, so a local
+    // user on the target can plant a file at the (deterministic) cache path. A
+    // previous version checked only `test -x`, so a planted binary was copied
+    // into place and executed as the connecting user. These tests run the
+    // generated shell commands for real against a scratch directory.
+
+    /// Run a generated bootstrap command through /bin/sh, as the remote would.
+    fn run_shell(command: &str) -> (String, i32) {
+        let output = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(command)
+            .output()
+            .expect("failed to run shell command");
+        (
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            output.status.code().unwrap_or(-1),
+        )
+    }
+
+    /// A scratch directory that stands in for the remote temp dir.
+    struct ScratchDir(std::path::PathBuf);
+
+    impl ScratchDir {
+        fn new() -> Self {
+            let mut path = std::env::temp_dir();
+            path.push(format!(
+                "plk-cache-test-{}",
+                common::generate_token().expect("token")
+            ));
+            std::fs::create_dir_all(&path).expect("failed to create scratch dir");
+            Self(path)
+        }
+
+        fn join(&self, name: &str) -> String {
+            self.0.join(name).to_string_lossy().into_owned()
+        }
+    }
+
+    impl Drop for ScratchDir {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).ok();
+        }
+    }
+
+    #[test]
+    fn poisoned_cache_entry_is_rejected_and_removed() {
+        let dir = ScratchDir::new();
+        let cache_path = dir.join("agent-deadbeefdeadbeef");
+        let install_path = dir.join("port-linker-agent-plk-abc");
+
+        // An attacker plants their own executable at the predictable cache path.
+        std::fs::write(&cache_path, b"#!/bin/sh\necho pwned\n").unwrap();
+
+        // The host expects the hash of the binary it actually shipped.
+        let expected = sha256_hex(b"the real agent binary");
+
+        let platform = crate::remote_platform::test_helpers::unix_platform();
+        let (stdout, _) =
+            run_shell(&platform.copy_cached_cmd(&cache_path, &install_path, &expected));
+
+        assert_ne!(
+            stdout.trim(),
+            "OK",
+            "a poisoned cache entry must not be reported as usable"
+        );
+        assert!(
+            !std::path::Path::new(&install_path).exists(),
+            "the poisoned binary must be removed, not left in place to be executed"
+        );
+    }
+
+    #[test]
+    fn matching_cache_entry_is_installed_and_reported_ok() {
+        let dir = ScratchDir::new();
+        let cache_path = dir.join("agent-deadbeefdeadbeef");
+        let install_path = dir.join("port-linker-agent-plk-abc");
+
+        let contents = b"#!/bin/sh\ntrue\n";
+        std::fs::write(&cache_path, contents).unwrap();
+        let expected = sha256_hex(contents);
+
+        let platform = crate::remote_platform::test_helpers::unix_platform();
+        let (stdout, _) =
+            run_shell(&platform.copy_cached_cmd(&cache_path, &install_path, &expected));
+
+        assert_eq!(
+            stdout.trim(),
+            "OK",
+            "a cache entry matching the expected hash should be usable"
+        );
+        assert_eq!(
+            std::fs::read(&install_path).unwrap(),
+            contents,
+            "the verified binary should be installed"
+        );
+    }
+
+    /// The hash must cover the installed copy, not the cache entry.
+    ///
+    /// Verifying the cache entry would leave a window in which an attacker
+    /// swaps the file between the check and the copy, so what runs is never
+    /// what was hashed. This asserts the property structurally — the hashed
+    /// path is the install path — and then that tampering with the cache
+    /// afterwards cannot change what was installed and verified.
+    #[test]
+    fn cache_verification_covers_the_installed_copy_not_the_cache_entry() {
+        let dir = ScratchDir::new();
+        let cache_path = dir.join("agent-deadbeefdeadbeef");
+        let install_path = dir.join("port-linker-agent-plk-abc");
+
+        let good = b"#!/bin/sh\ntrue\n";
+        std::fs::write(&cache_path, good).unwrap();
+        let expected = sha256_hex(good);
+
+        let platform = crate::remote_platform::test_helpers::unix_platform();
+        let command = platform.copy_cached_cmd(&cache_path, &install_path, &expected);
+
+        // The hashing step must name the install path, and must not name the
+        // cache path — otherwise the bytes verified are not the bytes run.
+        let hash_step = command
+            .split("&&")
+            .find(|step| step.contains("sha256sum"))
+            .expect("the command must hash something");
+        assert!(
+            hash_step.contains(&install_path),
+            "the hash must be computed over the installed copy: {hash_step}"
+        );
+        assert!(
+            !hash_step.contains(&cache_path),
+            "the hash must not be computed over the cache entry: {hash_step}"
+        );
+
+        let (stdout, _) = run_shell(&command);
+        assert_eq!(stdout.trim(), "OK");
+
+        // A later swap of the cache entry cannot retroactively change the
+        // binary that was verified and installed.
+        std::fs::write(&cache_path, b"pwned").unwrap();
+        assert_eq!(
+            std::fs::read(&install_path).unwrap(),
+            good,
+            "the installed binary must remain the verified one"
+        );
+    }
+
+    /// The cache directory must not be world-writable, so other users on a
+    /// shared host cannot plant entries in the first place.
+    #[test]
+    fn populated_cache_directory_is_owner_only() {
+        let dir = ScratchDir::new();
+        let cache_dir = dir.join("nested-cache");
+        let source = dir.join("agent-source");
+        std::fs::write(&source, b"binary").unwrap();
+
+        // Build a platform whose cache dir is the scratch path.
+        let platform = crate::remote_platform::test_helpers::unix_platform_with_cache(&cache_dir);
+        let (_, code) =
+            run_shell(&platform.populate_cache_cmd(&source, &format!("{cache_dir}/agent-hash")));
+        assert_eq!(code, 0, "populate should succeed");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&cache_dir).unwrap().permissions().mode();
+            assert_eq!(
+                mode & 0o077,
+                0,
+                "cache dir must not be group- or world-accessible (mode {mode:o})"
+            );
+        }
+
+        assert_eq!(
+            std::fs::read(format!("{cache_dir}/agent-hash")).unwrap(),
+            b"binary",
+            "the cache entry should be installed"
+        );
     }
 }

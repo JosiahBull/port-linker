@@ -27,8 +27,12 @@ pub trait RemotePlatform: Send + Sync {
     /// Command to check if a cached binary exists.
     fn check_cache_cmd(&self, cache_path: &str) -> String;
 
-    /// Command to copy a cached binary to the agent path.
-    fn copy_cached_cmd(&self, cache_path: &str, remote_path: &str) -> String;
+    /// Command to install a cached binary at the agent path and verify its
+    /// SHA256, printing `OK` only on an exact match.
+    fn copy_cached_cmd(&self, cache_path: &str, remote_path: &str, sha256: &str) -> String;
+
+    /// Command to print the SHA256 of a file as bare hex.
+    fn sha256_cmd(&self, path: &str) -> String;
 
     /// Command to populate the cache (mkdir, copy, prune old entries).
     fn populate_cache_cmd(&self, remote_path: &str, cache_path: &str) -> String;
@@ -94,18 +98,40 @@ impl RemotePlatform for RemoteUnix {
         format!("test -x '{cp}' && echo OK")
     }
 
-    fn copy_cached_cmd(&self, cache_path: &str, remote_path: &str) -> String {
+    fn sha256_cmd(&self, path: &str) -> String {
+        let p = shell_escape(path);
+        // sha256sum on Linux, shasum on macOS. Both print "<hex>  <path>".
+        format!("sha256sum '{p}' 2>/dev/null || shasum -a 256 '{p}' 2>/dev/null")
+    }
+
+    fn copy_cached_cmd(&self, cache_path: &str, remote_path: &str, sha256: &str) -> String {
         let cp = shell_escape(cache_path);
         let rp = shell_escape(remote_path);
-        format!("cp '{cp}' '{rp}' && chmod +x '{rp}'")
+        let expected = shell_escape(sha256);
+        // The cache lives in a world-writable temp directory, so its contents
+        // are attacker-controlled until proven otherwise. Copy first, then hash
+        // *the copy* we are about to execute: verifying the cache file itself
+        // would leave a window in which it could be swapped after the check.
+        // A mismatch removes the installed file and stays silent, so the caller
+        // falls back to transferring the trusted embedded binary.
+        format!(
+            "cp '{cp}' '{rp}' && chmod +x '{rp}' && \
+             actual=$(sha256sum '{rp}' 2>/dev/null || shasum -a 256 '{rp}' 2>/dev/null) && \
+             actual=${{actual%% *}} && \
+             if [ \"$actual\" = '{expected}' ]; then echo OK; else rm -f '{rp}'; fi"
+        )
     }
 
     fn populate_cache_cmd(&self, remote_path: &str, cache_path: &str) -> String {
         let cd = shell_escape(&self.cache);
         let rp = shell_escape(remote_path);
         let cp = shell_escape(cache_path);
+        // Mode 0700 so other users on a shared host cannot plant entries, and a
+        // temp-file-plus-rename so a reader never observes a half-written
+        // binary. Both are best-effort hardening: the SHA256 check on read is
+        // what actually makes a poisoned cache harmless.
         format!(
-            "mkdir -p '{cd}' && cp '{rp}' '{cp}' && \
+            "mkdir -p -m 700 '{cd}' && cp '{rp}' '{cp}.tmp.$$' && mv -f '{cp}.tmp.$$' '{cp}' && \
              find '{cd}' \\( -name 'agent-*' -o -name 'relay-*' \\) -mtime +7 -delete 2>/dev/null; true"
         )
     }
@@ -198,6 +224,16 @@ pub mod test_helpers {
             os: "linux".into(),
         }
     }
+
+    /// A Unix remote whose cache directory points at a scratch path, so cache
+    /// commands can be executed for real against a temp directory.
+    pub fn unix_platform_with_cache(cache: &str) -> RemoteUnix {
+        RemoteUnix {
+            temp: "/tmp".into(),
+            cache: cache.into(),
+            os: "linux".into(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -265,10 +301,52 @@ mod tests {
     }
 
     #[test]
-    fn remote_unix_copy_cached_cmd() {
+    fn remote_unix_copy_cached_cmd_verifies_hash() {
         let u = test_helpers::unix_platform();
-        let cmd = u.copy_cached_cmd("/tmp/.port-linker-cache/agent-hash", "/tmp/agent-abc");
+        let cmd = u.copy_cached_cmd(
+            "/tmp/.port-linker-cache/agent-hash",
+            "/tmp/agent-abc",
+            "abc123",
+        );
         assert!(cmd.contains("cp "), "should use cp command");
         assert!(cmd.contains("chmod +x"), "should make executable");
+        assert!(
+            cmd.contains("sha256sum") && cmd.contains("shasum"),
+            "should hash on both Linux and macOS"
+        );
+        assert!(
+            cmd.contains("abc123"),
+            "should compare against the expected hash"
+        );
+        assert!(
+            cmd.contains("rm -f '/tmp/agent-abc'"),
+            "should delete the binary when the hash does not match"
+        );
+        // The hash must be taken from the installed copy, not the cache entry,
+        // so the file cannot be swapped between verification and execution.
+        let verified_path_pos = cmd.find("actual=$(sha256sum").expect("hash step present");
+        let cache_pos = cmd
+            .rfind("/tmp/.port-linker-cache")
+            .expect("cache path present");
+        assert!(
+            cache_pos < verified_path_pos,
+            "hash must be computed over the installed copy, not the cache entry"
+        );
+    }
+
+    #[test]
+    fn remote_unix_populate_cache_is_owner_only_and_atomic() {
+        let u = test_helpers::unix_platform();
+        let cmd = u.populate_cache_cmd("/tmp/agent-abc", "/tmp/.port-linker-cache/agent-hash");
+        assert!(cmd.contains("mkdir -p -m 700"), "cache dir must be private");
+        assert!(cmd.contains("mv -f"), "install must be atomic");
+    }
+
+    #[test]
+    fn remote_unix_sha256_cmd_covers_both_platforms() {
+        let u = test_helpers::unix_platform();
+        let cmd = u.sha256_cmd("/tmp/agent-abc");
+        assert!(cmd.contains("sha256sum"));
+        assert!(cmd.contains("shasum -a 256"));
     }
 }

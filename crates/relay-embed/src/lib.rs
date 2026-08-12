@@ -22,6 +22,23 @@ const RELAY_AARCH64_LINUX_GZ: &[u8] = include_bytes!(concat!(
 const RELAY_AARCH64_DARWIN_GZ: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/relay-aarch64-apple-darwin.gz"));
 
+// SHA256 of each *uncompressed* binary, recorded at build time.
+
+const RELAY_X86_64_LINUX_SHA256: &str = include_str!(concat!(
+    env!("OUT_DIR"),
+    "/relay-x86_64-unknown-linux-musl.sha256"
+));
+
+const RELAY_AARCH64_LINUX_SHA256: &str = include_str!(concat!(
+    env!("OUT_DIR"),
+    "/relay-aarch64-unknown-linux-musl.sha256"
+));
+
+const RELAY_AARCH64_DARWIN_SHA256: &str = include_str!(concat!(
+    env!("OUT_DIR"),
+    "/relay-aarch64-apple-darwin.sha256"
+));
+
 /// All target triples that this crate can potentially embed.
 pub const SUPPORTED_TARGETS: &[&str] = &[
     "x86_64-unknown-linux-musl",
@@ -62,6 +79,25 @@ pub fn available_relay_targets() -> Vec<&'static str> {
     }
 
     targets
+}
+
+/// The SHA256 of the uncompressed relay binary for the given OS and
+/// architecture, as lower-case hex.
+///
+/// The host uses this to verify what actually landed on the target: a cached
+/// binary in a world-writable temp directory, or a transfer that was
+/// decompressed remotely. Anything that does not match this hash is discarded
+/// rather than executed.
+pub fn get_relay_binary_sha256_for_system(os: &str, arch: &str) -> Option<&'static str> {
+    let hash = match (os.to_ascii_lowercase().as_str(), normalize_arch(arch)) {
+        ("linux", "x86_64") => RELAY_X86_64_LINUX_SHA256,
+        ("linux", "aarch64") => RELAY_AARCH64_LINUX_SHA256,
+        ("macos" | "darwin", "aarch64") => RELAY_AARCH64_DARWIN_SHA256,
+        _ => return None,
+    };
+
+    let hash = hash.trim();
+    if hash.is_empty() { None } else { Some(hash) }
 }
 
 /// Normalize architecture names to canonical form.

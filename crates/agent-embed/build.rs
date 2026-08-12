@@ -21,6 +21,9 @@ fn main() {
             &target.triple,
         ));
         let gz_path = config.out_dir.join(format!("agent-{}.gz", target.triple));
+        let sha_path = config
+            .out_dir
+            .join(format!("agent-{}.sha256", target.triple));
 
         if let Some(result) = results.get(&target.triple)
             && result.is_success()
@@ -29,6 +32,10 @@ fn main() {
         {
             let compressed = gzip_compress(&data);
             fs::write(&gz_path, &compressed).unwrap();
+            // Hash of the *uncompressed* binary. The host compares this against
+            // the SHA256 of whatever ends up on the target, so nothing runs
+            // there unless it is byte-identical to what was built here.
+            fs::write(&sha_path, sha256_hex(&data)).unwrap();
             eprintln!(
                 "cargo:warning=Embedded agent for {} ({} -> {} bytes, {:.0}% reduction)",
                 target.triple,
@@ -44,6 +51,7 @@ fn main() {
         } else {
             // Debug builds: write empty placeholder so compilation can proceed.
             fs::write(&gz_path, b"").unwrap();
+            fs::write(&sha_path, b"").unwrap();
             eprintln!(
                 "cargo:warning=No agent binary for {}, using empty placeholder (debug build)",
                 target.triple
@@ -74,4 +82,12 @@ fn gzip_compress(data: &[u8]) -> Vec<u8> {
     let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
     encoder.write_all(data).unwrap();
     encoder.finish().unwrap()
+}
+
+/// SHA256 of `data` as lower-case hex.
+fn sha256_hex(data: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+
+    let digest = Sha256::digest(data);
+    digest.iter().map(|b| format!("{b:02x}")).collect()
 }

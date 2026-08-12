@@ -98,8 +98,15 @@ struct Args {
 
     /// Agent QUIC address to connect to directly (e.g. "127.0.0.1:12345").
     /// Use this for manual mode when the agent is already running.
-    #[arg(long, group = "target")]
+    /// Requires --session-config, which carries the certificates both ends pin.
+    #[arg(long, group = "target", requires = "session_config")]
     agent: Option<SocketAddr>,
+
+    /// Session file holding the pinned identities for manual --agent mode.
+    /// If the file does not exist it is created, and the block to feed the
+    /// agent's stdin is written alongside it.
+    #[arg(long)]
+    session_config: Option<std::path::PathBuf>,
 
     /// Run the echo test and exit immediately (skip the receive loop)
     #[arg(long, default_value_t = false)]
@@ -113,8 +120,11 @@ struct Args {
     #[arg(long, value_enum, default_value_t = ConflictPolicy::Interactive)]
     conflict_resolution: ConflictPolicy,
 
-    /// SSH host key verification policy
-    #[arg(long, value_enum, default_value_t = HostKeyPolicy::AcceptNew)]
+    /// SSH host key verification policy.
+    ///
+    /// SSH is the root of trust for the whole tunnel — it is what introduces
+    /// the two ends to each other — so this defaults to strict.
+    #[arg(long, value_enum, default_value_t = HostKeyPolicy::Strict)]
     ssh_host_key_verification: HostKeyPolicy,
 
     /// Path to a custom agent binary to transfer (bypasses embedded binaries and caching)
@@ -143,46 +153,51 @@ struct Args {
 }
 
 // ---------------------------------------------------------------------------
-// TLS: skip server certificate verification (self-signed certs)
+// Session security
 // ---------------------------------------------------------------------------
 
-#[derive(Debug)]
-struct SkipServerVerification;
+/// Everything needed to authenticate one tunnel end-to-end.
+///
+/// The host's private key stays in this process. Only the certificate half is
+/// shipped to the agent, over SSH, and the agent's certificate comes back the
+/// same way — so each end pins the other to a key that never crossed the
+/// network. See [`common::session`] for the full trust model.
+struct SessionSecurity {
+    /// The host's own ephemeral TLS identity.
+    identity: common::session::Identity,
+    /// The block delivered to the agent over SSH.
+    agent_config: common::session::AgentSessionConfig,
+}
 
-impl rustls::client::danger::ServerCertVerifier for SkipServerVerification {
-    fn verify_server_cert(
-        &self,
-        _end_entity: &rustls_pki_types::CertificateDer<'_>,
-        _intermediates: &[rustls_pki_types::CertificateDer<'_>],
-        _server_name: &rustls_pki_types::ServerName<'_>,
-        _ocsp_response: &[u8],
-        _now: rustls_pki_types::UnixTime,
-    ) -> std::result::Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-        Ok(rustls::client::danger::ServerCertVerified::assertion())
+impl SessionSecurity {
+    /// Mint a fresh identity, session id and session secret.
+    fn generate() -> Result<Self> {
+        let identity = common::session::Identity::generate("port-linker-host")?;
+        let agent_config = common::session::AgentSessionConfig {
+            session_id: common::session::generate_session_id()?,
+            session_secret: common::session::generate_session_secret()?,
+            client_cert_der: identity.cert_der().to_vec(),
+        };
+        Ok(Self {
+            identity,
+            agent_config,
+        })
     }
 
-    fn verify_tls12_signature(
-        &self,
-        _message: &[u8],
-        _cert: &rustls_pki_types::CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
-    ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    /// Rebuild from a manual-mode session file.
+    fn from_file(file: &common::session::HostSessionFile) -> Result<Self> {
+        Ok(Self {
+            identity: file.identity()?,
+            agent_config: file.agent_config(),
+        })
     }
 
-    fn verify_tls13_signature(
-        &self,
-        _message: &[u8],
-        _cert: &rustls_pki_types::CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
-    ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    fn session_id(&self) -> &str {
+        &self.agent_config.session_id
     }
 
-    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        rustls::crypto::ring::default_provider()
-            .signature_verification_algorithms
-            .supported_schemes()
+    fn session_secret(&self) -> &str {
+        &self.agent_config.session_secret
     }
 }
 
@@ -247,15 +262,94 @@ async fn main() -> Result<()> {
     if args.remote.is_some() {
         // SSH bootstrap mode with Phoenix Agent auto-restart.
         run_with_phoenix_restart(&args).await
-    } else if args.agent.is_some() {
+    } else if let Some(agent_addr) = args.agent {
         // Direct agent mode — single session, no restart.
-        let agent_addr = args.agent.unwrap();
-        run_single_session(&args, agent_addr, None, None).await
+        run_manual_session(&args, agent_addr).await
     } else {
         Err(Error::Protocol(
             "either --remote or --agent must be specified".into(),
         ))
     }
+}
+
+// ---------------------------------------------------------------------------
+// Manual mode (--agent)
+// ---------------------------------------------------------------------------
+
+/// Connect to an already-running agent using a session file.
+///
+/// Manual mode has no SSH channel to introduce the two ends, so the operator
+/// carries the introduction by hand: the CLI mints the session material, the
+/// operator feeds the agent block to the agent, and pastes the certificate the
+/// agent prints back into the session file. Both ends still pin each other, so
+/// this path is no weaker than the SSH one — only less convenient.
+async fn run_manual_session(args: &Args, agent_addr: SocketAddr) -> Result<()> {
+    let path = args
+        .session_config
+        .as_ref()
+        .ok_or_else(|| Error::Protocol("--agent requires --session-config".into()))?;
+
+    if !path.exists() {
+        return bootstrap_manual_session_file(path);
+    }
+
+    let text = std::fs::read_to_string(path).map_err(Error::Io)?;
+    let file = common::session::HostSessionFile::parse(&text)?;
+
+    let agent_cert = file.agent_cert_der.clone().ok_or_else(|| {
+        Error::Security(format!(
+            "{} has no AGENT_CERT yet. Start the agent with the companion \
+             .agent file on its stdin, then paste the AGENT_CERT= line it \
+             prints into the session file.",
+            path.display()
+        ))
+    })?;
+
+    let security = SessionSecurity::from_file(&file)?;
+    run_single_session(args, agent_addr, None, None, &security, &agent_cert).await
+}
+
+/// Create a fresh manual-mode session file plus the agent-side block.
+fn bootstrap_manual_session_file(path: &std::path::Path) -> Result<()> {
+    let file = common::session::HostSessionFile::generate()?;
+    let agent_path = path.with_extension("agent");
+
+    write_private_file(path, &file.encode())?;
+    // The agent block carries no private key, but it does carry the session
+    // secret, so it is written with the same permissions.
+    write_private_file(&agent_path, &file.agent_config().encode())?;
+
+    println!("Created session files:");
+    println!("  host:  {}", path.display());
+    println!("  agent: {}", agent_path.display());
+    println!();
+    println!("1. Copy the agent file to the target and start the agent with it on stdin:");
+    println!("     port-linker-agent < {}", agent_path.display());
+    println!(
+        "2. Copy the AGENT_CERT= line the agent prints into {}",
+        path.display()
+    );
+    println!("3. Re-run this command to connect.");
+
+    Ok(())
+}
+
+/// Write a file containing session secrets with owner-only permissions.
+fn write_private_file(path: &std::path::Path, contents: &str) -> Result<()> {
+    use std::io::Write;
+
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+
+    let mut file = options.open(path).map_err(Error::Io)?;
+    file.write_all(contents.as_bytes()).map_err(Error::Io)?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -279,10 +373,22 @@ async fn run_with_phoenix_restart(args: &Args) -> Result<()> {
             "bootstrapping agent via SSH"
         );
 
+        // Fresh identity and session secret for every attempt: a restarted
+        // agent is a new peer, and reusing key material across sessions would
+        // widen the window in which a leaked key is useful.
+        let security = match SessionSecurity::generate() {
+            Ok(security) => security,
+            Err(e) => {
+                error!(%e, "failed to generate session credentials");
+                return Err(e);
+            }
+        };
+
         // Step 1: SSH bootstrap (including transport setup for ProxyJump).
-        let bootstrap_result = bootstrap_remote(args, remote).await;
+        let bootstrap_result = bootstrap_remote(args, remote, &security).await;
         let BootstrapResult {
             agent_addr,
+            agent_cert,
             remote_agent,
             transport_ctx,
             _jump_sessions,
@@ -304,8 +410,15 @@ async fn run_with_phoenix_restart(args: &Args) -> Result<()> {
 
         // Step 2: Run the session.
         let session_start = std::time::Instant::now();
-        let session_result =
-            run_single_session(args, agent_addr, Some(&remote_agent), transport_ctx).await;
+        let session_result = run_single_session(
+            args,
+            agent_addr,
+            Some(&remote_agent),
+            transport_ctx,
+            &security,
+            &agent_cert,
+        )
+        .await;
         let session_lasted = session_start.elapsed();
 
         // Step 3: Cleanup the old agent.
@@ -341,6 +454,9 @@ async fn run_with_phoenix_restart(args: &Args) -> Result<()> {
 /// Result from bootstrapping a remote connection, including transport context.
 struct BootstrapResult {
     agent_addr: SocketAddr,
+    /// The agent's certificate, learned over SSH. The QUIC handshake will
+    /// accept this certificate and no other.
+    agent_cert: Vec<u8>,
     remote_agent: bootstrap::RemoteAgent,
     transport_ctx: Option<TransportContext>,
     /// Jump host SSH sessions that must be kept alive for the tunnel chain.
@@ -354,7 +470,11 @@ struct BootstrapResult {
 /// If the target host has `ProxyJump` configured in `~/.ssh/config`, the
 /// connection is chained through the jump hosts and an appropriate transport
 /// strategy is selected (UDP relay, TCP bridge, or auto-detected).
-async fn bootstrap_remote(args: &Args, remote: &str) -> Result<BootstrapResult> {
+async fn bootstrap_remote(
+    args: &Args,
+    remote: &str,
+    security: &SessionSecurity,
+) -> Result<BootstrapResult> {
     // Peek at the SSH config to check for ProxyJump.
     let (user_override, host) = if let Some(idx) = remote.find('@') {
         (Some(&remote[..idx]), &remote[idx + 1..])
@@ -371,18 +491,23 @@ async fn bootstrap_remote(args: &Args, remote: &str) -> Result<BootstrapResult> 
             "ProxyJump configured, using SSH connection chaining"
         );
 
-        bootstrap_with_proxy_jump(args, remote, jump_hosts).await
+        bootstrap_with_proxy_jump(args, remote, jump_hosts, security).await
     } else {
         // Direct connection — no ProxyJump.
         let ssh_session = ssh::SshSession::connect(remote, args.ssh_host_key_verification).await?;
 
         let peer_ip = ssh_session.peer_ip();
-        let (handshake, remote_agent) =
-            bootstrap::bootstrap_agent(ssh_session, args.agent_binary.as_deref()).await?;
+        let (handshake, remote_agent) = bootstrap::bootstrap_agent(
+            ssh_session,
+            args.agent_binary.as_deref(),
+            &security.agent_config,
+        )
+        .await?;
 
         let agent_addr = SocketAddr::new(peer_ip, handshake.port);
         Ok(BootstrapResult {
             agent_addr,
+            agent_cert: handshake.agent_cert,
             remote_agent,
             transport_ctx: None,
             _jump_sessions: Vec::new(),
@@ -395,12 +520,18 @@ async fn bootstrap_with_proxy_jump(
     args: &Args,
     remote: &str,
     jump_hosts: &[ssh::JumpHost],
+    security: &SessionSecurity,
 ) -> Result<BootstrapResult> {
     let chain = SshChain::connect(remote, args.ssh_host_key_verification, jump_hosts).await?;
 
     let peer_ip = chain.target.peer_ip();
-    let (handshake, remote_agent) =
-        bootstrap::bootstrap_agent(chain.target, args.agent_binary.as_deref()).await?;
+    let (handshake, remote_agent) = bootstrap::bootstrap_agent(
+        chain.target,
+        args.agent_binary.as_deref(),
+        &security.agent_config,
+    )
+    .await?;
+    let agent_cert = handshake.agent_cert.clone();
 
     // Determine the target's IP for UDP relay targeting.
     //
@@ -435,10 +566,16 @@ async fn bootstrap_with_proxy_jump(
                 )
             })?;
             let agent_addr = SocketAddr::new(agent_ip, handshake.port);
-            let (relay_addr, relay_infos) =
-                setup_udp_relay_chain(args, &chain.jump_sessions, agent_addr).await?;
+            let (relay_addr, relay_infos) = setup_udp_relay_chain(
+                args,
+                &chain.jump_sessions,
+                agent_addr,
+                security.session_secret(),
+            )
+            .await?;
             Ok(BootstrapResult {
                 agent_addr: relay_addr,
+                agent_cert: agent_cert.clone(),
                 remote_agent,
                 transport_ctx: Some(TransportContext::UdpRelay {
                     _relay_infos: relay_infos,
@@ -450,6 +587,7 @@ async fn bootstrap_with_proxy_jump(
             let (bridge_addr, socket) = setup_tcp_bridge(&remote_agent.ssh, &handshake).await?;
             Ok(BootstrapResult {
                 agent_addr: bridge_addr,
+                agent_cert: agent_cert.clone(),
                 remote_agent,
                 transport_ctx: Some(TransportContext::TcpBridge { socket }),
                 _jump_sessions: chain.jump_sessions,
@@ -459,11 +597,19 @@ async fn bootstrap_with_proxy_jump(
             // If we have a routable target IP, try UDP relay first.
             if let Some(agent_ip) = relay_target_ip {
                 let agent_addr = SocketAddr::new(agent_ip, handshake.port);
-                match try_udp_relay_auto(args, &chain.jump_sessions, agent_addr).await {
+                match try_udp_relay_auto(
+                    args,
+                    &chain.jump_sessions,
+                    agent_addr,
+                    security.session_secret(),
+                )
+                .await
+                {
                     Ok((relay_addr, relay_infos)) => {
                         info!("auto-detection: UDP relay chain working");
                         Ok(BootstrapResult {
                             agent_addr: relay_addr,
+                            agent_cert: agent_cert.clone(),
                             remote_agent,
                             transport_ctx: Some(TransportContext::UdpRelay {
                                 _relay_infos: relay_infos,
@@ -477,6 +623,7 @@ async fn bootstrap_with_proxy_jump(
                             setup_tcp_bridge(&remote_agent.ssh, &handshake).await?;
                         Ok(BootstrapResult {
                             agent_addr: bridge_addr,
+                            agent_cert: agent_cert.clone(),
                             remote_agent,
                             transport_ctx: Some(TransportContext::TcpBridge { socket }),
                             _jump_sessions: chain.jump_sessions,
@@ -492,6 +639,7 @@ async fn bootstrap_with_proxy_jump(
                 let (bridge_addr, socket) = setup_tcp_bridge(&remote_agent.ssh, &handshake).await?;
                 Ok(BootstrapResult {
                     agent_addr: bridge_addr,
+                    agent_cert: agent_cert.clone(),
                     remote_agent,
                     transport_ctx: Some(TransportContext::TcpBridge { socket }),
                     _jump_sessions: chain.jump_sessions,
@@ -509,6 +657,7 @@ async fn setup_udp_relay_chain(
     args: &Args,
     jump_sessions: &[ssh::SshSession],
     agent_addr: SocketAddr,
+    session_secret: &str,
 ) -> Result<(SocketAddr, Vec<bootstrap::RelayInfo>)> {
     let mut relay_infos = Vec::with_capacity(jump_sessions.len());
     let mut next_target = agent_addr;
@@ -522,8 +671,13 @@ async fn setup_udp_relay_chain(
             "deploying relay on jump host"
         );
 
-        let relay_info =
-            bootstrap::bootstrap_relay(session, &target_str, args.relay_binary.as_deref()).await?;
+        let relay_info = bootstrap::bootstrap_relay(
+            session,
+            &target_str,
+            args.relay_binary.as_deref(),
+            session_secret,
+        )
+        .await?;
 
         // The next target for the previous relay is this relay.
         next_target = SocketAddr::new(session.peer_ip(), relay_info.port);
@@ -549,8 +703,10 @@ async fn try_udp_relay_auto(
     args: &Args,
     jump_sessions: &[ssh::SshSession],
     agent_addr: SocketAddr,
+    session_secret: &str,
 ) -> Result<(SocketAddr, Vec<bootstrap::RelayInfo>)> {
-    let (relay_addr, relay_infos) = setup_udp_relay_chain(args, jump_sessions, agent_addr).await?;
+    let (relay_addr, relay_infos) =
+        setup_udp_relay_chain(args, jump_sessions, agent_addr, session_secret).await?;
 
     // Probe the first relay to check if UDP is reachable.
     // NOTE: This only validates the first hop. If UDP is blocked at a later
@@ -567,15 +723,17 @@ async fn try_udp_relay_auto(
         .await
         .map_err(|e| Error::Protocol(format!("failed to bind probe socket: {e}")))?;
 
+    // The relay ignores unauthenticated probes, so present the session secret.
+    let probe = format!("PLK_PROBE:{session_secret}");
     probe_socket
-        .send_to(b"PLK_PROBE", relay_addr)
+        .send_to(probe.as_bytes(), relay_addr)
         .await
         .map_err(|e| Error::Protocol(format!("failed to send probe: {e}")))?;
 
     let mut buf = [0u8; 64];
     match tokio::time::timeout(probe_timeout, probe_socket.recv_from(&mut buf)).await {
         Ok(Ok((len, _))) => {
-            if &buf[..len] == b"PLK_PROBE_ACK" {
+            if buf.get(..len) == Some(b"PLK_PROBE_ACK".as_slice()) {
                 info!("relay probe: received ACK, UDP path is clear");
                 Ok((relay_addr, relay_infos))
             } else {
@@ -587,6 +745,57 @@ async fn try_udp_relay_auto(
             "relay probe: timed out (UDP may be blocked)".into(),
         )),
     }
+}
+
+/// Register with the first relay and return the socket to use for QUIC.
+///
+/// The registration must come from the socket QUIC will send from, because the
+/// relay pins the client by source address. Retried a few times because UDP
+/// registration can be lost.
+async fn register_with_relay(
+    relay_addr: SocketAddr,
+    session_secret: &str,
+) -> Result<std::net::UdpSocket> {
+    const ATTEMPTS: u32 = 3;
+    const ATTEMPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+    let socket = tokio::net::UdpSocket::bind("0.0.0.0:0")
+        .await
+        .map_err(|e| Error::Protocol(format!("failed to bind relay client socket: {e}")))?;
+
+    let hello = format!("PLK_HELLO:{session_secret}");
+    let mut buf = [0u8; 64];
+
+    for attempt in 1..=ATTEMPTS {
+        socket
+            .send_to(hello.as_bytes(), relay_addr)
+            .await
+            .map_err(|e| Error::Protocol(format!("failed to send relay registration: {e}")))?;
+
+        match tokio::time::timeout(ATTEMPT_TIMEOUT, socket.recv_from(&mut buf)).await {
+            Ok(Ok((len, _))) if buf.get(..len) == Some(b"PLK_HELLO_ACK".as_slice()) => {
+                info!(addr = %relay_addr, "registered with UDP relay");
+                return socket
+                    .into_std()
+                    .map_err(|e| Error::Protocol(format!("failed to convert relay socket: {e}")));
+            }
+            Ok(Ok(_)) => {
+                debug!(attempt, "unexpected relay registration response, retrying");
+            }
+            Ok(Err(e)) => {
+                return Err(Error::Protocol(format!(
+                    "relay registration recv error: {e}"
+                )));
+            }
+            Err(_) => {
+                debug!(attempt, "relay registration timed out, retrying");
+            }
+        }
+    }
+
+    Err(Error::Security(format!(
+        "the relay at {relay_addr} did not accept our session credentials"
+    )))
 }
 
 /// Set up a QUIC-over-TCP bridge via SSH direct-tcpip tunnel.
@@ -674,14 +883,16 @@ async fn run_single_session(
     agent_addr: SocketAddr,
     remote_agent: Option<&bootstrap::RemoteAgent>,
     transport_ctx: Option<TransportContext>,
+    security: &SessionSecurity,
+    agent_cert: &[u8],
 ) -> Result<()> {
     info!("connecting to agent at {}", agent_addr);
 
-    // Build rustls client config that skips certificate verification.
-    let rustls_config = rustls::ClientConfig::builder()
-        .dangerous()
-        .with_custom_certificate_verifier(Arc::new(SkipServerVerification))
-        .with_no_client_auth();
+    // Mutual TLS against the certificate the agent published over SSH. The
+    // handshake fails unless the peer holds the private key for exactly that
+    // certificate, so an on-path attacker cannot impersonate the agent, and we
+    // present our own pinned certificate so it cannot impersonate us either.
+    let rustls_config = common::session::client_tls_config(&security.identity, agent_cert)?;
 
     let quic_client_config = QuicClientConfig::try_from(rustls_config)
         .map_err(|e| Error::QuicConnection(e.to_string()))?;
@@ -720,8 +931,29 @@ async fn run_single_session(
 
             (endpoint, connection)
         }
+        Some(TransportContext::UdpRelay { .. }) => {
+            // The relay only forwards for a client that has proved knowledge of
+            // the session secret, and it binds that registration to a source
+            // address. Register on the very socket QUIC will use, then hand
+            // that socket to quinn.
+            let socket = register_with_relay(agent_addr, security.session_secret()).await?;
+            let runtime = quinn::default_runtime()
+                .ok_or_else(|| Error::QuicConnection("no async runtime".into()))?;
+            let mut endpoint =
+                quinn::Endpoint::new(quinn::EndpointConfig::default(), None, socket, runtime)
+                    .map_err(|e| Error::QuicConnection(e.to_string()))?;
+            endpoint.set_default_client_config(client_config);
+
+            let connection = endpoint
+                .connect(agent_addr, "localhost")
+                .map_err(|e| Error::QuicConnection(e.to_string()))?
+                .await
+                .map_err(|e| Error::QuicConnection(e.to_string()))?;
+
+            (endpoint, connection)
+        }
         _ => {
-            // Direct UDP or UDP relay -- standard UDP endpoint.
+            // Direct UDP -- standard UDP endpoint.
             let bind_addr: SocketAddr = "0.0.0.0:0"
                 .parse()
                 .map_err(|e| Error::Protocol(format!("invalid bind address: {e}")))?;
@@ -750,23 +982,34 @@ async fn run_single_session(
     info!("control stream accepted");
 
     // Step 1: Receive handshake from the agent.
+    //
+    // TLS has already proven the peer holds the private key for the certificate
+    // we learned over SSH. The session id check additionally confirms this is
+    // the agent process this run bootstrapped, not a leftover from an earlier
+    // one that happens to still be listening.
     let handshake = recv_msg(&mut recv).await?;
     let session_id = match handshake {
         ControlMsg::Handshake {
             protocol_version,
-            token,
+            session_id,
         } => {
             if protocol_version != PROTOCOL_VERSION {
                 return Err(Error::Protocol(format!(
                     "protocol version mismatch: agent={protocol_version}, cli={PROTOCOL_VERSION}"
                 )));
             }
+            if session_id != security.session_id() {
+                return Err(Error::Security(format!(
+                    "agent reported session id {session_id}, expected {}",
+                    security.session_id()
+                )));
+            }
             info!(
                 protocol_version,
-                token = %token,
-                "handshake received, protocol version OK"
+                session_id = %session_id,
+                "handshake received, agent identity and session confirmed"
             );
-            token
+            session_id
         }
         other => {
             return Err(Error::Protocol(format!(
@@ -776,12 +1019,23 @@ async fn run_single_session(
     };
 
     // Create a session-scoped tracing span so all subsequent logs are enriched
-    // with the session_id (Architecture Section 7.2). The agent's token serves
-    // as the session identifier, correlating Host and Agent logs.
+    // with the session_id (Architecture Section 7.2), correlating Host and
+    // Agent logs.
     let session_span = tracing::info_span!("session", session_id = %session_id);
     let _session_guard = session_span.enter();
 
-    // Step 2: Send echo request.
+    // Step 2: Prove to the agent that we hold the session secret it received
+    // over SSH. The agent serves nothing until this arrives.
+    send_msg(
+        &mut send,
+        &ControlMsg::SessionAuth {
+            session_secret: security.session_secret().to_string(),
+        },
+    )
+    .await?;
+    info!("session authentication sent");
+
+    // Step 3: Send echo request.
     let echo_payload = b"Hello from port-linker CLI!".to_vec();
     let echo_req = ControlMsg::EchoRequest {
         payload: echo_payload.clone(),

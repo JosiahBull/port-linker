@@ -8,3 +8,4 @@ edition.workspace = true
 [build-dependencies]
 agent-build = { path = "../agent-build" }
 flate2 = "1"
+sha2 = "0.10"
