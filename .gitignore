@@ -10,3 +10,6 @@ mutants.out.old
 
 # Mermaid cache
 .mermaid/
+
+# Pre-built agents staged for the CLI build (CI writes this)
+/prebuilt

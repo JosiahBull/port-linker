@@ -292,7 +292,8 @@ jobs:
 
       - name: Build release
         env:
-          PLK_PREBUILT_DIR: ${{ github.workspace }}/prebuilt
+          # Workspace-relative so it resolves identically inside cross containers.
+          PLK_PREBUILT_DIR: prebuilt
         run: cargo build --workspace --release
 
       - name: Compress binary with UPX (Linux)

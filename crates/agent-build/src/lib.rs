@@ -386,13 +386,25 @@ pub fn watch_sources(paths: &[&str]) {
 /// [`output_filename`], e.g. `agent-aarch64-apple-darwin`. Targets with no
 /// matching file fall through to being built locally, so a partially populated
 /// directory still works.
+///
+/// A relative path is resolved against the workspace root rather than the
+/// process's current directory. `cross` runs the build inside a container where
+/// the workspace is mounted at a different absolute path, so a relative path is
+/// the only form that means the same thing on both sides.
 fn find_prebuilt(config: &BuildConfig, target: &CrossTarget) -> Option<PathBuf> {
     let dir = env::var("PLK_PREBUILT_DIR").ok()?;
     if dir.is_empty() {
         return None;
     }
 
-    let candidate = Path::new(&dir).join(output_filename(&config.package, &target.triple));
+    let dir = Path::new(&dir);
+    let dir = if dir.is_absolute() {
+        dir.to_path_buf()
+    } else {
+        config.workspace_root.join(dir)
+    };
+
+    let candidate = dir.join(output_filename(&config.package, &target.triple));
     match fs::metadata(&candidate) {
         Ok(meta) if meta.len() > 0 => Some(candidate),
         _ => None,
