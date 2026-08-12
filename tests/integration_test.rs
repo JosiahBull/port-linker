@@ -3167,7 +3167,7 @@ async fn test_port_added_notification() {
         .await
         .unwrap();
 
-    let (_control_send, _control_recv) =
+    let (_control_send, mut control_recv) =
         complete_handshake(&connection, &agent.info).await.unwrap();
 
     // Start a TCP listener on a dynamic port.
@@ -3220,7 +3220,7 @@ async fn test_port_removed_notification() {
         .await
         .unwrap();
 
-    let (_control_send, _control_recv) =
+    let (_control_send, mut control_recv) =
         complete_handshake(&connection, &agent.info).await.unwrap();
 
     // Start and then drop a TCP listener on a dynamic port.
