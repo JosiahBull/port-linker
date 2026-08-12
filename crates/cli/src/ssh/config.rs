@@ -170,10 +170,8 @@ fn parse_ssh_config(reader: impl BufRead, target_host: &str) -> Option<ParsedHos
                 let expanded = expand_tilde(argument);
                 result.identity_files.push(PathBuf::from(expanded));
             }
-            "proxyjump" => {
-                if result.proxy_jump.is_none() {
-                    result.proxy_jump = Some(argument.to_string());
-                }
+            "proxyjump" if result.proxy_jump.is_none() => {
+                result.proxy_jump = Some(argument.to_string());
             }
             _ => {
                 // Ignore unsupported directives.
