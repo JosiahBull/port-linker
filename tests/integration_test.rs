@@ -51,17 +51,23 @@ const MAX_FRAME_SIZE: u32 = 1_048_576;
 // Test Utilities
 // ---------------------------------------------------------------------------
 
-/// Information parsed from agent stdout during startup.
-#[derive(Debug, Clone)]
+/// The session material for one agent, mirroring what the CLI sends over SSH.
 struct AgentInfo {
     port: u16,
-    token: String,
+    session_id: String,
+    session_secret: String,
+    /// The test's own TLS identity, pinned by the agent.
+    identity: common::session::Identity,
+    /// The agent's certificate, which the test pins.
+    agent_cert: Vec<u8>,
 }
 
 /// A running agent process with parsed connection info.
 struct AgentProcess {
     child: Child,
     info: AgentInfo,
+    /// Held open so the agent's stdin is not closed mid-test.
+    _stdin: Option<std::process::ChildStdin>,
 }
 
 impl AgentProcess {
@@ -122,15 +128,42 @@ fn agent_binary_path() -> String {
     bin_path
 }
 
-/// Spawn the agent binary and parse its stdout for AGENT_READY/PORT/TOKEN.
+/// Spawn the agent and perform the introduction the SSH channel normally does.
+///
+/// The agent refuses to listen without a session config, so the test plays the
+/// role of the host: it mints an identity and session secret, writes them to
+/// the agent's stdin, and pins the certificate the agent publishes on stdout.
 fn spawn_agent() -> Result<AgentProcess> {
     let agent_bin = agent_binary_path();
 
+    let identity = common::session::Identity::generate("port-linker-host")?;
+    let session_id = common::session::generate_session_id()?;
+    let session_secret = common::session::generate_session_secret()?;
+
+    let config = common::session::AgentSessionConfig {
+        session_id: session_id.clone(),
+        session_secret: session_secret.clone(),
+        client_cert_der: identity.cert_der().to_vec(),
+    };
+
     let mut child = Command::new(agent_bin)
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(Error::Io)?;
+
+    {
+        use std::io::Write;
+        let stdin = child
+            .stdin
+            .as_mut()
+            .ok_or_else(|| Error::Protocol("failed to capture agent stdin".into()))?;
+        stdin
+            .write_all(config.encode().as_bytes())
+            .map_err(Error::Io)?;
+        stdin.flush().map_err(Error::Io)?;
+    }
 
     let stdout = child
         .stdout
@@ -139,7 +172,7 @@ fn spawn_agent() -> Result<AgentProcess> {
 
     let mut reader = BufReader::new(stdout);
     let mut port_opt: Option<u16> = None;
-    let mut token_opt: Option<String> = None;
+    let mut cert_opt: Option<String> = None;
     let mut ready = false;
 
     // Read lines with timeout.
@@ -168,85 +201,91 @@ fn spawn_agent() -> Result<AgentProcess> {
                 p.parse()
                     .map_err(|e| Error::Protocol(format!("invalid PORT in agent output: {e}")))?,
             );
-        } else if let Some(t) = line.strip_prefix("TOKEN=") {
-            token_opt = Some(t.to_string());
+        } else if let Some(c) = line.strip_prefix("AGENT_CERT=") {
+            cert_opt = Some(c.to_string());
         }
 
-        // Once we have all three, we're done.
-        if ready && port_opt.is_some() && token_opt.is_some() {
+        if ready && port_opt.is_some() && cert_opt.is_some() {
             break;
         }
     }
 
     let port = port_opt.ok_or_else(|| Error::Protocol("agent did not emit PORT".into()))?;
-    let token = token_opt.ok_or_else(|| Error::Protocol("agent did not emit TOKEN".into()))?;
+    let agent_cert = common::session::from_hex(
+        &cert_opt.ok_or_else(|| Error::Protocol("agent did not emit AGENT_CERT".into()))?,
+    )?;
+
+    let stdin = child.stdin.take();
 
     Ok(AgentProcess {
         child,
-        info: AgentInfo { port, token },
+        info: AgentInfo {
+            port,
+            session_id,
+            session_secret,
+            identity,
+            agent_cert,
+        },
+        _stdin: stdin,
     })
 }
 
-/// TLS: skip server certificate verification (self-signed certs in Phase 1).
-#[derive(Debug)]
-struct SkipServerVerification;
+/// Complete the control-stream handshake against a running agent.
+///
+/// Reads the agent's `Handshake`, checks the session id, and proves knowledge
+/// of the session secret. The agent serves nothing until this completes.
+async fn complete_handshake(
+    connection: &quinn::Connection,
+    info: &AgentInfo,
+) -> Result<(quinn::SendStream, quinn::RecvStream)> {
+    let (mut send, mut recv) = connection
+        .accept_bi()
+        .await
+        .map_err(|e| Error::QuicStream(e.to_string()))?;
 
-impl rustls::client::danger::ServerCertVerifier for SkipServerVerification {
-    fn verify_server_cert(
-        &self,
-        _end_entity: &rustls_pki_types::CertificateDer<'_>,
-        _intermediates: &[rustls_pki_types::CertificateDer<'_>],
-        _server_name: &rustls_pki_types::ServerName<'_>,
-        _ocsp_response: &[u8],
-        _now: rustls_pki_types::UnixTime,
-    ) -> std::result::Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    match recv_msg(&mut recv).await? {
+        ControlMsg::Handshake {
+            protocol_version,
+            session_id,
+        } => {
+            assert_eq!(
+                protocol_version,
+                protocol::PROTOCOL_VERSION,
+                "protocol version mismatch"
+            );
+            assert_eq!(session_id, info.session_id, "session id mismatch");
+        }
+        other => panic!("expected Handshake, got {other:?}"),
     }
 
-    fn verify_tls12_signature(
-        &self,
-        _message: &[u8],
-        _cert: &rustls_pki_types::CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
-    ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
-    }
+    send_msg(
+        &mut send,
+        &ControlMsg::SessionAuth {
+            session_secret: info.session_secret.clone(),
+        },
+    )
+    .await?;
 
-    fn verify_tls13_signature(
-        &self,
-        _message: &[u8],
-        _cert: &rustls_pki_types::CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
-    ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
-    }
-
-    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        rustls::crypto::ring::default_provider()
-            .signature_verification_algorithms
-            .supported_schemes()
-    }
+    Ok((send, recv))
 }
 
-/// Build a QUIC client endpoint with TLS verification disabled.
-fn build_client_endpoint() -> Result<quinn::Endpoint> {
-    build_client_endpoint_inner(false)
+/// Build a QUIC client endpoint pinned to this agent, with mutual TLS.
+fn build_client_endpoint(info: &AgentInfo) -> Result<quinn::Endpoint> {
+    build_client_endpoint_inner(info, false)
 }
 
-/// Build a QUIC client endpoint with TLS verification disabled and QUIC datagrams enabled.
-fn build_client_endpoint_with_datagrams() -> Result<quinn::Endpoint> {
-    build_client_endpoint_inner(true)
+/// As [`build_client_endpoint`], with QUIC datagrams enabled.
+fn build_client_endpoint_with_datagrams(info: &AgentInfo) -> Result<quinn::Endpoint> {
+    build_client_endpoint_inner(info, true)
 }
 
-fn build_client_endpoint_inner(enable_datagrams: bool) -> Result<quinn::Endpoint> {
-    rustls::crypto::ring::default_provider()
-        .install_default()
-        .ok();
-
-    let rustls_config = rustls::ClientConfig::builder()
-        .dangerous()
-        .with_custom_certificate_verifier(Arc::new(SkipServerVerification))
-        .with_no_client_auth();
+fn build_client_endpoint_inner(
+    info: &AgentInfo,
+    enable_datagrams: bool,
+) -> Result<quinn::Endpoint> {
+    // Exactly what the CLI does: present our pinned certificate, accept only
+    // the agent's.
+    let rustls_config = common::session::client_tls_config(&info.identity, &info.agent_cert)?;
 
     let quic_client_config = QuicClientConfig::try_from(rustls_config)
         .map_err(|e| Error::QuicConnection(e.to_string()))?;
@@ -309,7 +348,7 @@ async fn recv_msg(recv: &mut quinn::RecvStream) -> Result<ControlMsg> {
 
 /// Test 1: Full process lifecycle.
 ///
-/// Spawns the agent binary, parses stdout for AGENT_READY/PORT/TOKEN,
+/// Spawns the agent binary, parses stdout for AGENT_READY/PORT/AGENT_CERT,
 /// connects a QUIC client, performs handshake and echo, then cleanly shuts down.
 #[tokio::test]
 async fn test_process_lifecycle() {
@@ -319,7 +358,7 @@ async fn test_process_lifecycle() {
         .parse()
         .expect("invalid agent address");
 
-    let endpoint = build_client_endpoint().expect("failed to build client endpoint");
+    let endpoint = build_client_endpoint(&agent.info).expect("failed to build client endpoint");
 
     let connection = endpoint
         .connect(agent_addr, "localhost")
@@ -327,29 +366,10 @@ async fn test_process_lifecycle() {
         .await
         .expect("failed to establish QUIC connection");
 
-    let (mut send, mut recv) = connection
-        .accept_bi()
+    // Handshake, session id check, and proof of the session secret.
+    let (mut send, mut recv) = complete_handshake(&connection, &agent.info)
         .await
-        .expect("failed to accept bi stream");
-
-    // Receive handshake.
-    let handshake = recv_msg(&mut recv)
-        .await
-        .expect("failed to receive handshake");
-    match handshake {
-        ControlMsg::Handshake {
-            protocol_version,
-            token,
-        } => {
-            assert_eq!(
-                protocol_version,
-                protocol::PROTOCOL_VERSION,
-                "protocol version mismatch"
-            );
-            assert_eq!(token, agent.info.token, "token mismatch");
-        }
-        other => panic!("expected Handshake, got {:?}", other),
-    }
+        .expect("failed to complete handshake");
 
     // Send echo request.
     let echo_payload = b"integration test payload".to_vec();
@@ -405,17 +425,14 @@ async fn test_echo_empty_payload() {
 
     let agent_addr: SocketAddr = format!("127.0.0.1:{}", agent.info.port).parse().unwrap();
 
-    let endpoint = build_client_endpoint().unwrap();
+    let endpoint = build_client_endpoint(&agent.info).unwrap();
     let connection = endpoint
         .connect(agent_addr, "localhost")
         .unwrap()
         .await
         .unwrap();
 
-    let (mut send, mut recv) = connection.accept_bi().await.unwrap();
-
-    // Receive and discard handshake.
-    let _ = recv_msg(&mut recv).await.unwrap();
+    let (mut send, mut recv) = complete_handshake(&connection, &agent.info).await.unwrap();
 
     // Send echo with empty payload.
     let echo_req = ControlMsg::EchoRequest { payload: vec![] };
@@ -441,17 +458,14 @@ async fn test_echo_one_byte_payload() {
 
     let agent_addr: SocketAddr = format!("127.0.0.1:{}", agent.info.port).parse().unwrap();
 
-    let endpoint = build_client_endpoint().unwrap();
+    let endpoint = build_client_endpoint(&agent.info).unwrap();
     let connection = endpoint
         .connect(agent_addr, "localhost")
         .unwrap()
         .await
         .unwrap();
 
-    let (mut send, mut recv) = connection.accept_bi().await.unwrap();
-
-    // Receive and discard handshake.
-    let _ = recv_msg(&mut recv).await.unwrap();
+    let (mut send, mut recv) = complete_handshake(&connection, &agent.info).await.unwrap();
 
     // Send echo with 1-byte payload.
     let echo_req = ControlMsg::EchoRequest {
@@ -479,17 +493,14 @@ async fn test_echo_1kb_payload() {
 
     let agent_addr: SocketAddr = format!("127.0.0.1:{}", agent.info.port).parse().unwrap();
 
-    let endpoint = build_client_endpoint().unwrap();
+    let endpoint = build_client_endpoint(&agent.info).unwrap();
     let connection = endpoint
         .connect(agent_addr, "localhost")
         .unwrap()
         .await
         .unwrap();
 
-    let (mut send, mut recv) = connection.accept_bi().await.unwrap();
-
-    // Receive and discard handshake.
-    let _ = recv_msg(&mut recv).await.unwrap();
+    let (mut send, mut recv) = complete_handshake(&connection, &agent.info).await.unwrap();
 
     // Send echo with 1KB payload.
     let payload_1kb = vec![0xAAu8; 1024];
@@ -518,17 +529,14 @@ async fn test_echo_near_1mb_payload() {
 
     let agent_addr: SocketAddr = format!("127.0.0.1:{}", agent.info.port).parse().unwrap();
 
-    let endpoint = build_client_endpoint().unwrap();
+    let endpoint = build_client_endpoint(&agent.info).unwrap();
     let connection = endpoint
         .connect(agent_addr, "localhost")
         .unwrap()
         .await
         .unwrap();
 
-    let (mut send, mut recv) = connection.accept_bi().await.unwrap();
-
-    // Receive and discard handshake.
-    let _ = recv_msg(&mut recv).await.unwrap();
+    let (mut send, mut recv) = complete_handshake(&connection, &agent.info).await.unwrap();
 
     // Send echo with payload near the max size.
     // The frame includes the encoded ControlMsg, so we can't quite reach 1MB raw payload.
@@ -564,17 +572,14 @@ async fn test_multiple_echo_roundtrips() {
 
     let agent_addr: SocketAddr = format!("127.0.0.1:{}", agent.info.port).parse().unwrap();
 
-    let endpoint = build_client_endpoint().unwrap();
+    let endpoint = build_client_endpoint(&agent.info).unwrap();
     let connection = endpoint
         .connect(agent_addr, "localhost")
         .unwrap()
         .await
         .unwrap();
 
-    let (mut send, mut recv) = connection.accept_bi().await.unwrap();
-
-    // Receive and discard handshake.
-    let _ = recv_msg(&mut recv).await.unwrap();
+    let (mut send, mut recv) = complete_handshake(&connection, &agent.info).await.unwrap();
 
     // Send 5 echo requests in sequence.
     for i in 0..5 {
@@ -607,17 +612,14 @@ async fn test_heartbeat() {
 
     let agent_addr: SocketAddr = format!("127.0.0.1:{}", agent.info.port).parse().unwrap();
 
-    let endpoint = build_client_endpoint().unwrap();
+    let endpoint = build_client_endpoint(&agent.info).unwrap();
     let connection = endpoint
         .connect(agent_addr, "localhost")
         .unwrap()
         .await
         .unwrap();
 
-    let (mut send, mut recv) = connection.accept_bi().await.unwrap();
-
-    // Receive and discard handshake.
-    let _ = recv_msg(&mut recv).await.unwrap();
+    let (mut send, mut recv) = complete_handshake(&connection, &agent.info).await.unwrap();
 
     // Send heartbeat.
     send_msg(&mut send, &ControlMsg::Heartbeat).await.unwrap();
@@ -650,7 +652,7 @@ fn test_protocol_version_validation() {
     // Encode a handshake with wrong version.
     let wrong_version_handshake = ControlMsg::Handshake {
         protocol_version: 999,
-        token: "test-token".into(),
+        session_id: "plk-deadbeefdeadbeef".into(),
     };
 
     let encoded = protocol::encode(&wrong_version_handshake).expect("encode failed");
@@ -708,17 +710,14 @@ async fn test_mixed_echo_and_heartbeat() {
 
     let agent_addr: SocketAddr = format!("127.0.0.1:{}", agent.info.port).parse().unwrap();
 
-    let endpoint = build_client_endpoint().unwrap();
+    let endpoint = build_client_endpoint(&agent.info).unwrap();
     let connection = endpoint
         .connect(agent_addr, "localhost")
         .unwrap()
         .await
         .unwrap();
 
-    let (mut send, mut recv) = connection.accept_bi().await.unwrap();
-
-    // Receive and discard handshake.
-    let _ = recv_msg(&mut recv).await.unwrap();
+    let (mut send, mut recv) = complete_handshake(&connection, &agent.info).await.unwrap();
 
     // Send: Echo, Heartbeat, Echo, Heartbeat, Echo.
     for i in 0..3 {
@@ -815,7 +814,7 @@ async fn test_tcp_connection_refused() {
 
     let agent_addr: SocketAddr = format!("127.0.0.1:{}", agent.info.port).parse().unwrap();
 
-    let endpoint = build_client_endpoint().unwrap();
+    let endpoint = build_client_endpoint(&agent.info).unwrap();
     let connection = endpoint
         .connect(agent_addr, "localhost")
         .unwrap()
@@ -823,8 +822,8 @@ async fn test_tcp_connection_refused() {
         .unwrap();
 
     // Accept and discard the control stream handshake.
-    let (_control_send, mut control_recv) = connection.accept_bi().await.unwrap();
-    let _ = recv_msg(&mut control_recv).await.unwrap();
+    let (_control_send, _control_recv) =
+        complete_handshake(&connection, &agent.info).await.unwrap();
 
     // Open a new stream for TCP forwarding to a port that's definitely not listening.
     // Use a high port number that's unlikely to have a service.
@@ -937,7 +936,7 @@ async fn test_tcp_bidirectional_forwarding() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Connect to agent.
-    let endpoint = build_client_endpoint().unwrap();
+    let endpoint = build_client_endpoint(&agent.info).unwrap();
     let connection = endpoint
         .connect(agent_addr, "localhost")
         .unwrap()
@@ -945,8 +944,8 @@ async fn test_tcp_bidirectional_forwarding() {
         .unwrap();
 
     // Accept and discard the control stream handshake.
-    let (_control_send, mut control_recv) = connection.accept_bi().await.unwrap();
-    let _ = recv_msg(&mut control_recv).await.unwrap();
+    let (_control_send, _control_recv) =
+        complete_handshake(&connection, &agent.info).await.unwrap();
 
     // Open a new stream for TCP forwarding.
     let (mut tcp_send, mut tcp_recv) = connection
@@ -1076,15 +1075,15 @@ async fn test_tcp_forwarding_large_payload() {
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let endpoint = build_client_endpoint().unwrap();
+    let endpoint = build_client_endpoint(&agent.info).unwrap();
     let connection = endpoint
         .connect(agent_addr, "localhost")
         .unwrap()
         .await
         .unwrap();
 
-    let (_control_send, mut control_recv) = connection.accept_bi().await.unwrap();
-    let _ = recv_msg(&mut control_recv).await.unwrap();
+    let (_control_send, _control_recv) =
+        complete_handshake(&connection, &agent.info).await.unwrap();
 
     let (mut tcp_send, mut tcp_recv) = connection
         .open_bi()
@@ -1165,15 +1164,15 @@ async fn test_tcp_multiple_concurrent_streams() {
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let endpoint = build_client_endpoint().unwrap();
+    let endpoint = build_client_endpoint(&agent.info).unwrap();
     let connection = endpoint
         .connect(agent_addr, "localhost")
         .unwrap()
         .await
         .unwrap();
 
-    let (_control_send, mut control_recv) = connection.accept_bi().await.unwrap();
-    let _ = recv_msg(&mut control_recv).await.unwrap();
+    let (_control_send, _control_recv) =
+        complete_handshake(&connection, &agent.info).await.unwrap();
 
     // Open two concurrent TCP forwarding streams.
     let (mut tcp_send_1, mut tcp_recv_1) = connection.open_bi().await.unwrap();
@@ -2919,12 +2918,14 @@ fn test_agent_log_event_level_sequence() {
 /// Test 70: Protocol version constant visibility.
 ///
 /// Validates that PROTOCOL_VERSION is accessible and has a reasonable value.
+/// Version 2 introduced mutually pinned TLS identities and the session-secret
+/// proof, which a version 1 peer cannot satisfy.
 #[test]
 fn test_protocol_version_constant() {
     assert_eq!(
         protocol::PROTOCOL_VERSION,
-        1,
-        "PROTOCOL_VERSION should be 1"
+        2,
+        "PROTOCOL_VERSION should be 2"
     );
     const { assert!(protocol::PROTOCOL_VERSION > 0) };
 }
@@ -2978,7 +2979,7 @@ async fn test_udp_forwarding_e2e() {
     let udp_port = udp_socket.local_addr().unwrap().port();
 
     // Connect to agent with datagram-enabled endpoint.
-    let endpoint = build_client_endpoint_with_datagrams().unwrap();
+    let endpoint = build_client_endpoint_with_datagrams(&agent.info).unwrap();
     let connection = endpoint
         .connect(agent_addr, "localhost")
         .unwrap()
@@ -2986,8 +2987,8 @@ async fn test_udp_forwarding_e2e() {
         .unwrap();
 
     // Accept and discard the control stream handshake.
-    let (_control_send, mut control_recv) = connection.accept_bi().await.unwrap();
-    let _ = recv_msg(&mut control_recv).await.unwrap();
+    let (_control_send, _control_recv) =
+        complete_handshake(&connection, &agent.info).await.unwrap();
 
     // Encode and send a UDP datagram via QUIC.
     let test_data = b"hello udp".to_vec();
@@ -3036,15 +3037,15 @@ async fn test_udp_forwarding_multiple_datagrams() {
         .expect("failed to bind UDP socket");
     let udp_port = udp_socket.local_addr().unwrap().port();
 
-    let endpoint = build_client_endpoint_with_datagrams().unwrap();
+    let endpoint = build_client_endpoint_with_datagrams(&agent.info).unwrap();
     let connection = endpoint
         .connect(agent_addr, "localhost")
         .unwrap()
         .await
         .unwrap();
 
-    let (_control_send, mut control_recv) = connection.accept_bi().await.unwrap();
-    let _ = recv_msg(&mut control_recv).await.unwrap();
+    let (_control_send, _control_recv) =
+        complete_handshake(&connection, &agent.info).await.unwrap();
 
     // Send 10 datagrams with small delays to avoid congestion.
     let count = 10;
@@ -3104,15 +3105,15 @@ async fn test_udp_forwarding_large_datagram() {
         .expect("failed to bind UDP socket");
     let udp_port = udp_socket.local_addr().unwrap().port();
 
-    let endpoint = build_client_endpoint_with_datagrams().unwrap();
+    let endpoint = build_client_endpoint_with_datagrams(&agent.info).unwrap();
     let connection = endpoint
         .connect(agent_addr, "localhost")
         .unwrap()
         .await
         .unwrap();
 
-    let (_control_send, mut control_recv) = connection.accept_bi().await.unwrap();
-    let _ = recv_msg(&mut control_recv).await.unwrap();
+    let (_control_send, _control_recv) =
+        complete_handshake(&connection, &agent.info).await.unwrap();
 
     // Use a 1000-byte payload that fits within the QUIC datagram MTU.
     let large_data: Vec<u8> = (0..1000).map(|i| (i % 256) as u8).collect();
@@ -3159,15 +3160,15 @@ async fn test_port_added_notification() {
 
     let agent_addr: SocketAddr = format!("127.0.0.1:{}", agent.info.port).parse().unwrap();
 
-    let endpoint = build_client_endpoint().unwrap();
+    let endpoint = build_client_endpoint(&agent.info).unwrap();
     let connection = endpoint
         .connect(agent_addr, "localhost")
         .unwrap()
         .await
         .unwrap();
 
-    let (_control_send, mut control_recv) = connection.accept_bi().await.unwrap();
-    let _ = recv_msg(&mut control_recv).await.unwrap();
+    let (_control_send, _control_recv) =
+        complete_handshake(&connection, &agent.info).await.unwrap();
 
     // Start a TCP listener on a dynamic port.
     let test_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -3212,15 +3213,15 @@ async fn test_port_removed_notification() {
 
     let agent_addr: SocketAddr = format!("127.0.0.1:{}", agent.info.port).parse().unwrap();
 
-    let endpoint = build_client_endpoint().unwrap();
+    let endpoint = build_client_endpoint(&agent.info).unwrap();
     let connection = endpoint
         .connect(agent_addr, "localhost")
         .unwrap()
         .await
         .unwrap();
 
-    let (_control_send, mut control_recv) = connection.accept_bi().await.unwrap();
-    let _ = recv_msg(&mut control_recv).await.unwrap();
+    let (_control_send, _control_recv) =
+        complete_handshake(&connection, &agent.info).await.unwrap();
 
     // Start and then drop a TCP listener on a dynamic port.
     let test_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -3273,5 +3274,551 @@ async fn test_port_removed_notification() {
 
     connection.close(0u32.into(), b"done");
     endpoint.wait_idle().await;
+    agent.kill().ok();
+}
+
+// ---------------------------------------------------------------------------
+// Session security
+// ---------------------------------------------------------------------------
+
+/// An attacker who reaches the agent's UDP port but does not hold the pinned
+/// host certificate must not get a connection.
+///
+/// This is the path that previously handed anyone on the network a proxy to
+/// every loopback service on the target.
+#[tokio::test]
+async fn test_unauthenticated_client_is_rejected() {
+    let mut agent = spawn_agent().expect("failed to spawn agent");
+    let agent_addr: SocketAddr = format!("127.0.0.1:{}", agent.info.port).parse().unwrap();
+
+    // A stranger with their own identity, pinning the agent correctly (the
+    // agent's certificate is public), but with no valid client certificate.
+    let attacker = common::session::Identity::generate("attacker").unwrap();
+    let rustls_config =
+        common::session::client_tls_config(&attacker, &agent.info.agent_cert).unwrap();
+    let quic_config = QuicClientConfig::try_from(rustls_config).unwrap();
+    let mut client_config = quinn::ClientConfig::new(Arc::new(quic_config));
+    client_config.transport_config(Arc::new(quinn::TransportConfig::default()));
+
+    let mut endpoint = quinn::Endpoint::client("0.0.0.0:0".parse().unwrap()).unwrap();
+    endpoint.set_default_client_config(client_config);
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(10),
+        endpoint.connect(agent_addr, "localhost").unwrap(),
+    )
+    .await;
+
+    // In TLS 1.3 the client certificate travels after the server's Finished, so
+    // the *client* may briefly believe the connection is up. What matters is
+    // that the agent rejects it: the connection is torn down, no control stream
+    // is ever offered, and no forwarding stream works.
+    if let Ok(Ok(connection)) = result {
+        let forwarding = tokio::time::timeout(Duration::from_secs(5), async {
+            let (mut send, mut recv) = connection.open_bi().await?;
+            send_msg(&mut send, &ControlMsg::TcpStreamInit { port: 22 })
+                .await
+                .map_err(|_| quinn::ConnectionError::LocallyClosed)?;
+            let mut status = [0u8; 1];
+            recv.read_exact(&mut status)
+                .await
+                .map_err(|_| quinn::ConnectionError::LocallyClosed)?;
+            Ok::<_, quinn::ConnectionError>(())
+        })
+        .await;
+        assert!(
+            !matches!(forwarding, Ok(Ok(()))),
+            "an unauthenticated peer reached a local service through the agent"
+        );
+
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), connection.closed())
+                .await
+                .is_ok(),
+            "the agent left an unauthenticated connection open"
+        );
+    }
+
+    // The agent must survive the rejected attempt and still serve the real host.
+    let endpoint = build_client_endpoint(&agent.info).unwrap();
+    let connection = endpoint
+        .connect(agent_addr, "localhost")
+        .unwrap()
+        .await
+        .expect("agent should still accept the legitimate host after a rejected peer");
+
+    let (mut send, mut recv) = complete_handshake(&connection, &agent.info).await.unwrap();
+    send_msg(&mut send, &ControlMsg::EchoRequest { payload: vec![7] })
+        .await
+        .unwrap();
+    match recv_msg(&mut recv).await.unwrap() {
+        ControlMsg::EchoResponse { payload } => assert_eq!(payload, vec![7]),
+        other => panic!("expected EchoResponse, got {other:?}"),
+    }
+
+    connection.close(0u32.into(), b"done");
+    endpoint.wait_idle().await;
+    agent.kill().ok();
+}
+
+/// A host that pins the wrong certificate must refuse to connect, which is what
+/// an impersonated agent looks like from the host's side.
+#[tokio::test]
+async fn test_impersonated_agent_is_rejected() {
+    let mut agent = spawn_agent().expect("failed to spawn agent");
+    let agent_addr: SocketAddr = format!("127.0.0.1:{}", agent.info.port).parse().unwrap();
+
+    // Pin a certificate the agent does not hold.
+    let impostor = common::session::Identity::generate("impostor").unwrap();
+    let rustls_config =
+        common::session::client_tls_config(&agent.info.identity, impostor.cert_der()).unwrap();
+    let quic_config = QuicClientConfig::try_from(rustls_config).unwrap();
+    let client_config = quinn::ClientConfig::new(Arc::new(quic_config));
+
+    let mut endpoint = quinn::Endpoint::client("0.0.0.0:0".parse().unwrap()).unwrap();
+    endpoint.set_default_client_config(client_config);
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(10),
+        endpoint.connect(agent_addr, "localhost").unwrap(),
+    )
+    .await;
+
+    assert!(
+        !matches!(result, Ok(Ok(_))),
+        "host connected to an agent whose certificate it did not pin"
+    );
+
+    agent.kill().ok();
+}
+
+/// Holding a valid certificate is not enough: the host must also prove it knows
+/// the session secret delivered over SSH before the agent will serve anything.
+#[tokio::test]
+async fn test_wrong_session_secret_is_rejected() {
+    let mut agent = spawn_agent().expect("failed to spawn agent");
+    let agent_addr: SocketAddr = format!("127.0.0.1:{}", agent.info.port).parse().unwrap();
+
+    let endpoint = build_client_endpoint(&agent.info).unwrap();
+    let connection = endpoint
+        .connect(agent_addr, "localhost")
+        .unwrap()
+        .await
+        .unwrap();
+
+    let (mut send, mut recv) = connection.accept_bi().await.unwrap();
+    let _ = recv_msg(&mut recv).await.unwrap();
+
+    send_msg(
+        &mut send,
+        &ControlMsg::SessionAuth {
+            session_secret: "0".repeat(64),
+        },
+    )
+    .await
+    .unwrap();
+
+    // The agent must refuse to serve: no echo response, and the connection dies.
+    send_msg(&mut send, &ControlMsg::EchoRequest { payload: vec![1] })
+        .await
+        .ok();
+
+    let served = tokio::time::timeout(Duration::from_secs(10), recv_msg(&mut recv)).await;
+    assert!(
+        !matches!(served, Ok(Ok(_))),
+        "agent served a peer with a bad session secret: {served:?}"
+    );
+
+    agent.kill().ok();
+}
+
+/// The agent must refuse to listen at all when it is not given a session
+/// config, rather than falling back to accepting anyone.
+#[test]
+fn test_agent_without_session_config_fails_closed() {
+    use std::io::Read;
+
+    let mut child = Command::new(agent_binary_path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn agent");
+
+    // Close stdin immediately: no config.
+    drop(child.stdin.take());
+
+    let status = child
+        .wait_timeout(Duration::from_secs(10))
+        .expect("failed to wait on agent")
+        .expect("agent should exit without a session config");
+
+    assert!(
+        !status.success(),
+        "agent must exit non-zero when it has no peer to trust"
+    );
+
+    let mut stdout = String::new();
+    child
+        .stdout
+        .take()
+        .expect("stdout")
+        .read_to_string(&mut stdout)
+        .ok();
+    assert!(
+        !stdout.contains("AGENT_READY"),
+        "agent must not announce itself as ready without a session config"
+    );
+}
+
+/// A relay chain must authenticate every hop, drop unauthenticated traffic, and
+/// still carry real traffic in both directions.
+///
+/// Registration is propagated down the chain so each hop learns its upstream
+/// neighbour; without that, only the first hop would ever have a client.
+#[tokio::test]
+async fn test_relay_chain_authenticates_every_hop() {
+    assert_relay_chain_is_authenticated(2).await;
+}
+
+/// The same guarantees must hold for a longer chain.
+///
+/// Registration has to propagate transitively: hop 1 tells hop 2, which tells
+/// hop 3, and so on. Two hops cannot distinguish "propagates one step" from
+/// "propagates all the way", so this covers the deeper case.
+#[tokio::test]
+async fn test_relay_chain_authenticates_four_hops() {
+    assert_relay_chain_is_authenticated(4).await;
+}
+
+/// Build a chain of `hops` relays between a client and a stand-in agent, then
+/// assert the chain authenticates and forwards correctly end to end.
+async fn assert_relay_chain_is_authenticated(hops: usize) {
+    use tokio::net::UdpSocket;
+
+    assert!(hops >= 1, "a chain needs at least one relay");
+
+    let relay_bin = relay_binary_path();
+    let secret = common::session::generate_session_secret().unwrap();
+
+    // Stand-in for the agent's QUIC endpoint.
+    let agent = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let mut target = agent.local_addr().unwrap().to_string();
+
+    // Deployed in reverse, exactly as the CLI does it: the last hop points at
+    // the agent, and each earlier hop points at the one after it.
+    let mut relays = Vec::with_capacity(hops);
+    for _ in 0..hops {
+        let (child, port) = spawn_relay(&relay_bin, &target, &secret);
+        target = format!("127.0.0.1:{port}");
+        relays.push(child);
+    }
+    // The last relay deployed is the one the client talks to.
+    let entry: SocketAddr = target.parse().unwrap();
+
+    let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let mut buf = vec![0u8; 4096];
+
+    // Unauthenticated traffic must not reach the far end.
+    client.send_to(b"\xc0unauthenticated", entry).await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), agent.recv_from(&mut buf))
+            .await
+            .is_err(),
+        "unauthenticated traffic crossed a {hops}-hop chain"
+    );
+
+    // A wrong secret must not register a client.
+    client
+        .send_to(format!("PLK_HELLO:{}", "b".repeat(64)).as_bytes(), entry)
+        .await
+        .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), client.recv_from(&mut buf))
+            .await
+            .is_err(),
+        "relay acknowledged a bad secret"
+    );
+
+    // The real registration is acknowledged and propagates down the chain.
+    client
+        .send_to(format!("PLK_HELLO:{secret}").as_bytes(), entry)
+        .await
+        .unwrap();
+    let (len, _) = tokio::time::timeout(Duration::from_secs(5), client.recv_from(&mut buf))
+        .await
+        .expect("no registration ack")
+        .unwrap();
+    assert_eq!(&buf[..len], b"PLK_HELLO_ACK");
+
+    // Reaching the far end proves it traversed every hop, not just the first.
+    let (len, last_hop_src) =
+        tokio::time::timeout(Duration::from_secs(5), agent.recv_from(&mut buf))
+            .await
+            .unwrap_or_else(|_| panic!("registration did not propagate through {hops} hops"))
+            .unwrap();
+    assert!(buf[..len].starts_with(b"PLK_HELLO:"));
+
+    // Traffic now flows end to end, both directions.
+    client.send_to(b"through-the-chain", entry).await.unwrap();
+    let (len, _) = tokio::time::timeout(Duration::from_secs(5), agent.recv_from(&mut buf))
+        .await
+        .unwrap_or_else(|_| panic!("client traffic did not cross {hops} hops"))
+        .unwrap();
+    assert_eq!(&buf[..len], b"through-the-chain");
+
+    agent.send_to(b"reply", last_hop_src).await.unwrap();
+    let (len, _) = tokio::time::timeout(Duration::from_secs(5), client.recv_from(&mut buf))
+        .await
+        .unwrap_or_else(|_| panic!("return traffic did not cross {hops} hops"))
+        .unwrap();
+    assert_eq!(&buf[..len], b"reply");
+
+    for mut relay in relays {
+        relay.kill().ok();
+    }
+}
+
+/// Resolve the relay binary, building it if necessary.
+fn relay_binary_path() -> String {
+    use std::sync::Once;
+    static BUILD_ONCE: Once = Once::new();
+
+    if let Ok(path) = std::env::var("CARGO_BIN_EXE_port-linker-relay") {
+        return path;
+    }
+
+    let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("tests dir should have a parent");
+    let bin_path = workspace_root
+        .join("target/debug/port-linker-relay")
+        .to_string_lossy()
+        .to_string();
+
+    BUILD_ONCE.call_once(|| {
+        if std::path::Path::new(&bin_path).exists() {
+            return;
+        }
+        let status = Command::new("cargo")
+            .args(["build", "-p", "udp-relay"])
+            .current_dir(workspace_root)
+            .status()
+            .expect("failed to invoke `cargo build -p udp-relay`");
+        assert!(status.success(), "cargo build -p udp-relay failed");
+    });
+
+    bin_path
+}
+
+/// Spawn a relay with the session secret on stdin, returning it and its port.
+fn spawn_relay(relay_bin: &str, target: &str, secret: &str) -> (Child, u16) {
+    use std::io::Write;
+
+    let mut child = Command::new(relay_bin)
+        .args(["--target", target])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn relay");
+
+    {
+        let stdin = child.stdin.as_mut().expect("relay stdin");
+        write!(stdin, "SESSION_SECRET={secret}\nEND_SESSION\n").expect("failed to write secret");
+        stdin.flush().expect("failed to flush secret");
+    }
+
+    let mut reader = BufReader::new(child.stdout.take().expect("relay stdout"));
+    let mut line = String::new();
+    reader.read_line(&mut line).expect("failed to read relay");
+    assert_eq!(line.trim(), "RELAY_READY", "unexpected relay output");
+
+    line.clear();
+    reader.read_line(&mut line).expect("failed to read port");
+    let port = line
+        .trim()
+        .strip_prefix("PORT=")
+        .expect("relay did not report PORT")
+        .parse()
+        .expect("invalid relay port");
+
+    (child, port)
+}
+
+/// A squatter must not be able to claim a relay by sending the first datagram.
+///
+/// The previous relay registered whoever sent the first non-probe datagram as
+/// "the client", so any local user on the jump host could either take over the
+/// relay or keep the real host off it. This test sends unauthenticated traffic
+/// first, then checks that a properly authenticated client still works.
+#[tokio::test]
+async fn test_relay_rejects_squatter() {
+    use tokio::net::UdpSocket;
+
+    let relay_bin = relay_binary_path();
+    let secret = common::session::generate_session_secret().unwrap();
+
+    let target = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let target_addr = target.local_addr().unwrap();
+
+    let (mut relay, relay_port) = spawn_relay(&relay_bin, &target_addr.to_string(), &secret);
+    let relay_addr: SocketAddr = format!("127.0.0.1:{relay_port}").parse().unwrap();
+
+    // The squatter gets in first, exactly as they would have under the old
+    // first-datagram-wins rule.
+    let squatter = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    squatter
+        .send_to(b"\xc0i-was-here-first", relay_addr)
+        .await
+        .unwrap();
+
+    let mut buf = vec![0u8; 4096];
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), target.recv_from(&mut buf))
+            .await
+            .is_err(),
+        "the squatter's traffic was relayed"
+    );
+
+    // The legitimate host registers and must get a working relay.
+    let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    client
+        .send_to(format!("PLK_HELLO:{secret}").as_bytes(), relay_addr)
+        .await
+        .unwrap();
+    let (len, _) = tokio::time::timeout(Duration::from_secs(5), client.recv_from(&mut buf))
+        .await
+        .expect("no registration ack")
+        .unwrap();
+    assert_eq!(&buf[..len], b"PLK_HELLO_ACK");
+
+    // Drain the registration that propagates to the far end.
+    let (_, client_via_relay) =
+        tokio::time::timeout(Duration::from_secs(5), target.recv_from(&mut buf))
+            .await
+            .expect("registration did not propagate")
+            .unwrap();
+
+    client.send_to(b"real-traffic", relay_addr).await.unwrap();
+    let (len, _) = tokio::time::timeout(Duration::from_secs(5), target.recv_from(&mut buf))
+        .await
+        .expect("the legitimate client was locked out of the relay")
+        .unwrap();
+    assert_eq!(&buf[..len], b"real-traffic");
+
+    // The squatter still cannot inject traffic after a client is registered.
+    squatter
+        .send_to(b"\xc0still-here", relay_addr)
+        .await
+        .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), target.recv_from(&mut buf))
+            .await
+            .is_err(),
+        "the squatter injected traffic into an established relay"
+    );
+
+    // And return traffic reaches the real client, not the squatter.
+    target.send_to(b"reply", client_via_relay).await.unwrap();
+    let (len, _) = tokio::time::timeout(Duration::from_secs(5), client.recv_from(&mut buf))
+        .await
+        .expect("return traffic did not reach the client")
+        .unwrap();
+    assert_eq!(&buf[..len], b"reply");
+
+    relay.kill().ok();
+}
+
+/// The agent must not forward its log stream to a peer that has not proved it
+/// holds the session secret.
+///
+/// The previous agent opened the log stream immediately after accepting a
+/// connection, so agent logs — listening ports, process names, error text
+/// describing the target's internals — went to whoever connected.
+#[tokio::test]
+async fn test_no_agent_logs_before_authentication() {
+    let mut agent = spawn_agent().expect("failed to spawn agent");
+    let agent_addr: SocketAddr = format!("127.0.0.1:{}", agent.info.port).parse().unwrap();
+
+    let endpoint = build_client_endpoint(&agent.info).unwrap();
+    let connection = endpoint
+        .connect(agent_addr, "localhost")
+        .unwrap()
+        .await
+        .unwrap();
+
+    // Take the control stream and the handshake, but never authenticate.
+    let (_send, mut recv) = connection.accept_bi().await.unwrap();
+    let _ = recv_msg(&mut recv).await.unwrap();
+
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), connection.accept_uni())
+            .await
+            .is_err(),
+        "the agent opened its log stream to an unauthenticated peer"
+    );
+
+    agent.kill().ok();
+}
+
+/// A peer that fails session authentication must not be able to reach a local
+/// service on the target — the actual exfiltration path.
+#[tokio::test]
+async fn test_no_tcp_forwarding_without_authentication() {
+    let mut agent = spawn_agent().expect("failed to spawn agent");
+    let agent_addr: SocketAddr = format!("127.0.0.1:{}", agent.info.port).parse().unwrap();
+
+    // A real local service the peer would like to reach.
+    let victim = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let victim_port = victim.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = victim.accept().await {
+            use tokio::io::AsyncWriteExt;
+            let _ = stream.write_all(b"secret-data").await;
+        }
+    });
+
+    let endpoint = build_client_endpoint(&agent.info).unwrap();
+    let connection = endpoint
+        .connect(agent_addr, "localhost")
+        .unwrap()
+        .await
+        .unwrap();
+
+    let (mut send, mut recv) = connection.accept_bi().await.unwrap();
+    let _ = recv_msg(&mut recv).await.unwrap();
+
+    // Wrong secret.
+    send_msg(
+        &mut send,
+        &ControlMsg::SessionAuth {
+            session_secret: "0".repeat(64),
+        },
+    )
+    .await
+    .ok();
+
+    let reached = tokio::time::timeout(Duration::from_secs(5), async {
+        let (mut fwd_send, mut fwd_recv) = connection.open_bi().await.ok()?;
+        send_msg(
+            &mut fwd_send,
+            &ControlMsg::TcpStreamInit { port: victim_port },
+        )
+        .await
+        .ok()?;
+        let mut status = [0u8; 1];
+        fwd_recv.read_exact(&mut status).await.ok()?;
+        let mut body = [0u8; 11];
+        fwd_recv.read_exact(&mut body).await.ok()?;
+        Some(body)
+    })
+    .await;
+
+    assert!(
+        !matches!(reached, Ok(Some(_))),
+        "an unauthenticated peer read data from a local service: {reached:?}"
+    );
+
     agent.kill().ok();
 }

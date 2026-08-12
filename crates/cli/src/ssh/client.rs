@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use russh::keys::{PrivateKeyWithHashAlg, PublicKey};
 use russh::{ChannelMsg, client};
-use tracing::{debug, info};
+use tracing::{debug, error, info, warn};
 
 use common::{Error, Result};
 
@@ -15,13 +15,21 @@ use super::config::{self, JumpHost, SshHostConfig};
 // ---------------------------------------------------------------------------
 
 /// How to handle SSH host key verification.
+///
+/// SSH is the root of trust for the entire tunnel: it is the channel over which
+/// the two ends exchange the certificates they will pin. If the SSH server is
+/// not who it claims to be, everything downstream is introduced by the attacker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum HostKeyPolicy {
-    /// Reject unknown or changed host keys.
+    /// Reject unknown or changed host keys. The default.
     Strict,
-    /// Accept unknown keys (add to known_hosts), reject changed keys.
+    /// Accept unknown keys (adding them to known_hosts), reject changed keys.
+    ///
+    /// Trust-on-first-use: the first connection to a host is unauthenticated
+    /// and can be intercepted; later ones are protected.
     AcceptNew,
-    /// Accept all keys (insecure, for testing).
+    /// Accept all keys. Insecure — provides no protection against an
+    /// impersonated server — and intended only for disposable test fixtures.
     AcceptAll,
 }
 
@@ -41,6 +49,10 @@ impl std::fmt::Display for HostKeyPolicy {
 
 struct Handler {
     policy: HostKeyPolicy,
+    /// Host name as it should appear in `known_hosts`.
+    host: String,
+    /// Port as it should appear in `known_hosts`.
+    port: u16,
 }
 
 impl client::Handler for Handler {
@@ -48,22 +60,171 @@ impl client::Handler for Handler {
 
     async fn check_server_key(
         &mut self,
-        _server_public_key: &PublicKey,
+        server_public_key: &PublicKey,
     ) -> std::result::Result<bool, Self::Error> {
-        match self.policy {
-            HostKeyPolicy::AcceptAll => Ok(true),
-            HostKeyPolicy::AcceptNew => {
-                // TODO: Check known_hosts, accept if new, reject if changed.
-                // For now, accept all (same as AcceptAll).
-                Ok(true)
+        Ok(verify_host_key(
+            self.policy,
+            &self.host,
+            self.port,
+            server_public_key,
+            None,
+        ))
+    }
+}
+
+/// Decide whether to trust a server's host key.
+///
+/// Split out from the `Handler` callback so the decision — the root of trust for
+/// the entire tunnel — can be tested directly against a scratch `known_hosts`
+/// file. `known_hosts` overrides the standard `~/.ssh/known_hosts` location and
+/// is only ever `Some` in tests.
+fn verify_host_key(
+    policy: HostKeyPolicy,
+    host: &str,
+    port: u16,
+    server_public_key: &PublicKey,
+    known_hosts: Option<&std::path::Path>,
+) -> bool {
+    if policy == HostKeyPolicy::AcceptAll {
+        warn!(
+            host = %host,
+            "accepting SSH host key without verification (--ssh-host-key-verification=accept-all); \
+             this connection is not protected against impersonation"
+        );
+        return true;
+    }
+
+    // Returns Ok(false) when the host is absent, and Err(KeyChanged) when a
+    // different key is already recorded for it.
+    let lookup = match known_hosts {
+        Some(path) => russh::keys::check_known_hosts_path(host, port, server_public_key, path),
+        None => russh::keys::check_known_hosts(host, port, server_public_key),
+    };
+
+    let known = match lookup {
+        Ok(known) => known,
+        Err(russh::keys::Error::KeyChanged { line }) => {
+            error!(
+                host = %host,
+                line,
+                fingerprint = %server_public_key.fingerprint(Default::default()),
+                "SSH HOST KEY CHANGED — refusing to connect. This is what an \
+                 impersonated server looks like. If the host was legitimately \
+                 rekeyed, remove the offending line from ~/.ssh/known_hosts."
+            );
+            return false;
+        }
+        Err(e) => {
+            error!(host = %host, %e, "failed to read known_hosts");
+            return false;
+        }
+    };
+
+    if known {
+        debug!(host = %host, "SSH host key matches known_hosts");
+        return true;
+    }
+
+    match policy {
+        HostKeyPolicy::Strict => {
+            error!(
+                host = %host,
+                fingerprint = %server_public_key.fingerprint(Default::default()),
+                "unknown SSH host key and policy is strict — refusing to connect. \
+                 Verify the fingerprint out of band and add it to ~/.ssh/known_hosts, \
+                 or re-run with --ssh-host-key-verification=accept-new to trust it now."
+            );
+            false
+        }
+        HostKeyPolicy::AcceptNew => {
+            warn!(
+                host = %host,
+                fingerprint = %server_public_key.fingerprint(Default::default()),
+                "unknown SSH host key, trusting it on first use and recording it"
+            );
+            let learned = match known_hosts {
+                Some(path) => russh::keys::known_hosts::learn_known_hosts_path(
+                    host,
+                    port,
+                    server_public_key,
+                    path,
+                ),
+                None => russh::keys::known_hosts::learn_known_hosts(host, port, server_public_key),
+            };
+            if let Err(e) = learned {
+                warn!(host = %host, %e, "failed to record host key in known_hosts");
             }
-            HostKeyPolicy::Strict => {
-                // TODO: Check known_hosts, reject if unknown or changed.
-                // For now, accept all to unblock development.
-                Ok(true)
+            true
+        }
+        // Handled above.
+        HostKeyPolicy::AcceptAll => true,
+    }
+}
+
+/// Read stdout from an exec'd channel line-by-line until `predicate` returns
+/// true, or the command exits, or the deadline passes.
+async fn read_lines_from_channel(
+    channel: &mut russh::Channel<client::Msg>,
+    timeout: Duration,
+    mut predicate: impl FnMut(&str) -> bool,
+) -> Result<Vec<String>> {
+    let mut lines = Vec::new();
+    let mut buffer = String::new();
+    let deadline = tokio::time::Instant::now() + timeout;
+
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(Error::Protocol("agent handshake timed out".into()));
+        }
+
+        match tokio::time::timeout(remaining, channel.wait()).await {
+            Ok(Some(msg)) => match msg {
+                ChannelMsg::Data { data } => {
+                    buffer.push_str(&String::from_utf8_lossy(&data));
+                    // Process complete lines.
+                    while let Some(newline_pos) = buffer.find('\n') {
+                        let line = buffer
+                            .get(..newline_pos)
+                            .unwrap_or_default()
+                            .trim_end()
+                            .to_string();
+                        // Drain the consumed line from the buffer without
+                        // reallocating: shift bytes left and truncate.
+                        buffer.drain(..newline_pos.saturating_add(1));
+                        debug!(line = %line, "agent stdout");
+                        let done = predicate(&line);
+                        lines.push(line);
+                        if done {
+                            return Ok(lines);
+                        }
+                    }
+                }
+                ChannelMsg::Eof | ChannelMsg::Close => {
+                    // Process any remaining partial line.
+                    if !buffer.trim().is_empty() {
+                        let line = buffer.trim().to_string();
+                        let done = predicate(&line);
+                        lines.push(line);
+                        if done {
+                            return Ok(lines);
+                        }
+                    }
+                    break;
+                }
+                _ => {}
+            },
+            Ok(None) => break,
+            Err(_) => {
+                return Err(Error::Protocol("agent handshake timed out".into()));
             }
         }
     }
+
+    Err(Error::Protocol(format!(
+        "agent exited before handshake completed (got {} lines)",
+        lines.len()
+    )))
 }
 
 // ---------------------------------------------------------------------------
@@ -121,6 +282,8 @@ impl SshSession {
 
         let handler = Handler {
             policy: host_key_policy,
+            host: ssh_config.hostname.clone(),
+            port: ssh_config.port,
         };
 
         let handle = client::connect(client_config, addr, handler)
@@ -147,6 +310,14 @@ impl SshSession {
 
     async fn authenticate(&mut self) -> Result<()> {
         let user = self.config.user.clone();
+
+        // Try the SSH agent first, matching OpenSSH. Without this, a
+        // passphrase-protected key fails to load and the user is silently
+        // dropped to a password prompt — which hands their account password to
+        // whatever server answered.
+        if self.authenticate_with_agent(&user).await? {
+            return Ok(());
+        }
 
         // Try each identity file.
         for key_path in &self.config.identity_files {
@@ -184,8 +355,16 @@ impl SshSession {
             }
         }
 
-        // If no keys worked, try password auth via interactive prompt.
-        info!("no SSH keys accepted, trying password authentication");
+        // If no keys worked, fall back to an interactive password prompt.
+        //
+        // The password is only as safe as the server's identity, so make the
+        // fallback visible rather than silent: the host key has been verified
+        // by this point unless the user explicitly chose accept-all.
+        warn!(
+            user = %user,
+            host = %self.config.hostname,
+            "no SSH key was accepted; falling back to password authentication"
+        );
         let user_clone = user.clone();
         let password = tokio::task::spawn_blocking(move || {
             dialoguer::Password::new()
@@ -208,6 +387,131 @@ impl SshSession {
 
         info!(user = %user, "SSH password authentication successful");
         Ok(())
+    }
+
+    /// Try every identity held by the SSH agent, if one is reachable.
+    ///
+    /// Returns `Ok(true)` when authentication succeeded.
+    async fn authenticate_with_agent(&mut self, user: &str) -> Result<bool> {
+        // The agent transport is platform-specific: a Unix socket named by
+        // SSH_AUTH_SOCK, or on Windows either the OpenSSH named pipe or Pageant.
+        #[cfg(unix)]
+        {
+            match russh::keys::agent::client::AgentClient::connect_env().await {
+                Ok(agent) => self.try_agent_identities(user, agent).await,
+                Err(e) => {
+                    debug!(%e, "no SSH agent available");
+                    Ok(false)
+                }
+            }
+        }
+
+        #[cfg(windows)]
+        {
+            // OpenSSH for Windows first, then Pageant.
+            const OPENSSH_PIPE: &str = r"\\.\pipe\openssh-ssh-agent";
+            match russh::keys::agent::client::AgentClient::connect_named_pipe(OPENSSH_PIPE).await {
+                Ok(agent) => {
+                    if self.try_agent_identities(user, agent).await? {
+                        return Ok(true);
+                    }
+                }
+                Err(e) => debug!(%e, "no OpenSSH agent named pipe"),
+            }
+
+            match russh::keys::agent::client::AgentClient::connect_pageant().await {
+                Ok(agent) => self.try_agent_identities(user, agent).await,
+                Err(e) => {
+                    debug!(%e, "no Pageant agent available");
+                    Ok(false)
+                }
+            }
+        }
+
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = user;
+            Ok(false)
+        }
+    }
+
+    /// Try every identity an already-connected agent holds.
+    async fn try_agent_identities<S>(
+        &mut self,
+        user: &str,
+        mut agent: russh::keys::agent::client::AgentClient<S>,
+    ) -> Result<bool>
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
+        let identities = match agent.request_identities().await {
+            Ok(identities) => identities,
+            Err(e) => {
+                debug!(%e, "could not list SSH agent identities");
+                return Ok(false);
+            }
+        };
+
+        debug!(count = identities.len(), "trying SSH agent identities");
+
+        for key in identities {
+            match self
+                .handle
+                .authenticate_publickey_with(user, key.clone(), None, &mut agent)
+                .await
+            {
+                Ok(result) if result.success() => {
+                    info!(
+                        user = %user,
+                        fingerprint = %key.fingerprint(Default::default()),
+                        "SSH agent authentication successful"
+                    );
+                    return Ok(true);
+                }
+                Ok(_) => debug!("agent key not accepted, trying next"),
+                Err(e) => debug!(%e, "agent auth attempt failed, trying next"),
+            }
+        }
+
+        Ok(false)
+    }
+
+    /// Execute a command, optionally writing `stdin_data` to its stdin, and
+    /// read stdout line-by-line until `predicate` returns true.
+    ///
+    /// `stdin_data` is written before reading begins, so it must be small
+    /// enough to fit in the SSH channel's initial window (it carries the
+    /// session config, roughly a kilobyte).
+    pub async fn exec_and_read_lines(
+        &self,
+        command: &str,
+        stdin_data: Option<&[u8]>,
+        timeout: Duration,
+        predicate: impl FnMut(&str) -> bool,
+    ) -> Result<Vec<String>> {
+        let mut channel = self
+            .handle
+            .channel_open_session()
+            .await
+            .map_err(|e| Error::Protocol(format!("failed to open SSH channel: {e}")))?;
+
+        channel
+            .exec(true, command)
+            .await
+            .map_err(|e| Error::Protocol(format!("failed to exec command: {e}")))?;
+
+        if let Some(data) = stdin_data {
+            channel
+                .data(data)
+                .await
+                .map_err(|e| Error::Protocol(format!("failed to write stdin: {e}")))?;
+            channel
+                .eof()
+                .await
+                .map_err(|e| Error::Protocol(format!("failed to send stdin EOF: {e}")))?;
+        }
+
+        read_lines_from_channel(&mut channel, timeout, predicate).await
     }
 
     /// Execute a command on the remote host, returning (stdout, stderr, exit_code).
@@ -385,79 +689,8 @@ impl SshSession {
         Ok((stdout_str, stderr_str, exit_code))
     }
 
-    /// Execute a command and read stdout line-by-line until a condition is met.
-    /// Returns all lines read. Used for parsing the agent handshake.
-    pub async fn exec_and_read_lines(
-        &self,
-        command: &str,
-        timeout: Duration,
-        mut predicate: impl FnMut(&str) -> bool,
-    ) -> Result<Vec<String>> {
-        let mut channel = self
-            .handle
-            .channel_open_session()
-            .await
-            .map_err(|e| Error::Protocol(format!("failed to open SSH channel: {e}")))?;
-
-        channel
-            .exec(true, command)
-            .await
-            .map_err(|e| Error::Protocol(format!("failed to exec command: {e}")))?;
-
-        let mut lines = Vec::new();
-        let mut buffer = String::new();
-        let deadline = tokio::time::Instant::now() + timeout;
-
-        loop {
-            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            if remaining.is_zero() {
-                return Err(Error::Protocol("agent handshake timed out".into()));
-            }
-
-            match tokio::time::timeout(remaining, channel.wait()).await {
-                Ok(Some(msg)) => match msg {
-                    ChannelMsg::Data { data } => {
-                        buffer.push_str(&String::from_utf8_lossy(&data));
-                        // Process complete lines.
-                        while let Some(newline_pos) = buffer.find('\n') {
-                            let line = buffer[..newline_pos].trim_end().to_string();
-                            // Drain the consumed line from the buffer without
-                            // reallocating: shift bytes left and truncate.
-                            buffer.drain(..newline_pos + 1);
-                            debug!(line = %line, "agent stdout");
-                            let done = predicate(&line);
-                            lines.push(line);
-                            if done {
-                                return Ok(lines);
-                            }
-                        }
-                    }
-                    ChannelMsg::Eof | ChannelMsg::Close => {
-                        // Process any remaining partial line.
-                        if !buffer.trim().is_empty() {
-                            let line = buffer.trim().to_string();
-                            let done = predicate(&line);
-                            lines.push(line);
-                            if done {
-                                return Ok(lines);
-                            }
-                        }
-                        break;
-                    }
-                    _ => {}
-                },
-                Ok(None) => break,
-                Err(_) => {
-                    return Err(Error::Protocol("agent handshake timed out".into()));
-                }
-            }
-        }
-
-        Err(Error::Protocol(format!(
-            "agent exited before handshake completed (got {} lines)",
-            lines.len()
-        )))
-    }
+    // (line reading lives in `read_lines_from_channel` below so that both the
+    // stdin and no-stdin paths share it)
 
     /// Execute a fire-and-forget command (e.g., kill, rm).
     pub async fn exec_detached(&self, command: &str) -> Result<()> {
@@ -527,6 +760,8 @@ impl SshSession {
 
         let handler = Handler {
             policy: host_key_policy,
+            host: ssh_config.hostname.clone(),
+            port: ssh_config.port,
         };
 
         let handle = client::connect_stream(client_config, stream, handler)
@@ -615,6 +850,8 @@ impl SshChain {
 
         let handler = Handler {
             policy: host_key_policy,
+            host: first_config.hostname.clone(),
+            port: first_config.port,
         };
 
         let handle = client::connect(client_config, addr, handler)
@@ -752,5 +989,222 @@ mod tests {
         let policy = HostKeyPolicy::Strict;
         let debug_str = format!("{:?}", policy);
         assert!(debug_str.contains("Strict"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Host key verification regression tests
+    // -----------------------------------------------------------------------
+    //
+    // Guards the SSH host key check, which is the root of trust for the whole
+    // tunnel: SSH is the channel over which the two ends exchange the
+    // certificates they pin. A previous version stubbed `check_server_key` to
+    // return `Ok(true)` for every policy — including `Strict` — so every
+    // assertion below that expects a rejection would have failed.
+
+    /// Two distinct, fixed host keys. Using literals keeps the tests
+    /// deterministic and free of key-generation dependencies.
+    ///
+    /// Deliberately written without a trailing comment: `PublicKey`'s `PartialEq`
+    /// includes the comment field, and a key read back out of `known_hosts` has
+    /// none — as does a key presented by a real server over the wire.
+    const HOST_KEY_A: &str =
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKI1DBqYeZFK3W3cVfPeGy1spReDdhIWDVURrciWO4Y5";
+    const HOST_KEY_B: &str =
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFY2SrpMf7mxwUBWqNxdwdp7g54DifINJagAl6cHIo7s";
+
+    fn host_key(openssh: &str) -> PublicKey {
+        openssh.parse().expect("valid openssh public key")
+    }
+
+    /// A scratch known_hosts path that is removed when the test ends.
+    struct ScratchKnownHosts(std::path::PathBuf);
+
+    impl ScratchKnownHosts {
+        fn new(name: &str) -> Self {
+            let mut path = std::env::temp_dir();
+            path.push(format!(
+                "plk-known-hosts-{name}-{}",
+                common::generate_token().expect("token")
+            ));
+            Self(path)
+        }
+
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+
+        fn record(&self, host: &str, port: u16, key: &PublicKey) {
+            russh::keys::known_hosts::learn_known_hosts_path(host, port, key, &self.0)
+                .expect("failed to seed known_hosts");
+        }
+
+        fn contents(&self) -> String {
+            std::fs::read_to_string(&self.0).unwrap_or_default()
+        }
+    }
+
+    impl Drop for ScratchKnownHosts {
+        fn drop(&mut self) {
+            std::fs::remove_file(&self.0).ok();
+        }
+    }
+
+    #[test]
+    fn strict_rejects_unknown_host_key() {
+        let known = ScratchKnownHosts::new("unknown");
+        assert!(
+            !verify_host_key(
+                HostKeyPolicy::Strict,
+                "example.com",
+                22,
+                &host_key(HOST_KEY_A),
+                Some(known.path()),
+            ),
+            "strict must refuse a host it has never seen"
+        );
+    }
+
+    #[test]
+    fn strict_accepts_recorded_host_key() {
+        let known = ScratchKnownHosts::new("recorded");
+        let key = host_key(HOST_KEY_A);
+        known.record("example.com", 22, &key);
+
+        assert!(
+            verify_host_key(
+                HostKeyPolicy::Strict,
+                "example.com",
+                22,
+                &key,
+                Some(known.path()),
+            ),
+            "strict must accept the key recorded in known_hosts"
+        );
+    }
+
+    /// The impersonation case: a different key for a host we already know.
+    #[test]
+    fn strict_rejects_changed_host_key() {
+        let known = ScratchKnownHosts::new("changed-strict");
+        known.record("example.com", 22, &host_key(HOST_KEY_A));
+
+        assert!(
+            !verify_host_key(
+                HostKeyPolicy::Strict,
+                "example.com",
+                22,
+                &host_key(HOST_KEY_B),
+                Some(known.path()),
+            ),
+            "a changed host key must be refused"
+        );
+    }
+
+    /// accept-new is trust-on-first-use, not trust-always: a *changed* key must
+    /// still be refused, otherwise the policy offers no protection at all.
+    #[test]
+    fn accept_new_rejects_changed_host_key() {
+        let known = ScratchKnownHosts::new("changed-accept-new");
+        known.record("example.com", 22, &host_key(HOST_KEY_A));
+
+        assert!(
+            !verify_host_key(
+                HostKeyPolicy::AcceptNew,
+                "example.com",
+                22,
+                &host_key(HOST_KEY_B),
+                Some(known.path()),
+            ),
+            "accept-new must still refuse a changed host key"
+        );
+    }
+
+    #[test]
+    fn accept_new_learns_and_then_pins_unknown_host_key() {
+        let known = ScratchKnownHosts::new("learn");
+        let key = host_key(HOST_KEY_A);
+
+        assert!(
+            verify_host_key(
+                HostKeyPolicy::AcceptNew,
+                "example.com",
+                22,
+                &key,
+                Some(known.path()),
+            ),
+            "accept-new should trust an unknown key on first use"
+        );
+
+        // It must be *recorded*, or every later connection is another first
+        // use and the trust never actually pins to anything.
+        assert!(
+            known.contents().contains("example.com"),
+            "accept-new must record the key it trusted: {:?}",
+            known.contents()
+        );
+
+        // And now a different key for that host is refused.
+        assert!(
+            !verify_host_key(
+                HostKeyPolicy::AcceptNew,
+                "example.com",
+                22,
+                &host_key(HOST_KEY_B),
+                Some(known.path()),
+            ),
+            "once learned, a different key must be refused"
+        );
+    }
+
+    #[test]
+    fn non_default_ports_are_tracked_separately() {
+        let known = ScratchKnownHosts::new("ports");
+        let key = host_key(HOST_KEY_A);
+        known.record("example.com", 2222, &key);
+
+        assert!(
+            verify_host_key(
+                HostKeyPolicy::Strict,
+                "example.com",
+                2222,
+                &key,
+                Some(known.path()),
+            ),
+            "the key recorded for port 2222 should match"
+        );
+        assert!(
+            !verify_host_key(
+                HostKeyPolicy::Strict,
+                "example.com",
+                22,
+                &key,
+                Some(known.path()),
+            ),
+            "a key recorded for port 2222 must not authorise port 22"
+        );
+    }
+
+    /// accept-all is the documented escape hatch for disposable fixtures. It is
+    /// deliberately permissive; this pins that it is the *only* permissive one.
+    #[test]
+    fn accept_all_is_the_only_policy_that_skips_verification() {
+        let known = ScratchKnownHosts::new("accept-all");
+        known.record("example.com", 22, &host_key(HOST_KEY_A));
+        let impostor = host_key(HOST_KEY_B);
+
+        assert!(verify_host_key(
+            HostKeyPolicy::AcceptAll,
+            "example.com",
+            22,
+            &impostor,
+            Some(known.path()),
+        ));
+
+        for policy in [HostKeyPolicy::Strict, HostKeyPolicy::AcceptNew] {
+            assert!(
+                !verify_host_key(policy, "example.com", 22, &impostor, Some(known.path())),
+                "{policy} must not accept an impostor's key"
+            );
+        }
     }
 }

@@ -16,4 +16,10 @@ pub enum Error {
 
     #[error("codec error: {0}")]
     Codec(String),
+
+    /// A security guarantee could not be established or was violated:
+    /// certificate pinning, session authentication, host key verification, or
+    /// binary integrity.
+    #[error("security error: {0}")]
+    Security(String),
 }

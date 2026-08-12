@@ -71,7 +71,14 @@ mod tests {
     fn roundtrip_handshake() {
         roundtrip(&ControlMsg::Handshake {
             protocol_version: PROTOCOL_VERSION,
-            token: "secret-token-42".into(),
+            session_id: "plk-0011223344556677".into(),
+        });
+    }
+
+    #[test]
+    fn roundtrip_session_auth() {
+        roundtrip(&ControlMsg::SessionAuth {
+            session_secret: "a".repeat(64),
         });
     }
 

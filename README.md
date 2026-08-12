@@ -69,6 +69,48 @@ port-linker uses your existing SSH configuration (`~/.ssh/config`) and attempts 
 1. SSH agent (`SSH_AUTH_SOCK`)
 2. Identity files from SSH config
 3. Default key files (`~/.ssh/id_ed25519`, `~/.ssh/id_rsa`, `~/.ssh/id_ecdsa`)
+4. Interactive password prompt (last resort)
+
+Host keys are checked against `~/.ssh/known_hosts`. The default policy is
+`strict`: an unknown or changed host key aborts the connection.
+
+```bash
+# Trust a host you have not connected to before (trust-on-first-use)
+port-linker --remote user@host --ssh-host-key-verification accept-new
+```
+
+## Security
+
+The QUIC tunnel is encrypted **and mutually authenticated end to end**. SSH is
+used to introduce the two ends: the host sends its freshly generated certificate
+to the agent over the SSH channel, the agent sends back its own, and each side
+then accepts exactly that one certificate. Neither private key ever crosses the
+network, so an on-path attacker cannot impersonate either end or read the
+traffic.
+
+Because SSH is the root of that trust, an unverified host key would undermine
+everything downstream — hence the strict default above.
+
+The agent refuses to start without this introduction, so it never accepts
+connections from anyone who merely reaches its port. Binaries deployed to the
+target are SHA256-verified against the copy embedded in the CLI before they run,
+and session secrets are passed over stdin rather than the command line so they
+are not visible to other users via `ps`.
+
+See [ARCHITECTURE.md](ARCHITECTURE.md#52-end-to-end-security-ssh-introduced-mutual-tls) for the full trust model.
+
+### Manual mode
+
+`--agent` connects to an already-running agent and has no SSH channel to carry
+the introduction, so it requires a session file:
+
+```bash
+# First run creates ./sess.conf and ./sess.agent, and prints instructions
+port-linker --agent 10.0.0.5:45871 --session-config ./sess.conf
+
+# Start the agent with the generated block on its stdin, paste the AGENT_CERT=
+# line it prints into ./sess.conf, then re-run the same command to connect.
+```
 
 ## License
 

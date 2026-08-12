@@ -161,8 +161,8 @@ This transfers the specified binary directly. Useful for testing local agent cha
 #### 3.1.6 Security
 
 *   **Binary integrity:** Embedded agents inherit the CLI binary's release signature (cosign). Verifying the CLI transitively verifies the agents.
-*   **Cache poisoning:** `/tmp/.port-linker-cache` is world-writable on shared systems. The Host validates SHA256 before using any cached binary. On mismatch, the cache is ignored and the binary is re-transferred from the trusted embedded copy.
-*   **Transport:** SSH provides encryption. No additional layer is needed.
+*   **Cache poisoning:** `$TMPDIR/.port-linker-cache` is world-writable on shared systems. `agent-embed`/`relay-embed` record the SHA256 of each *uncompressed* binary at build time; the Host copies the cache entry into place and then hashes **the installed copy** — not the cache entry, which could be swapped in between — and deletes it on mismatch, falling back to the embedded binary. Transferred and `--agent-binary` binaries are verified the same way, since decompression happens on the target. The cache directory is created mode `0700` and entries are installed with a temp-file rename.
+*   **Transport:** SSH is the *bootstrap* channel, not the data path. In the default (no ProxyJump) configuration the QUIC tunnel runs directly over the network between Host and Agent, so it carries its own end-to-end protection — see Section 5.2.
 
 ## 4. The "Forward All Ports" Strategy
 
@@ -202,6 +202,70 @@ pub enum Packet {
     UdpData { port: u16, data: Vec<u8> }, // Sent as Datagram
 }
 ```
+
+### 5.2 End-to-End Security: SSH-Introduced Mutual TLS
+
+QUIC always encrypts, but encryption without authentication only stops a passive
+observer. Because the tunnel reaches loopback services on the target, both ends
+must also *prove who they are*. SSH is what introduces them.
+
+```
+Host                                    Agent
+  |-- ssh exec agent ------------------->|
+  |   stdin (inside SSH):                |
+  |     SESSION_ID, SESSION_SECRET,      |
+  |     CLIENT_CERT (host's cert)        |
+  |                                      | generates its own keypair
+  |<-- stdout (inside SSH): AGENT_CERT --|
+  |                                      |
+  |=== QUIC / TLS 1.3, mutual auth ======|  each side accepts exactly
+  |    host pins AGENT_CERT              |  one certificate — the one
+  |    agent pins CLIENT_CERT            |  it learned over SSH
+  |-- SessionAuth { SESSION_SECRET } --->|  binds the tunnel to this bootstrap
+```
+
+*   **Ephemeral identities.** Both sides generate a self-signed certificate per
+    session (`common::session::Identity`). Neither private key ever crosses the
+    network: the host sends only its certificate, and the agent replies with only
+    its own.
+*   **Exact pinning.** `common::session::PinnedPeer` implements rustls's
+    `ServerCertVerifier` *and* `ClientCertVerifier`, accepting one certificate by
+    exact DER comparison. Signature verification — the proof the peer holds the
+    matching private key — is delegated to `rustls::crypto::verify_tls1{2,3}_signature`.
+    There is no CA, no chain building, and no name check, because identity *is*
+    the certificate. Validity dates are not enforced either: certificates live for
+    seconds, and clock skew between host and target must not break the tunnel.
+*   **Session binding.** After the TLS handshake the host must present the
+    `SESSION_SECRET` it delivered over SSH. This is redundant with mTLS by design;
+    it costs one message and pins the connection to *this* bootstrap, so a stale
+    agent from an earlier run cannot be adopted.
+*   **Fail closed.** The agent refuses to bind at all without a session config on
+    stdin. There is no "no peer configured" mode that accepts anyone.
+*   **ALPN.** Both ends require `port-linker/1`.
+
+Consequences for the threat model:
+
+| Attacker | Outcome |
+| --- | --- |
+| On-path network attacker | Cannot impersonate either end without a pinned private key; cannot decrypt. |
+| Anyone who can reach the agent's UDP port | TLS handshake fails; no streams, no datagrams, no logs. |
+| Malicious/compromised jump host | Relays opaque, mutually authenticated QUIC; cannot read or alter it. |
+| Local user on the target | Cannot pre-plant a binary the host will run (SHA256 verified), and cannot read the session secret from `argv` (it arrives on stdin). |
+
+**SSH host keys are load-bearing.** Everything above roots in the SSH channel
+being genuine, so `--ssh-host-key-verification` defaults to `strict` and is
+enforced via `known_hosts`. `accept-new` is trust-on-first-use; `accept-all`
+disables the guarantee entirely and exists only for disposable test fixtures.
+
+### 5.3 UDP Relay Authentication
+
+Relays deployed on jump hosts listen on a public interface, so they require proof
+of the session secret — delivered on the relay's **stdin**, never `argv`, which is
+world-readable through `ps`. A client registers with `PLK_HELLO:<secret>` and only
+that source address is relayed thereafter; probes (`PLK_PROBE:<secret>`) are
+authenticated too and do not register a client. The host performs this handshake
+on the very socket it then hands to `quinn`, so registration and traffic share a
+source address. Relayed bytes remain end-to-end encrypted between Host and Agent.
 
 ## 6. Conflict Resolution & Interactive Killing
 

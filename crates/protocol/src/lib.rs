@@ -2,7 +2,11 @@ pub mod codec;
 pub use codec::{decode, encode};
 
 /// Current wire protocol version. Bump when making breaking changes.
-pub const PROTOCOL_VERSION: u32 = 1;
+///
+/// Version 2 replaced the agent-generated bearer token with mutually pinned
+/// TLS identities plus a host-proven session secret, so a v1 agent and a v2
+/// host cannot interoperate — by design, since a v1 agent accepts any peer.
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Transport protocol for a forwarded port.
 #[derive(
@@ -39,11 +43,22 @@ pub struct AgentLogEvent {
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Debug, Clone, PartialEq)]
 #[rkyv(compare(PartialEq), derive(Debug))]
 pub enum ControlMsg {
-    /// Initial handshake. Must be the first message on a new connection.
+    /// Agent -> host. The first message on the control stream.
+    ///
+    /// `session_id` is the non-secret correlation id the host delivered over
+    /// SSH; the host checks it to confirm it reached the agent it bootstrapped
+    /// rather than a leftover process from an earlier run.
     Handshake {
         protocol_version: u32,
-        token: String,
+        session_id: String,
     },
+    /// Host -> agent. Must be the first message the host sends.
+    ///
+    /// Proves the host holds the session secret that was delivered over the
+    /// SSH channel. TLS has already authenticated both ends by pinned
+    /// certificate at this point; this binds the connection to *this* bootstrap
+    /// so a stale or replayed session cannot be served.
+    SessionAuth { session_secret: String },
     /// The remote agent discovered a new listening port.
     PortAdded {
         port: u16,
