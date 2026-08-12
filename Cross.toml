@@ -1,0 +1,7 @@
+# cross runs builds inside a container, which does not inherit the host
+# environment. PLK_PREBUILT_DIR tells the embed crates' build scripts where the
+# pre-built agents are; it is set to a workspace-relative path so it resolves to
+# the same directory inside the container, where the workspace is mounted at a
+# different absolute path.
+[build.env]
+passthrough = ["PLK_PREBUILT_DIR"]

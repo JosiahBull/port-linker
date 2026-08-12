@@ -154,10 +154,98 @@ jobs:
       - name: Run Docker integration tests
         run: bash tests/docker/run-tests.sh ci
 
+  # Agents and relays are built on a runner that can actually target them, then
+  # handed to the CLI build as artifacts. No single runner can produce every
+  # target: a Linux host cannot build the Apple or Windows agents (no SDK, and
+  # `cross` publishes no Apple images) and a macOS runner cannot build the Linux
+  # musl agents (cross needs Docker, which macOS runners do not have).
+  build-agents:
+    name: Build Agent (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    concurrency:
+      group: ci-build-agents-${{ github.repository }}-${{ github.ref }}-${{ matrix.target }}
+      cancel-in-progress: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            command: cross
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            command: cross
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            command: cargo
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            command: cargo
+          - target: aarch64-pc-windows-msvc
+            os: windows-latest
+            command: cargo
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: agents-${{ matrix.target }}
+
+      # Same tool per target as the release workflow: cross (Docker) for the
+      # Linux musl targets, native cargo for Apple silicon.
+      - name: Install cross
+        if: matrix.command == 'cross'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+
+      # The agent-release profile already applies opt-level=z, fat LTO,
+      # panic=abort and strip. build-std would shrink it further but needs a
+      # nightly toolchain inside the cross image, which is not worth the
+      # fragility for a CI artifact — the release pipeline can still do it.
+      # Explicit shell: windows-latest defaults to PowerShell, which cannot
+      # parse the backslash line continuations below.
+      - name: Build agent and relay
+        shell: bash
+        run: |
+          ${{ matrix.command }} build \
+            -p agent -p udp-relay \
+            --profile agent-release \
+            --target ${{ matrix.target }}
+
+      # Named as `agent-build::output_filename` expects, so the CLI build can
+      # pick them straight out of PLK_PREBUILT_DIR. The staged names carry no
+      # extension even for Windows — `find_binary` handles `.exe` on the source
+      # side only.
+      - name: Stage binaries for the CLI build
+        shell: bash
+        run: |
+          ext=""
+          case "${{ matrix.target }}" in *windows*) ext=".exe" ;; esac
+          src="target/${{ matrix.target }}/agent-release"
+          mkdir -p prebuilt
+          cp "$src/port-linker-agent$ext" "prebuilt/agent-${{ matrix.target }}"
+          cp "$src/port-linker-relay$ext" "prebuilt/udp-relay-${{ matrix.target }}"
+          ls -l prebuilt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: prebuilt-${{ matrix.target }}
+          path: prebuilt/
+          if-no-files-found: error
+          retention-days: 1
+
   build:
     name: Build
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
+    needs: [build-agents]
     concurrency:
       group: ci-build-${{ github.repository }}-${{ github.ref }}-${{ matrix.os }}
       cancel-in-progress: true
@@ -182,7 +270,30 @@ jobs:
         if: matrix.os == 'windows-latest'
         run: choco install upx -y
 
+      # Every target's agent and relay, merged into one directory.
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: prebuilt-*
+          merge-multiple: true
+          path: prebuilt
+
+      # The embed crates include_bytes! every target, so a missing one is a
+      # build failure later — catch it here with a clearer message.
+      - name: Verify all agents are present
+        shell: bash
+        run: |
+          ls -l prebuilt
+          for t in x86_64-unknown-linux-musl aarch64-unknown-linux-musl \
+                   aarch64-apple-darwin x86_64-pc-windows-msvc aarch64-pc-windows-msvc; do
+            for p in agent udp-relay; do
+              test -s "prebuilt/$p-$t" || { echo "missing prebuilt/$p-$t"; exit 1; }
+            done
+          done
+
       - name: Build release
+        env:
+          # Workspace-relative so it resolves identically inside cross containers.
+          PLK_PREBUILT_DIR: prebuilt
         run: cargo build --workspace --release
 
       - name: Compress binary with UPX (Linux)

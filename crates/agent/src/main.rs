@@ -2,10 +2,10 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use bytes::Bytes;
 use quinn::Endpoint;
-use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use tokio::net::UdpSocket;
 use tokio::sync::{RwLock, mpsc};
 use tracing::{debug, error, info, warn};
@@ -16,11 +16,24 @@ use agent::diff::PortEvent;
 use agent::log_forward;
 use agent::scan_loop::run_scan_loop;
 use agent::scanner::DefaultScanner;
+use common::session::{AgentSessionConfig, Identity};
 use common::{Error, Result};
 use protocol::{ControlMsg, PROTOCOL_VERSION};
 
 /// Maximum allowed frame size: 1 MB.
 const MAX_FRAME_SIZE: u32 = 1_048_576;
+
+/// How long to wait for the host to deliver the session config on stdin.
+const CONFIG_READ_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long to keep accepting QUIC connections while waiting for the host.
+///
+/// Bounded so that an agent whose host went away exits instead of lingering as
+/// an orphaned listener.
+const ACCEPT_WINDOW: Duration = Duration::from_secs(120);
+
+/// How long to wait for the host to prove it holds the session secret.
+const SESSION_AUTH_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
@@ -55,17 +68,25 @@ async fn main() {
 }
 
 async fn run(log_rx: tokio::sync::mpsc::Receiver<protocol::AgentLogEvent>) -> Result<()> {
-    // 1. Generate a self-signed TLS certificate.
-    let certified_key = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
-        .map_err(|e| Error::Protocol(format!("failed to generate self-signed cert: {e}")))?;
+    // 1. Read the session config the host delivered on stdin, inside the SSH
+    //    channel. This carries the host's certificate, which we pin, plus the
+    //    session secret it must later prove it holds. Without it we have no
+    //    peer to trust, so we refuse to listen at all rather than accepting
+    //    whoever shows up.
+    let session = read_session_config().await?;
 
-    let cert_der = CertificateDer::from(certified_key.cert.der().to_vec());
-    let key_der = PrivateKeyDer::try_from(certified_key.signing_key.serialize_der())
-        .map_err(|e| Error::Protocol(format!("failed to parse private key DER: {e}")))?;
+    // 2. Generate this session's own identity. The private key never leaves
+    //    this process; only the certificate is published, over SSH.
+    let identity = Identity::generate("port-linker-agent")?;
 
-    // 2. Build quinn server config with the self-signed cert.
-    let mut server_config = quinn::ServerConfig::with_single_cert(vec![cert_der], key_der)
-        .map_err(|e| Error::Protocol(format!("failed to create server config: {e}")))?;
+    // 3. Build a QUIC server that requires mutual TLS against the host's
+    //    pinned certificate. A peer without the matching private key cannot
+    //    complete the handshake, so an on-path attacker cannot impersonate
+    //    the host and unauthenticated scanners get nothing.
+    let rustls_config = common::session::server_tls_config(&identity, &session.client_cert_der)?;
+    let quic_crypto = quinn::crypto::rustls::QuicServerConfig::try_from(rustls_config)
+        .map_err(|e| Error::Security(format!("failed to build QUIC server crypto: {e}")))?;
+    let mut server_config = quinn::ServerConfig::with_crypto(Arc::new(quic_crypto));
 
     // Enable QUIC datagrams for UDP forwarding.
     let mut transport = quinn::TransportConfig::default();
@@ -73,14 +94,14 @@ async fn run(log_rx: tokio::sync::mpsc::Receiver<protocol::AgentLogEvent>) -> Re
     transport.datagram_receive_buffer_size(Some(1_048_576));
     server_config.transport_config(Arc::new(transport));
 
-    // 3. Bind on 0.0.0.0:0 to get a random port.
+    // 4. Bind on 0.0.0.0:0 to get a random port.
     let bind_addr: SocketAddr = "0.0.0.0:0".parse().unwrap();
     let endpoint = Endpoint::server(server_config, bind_addr).map_err(Error::Io)?;
 
     let local_addr = endpoint.local_addr().map_err(Error::Io)?;
     let port = local_addr.port();
 
-    // 3b. Bind a TCP bridge listener for QUIC-over-TCP fallback.
+    // 4b. Bind a TCP bridge listener for QUIC-over-TCP fallback.
     // This allows the host to tunnel QUIC datagrams over an SSH direct-tcpip
     // channel when UDP is blocked between host and agent.
     let bridge_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -88,23 +109,26 @@ async fn run(log_rx: tokio::sync::mpsc::Receiver<protocol::AgentLogEvent>) -> Re
         .map_err(Error::Io)?;
     let bridge_port = bridge_listener.local_addr().map_err(Error::Io)?.port();
 
-    // 4. Generate a one-time connection token.
-    // The token doubles as a session ID for log correlation (Architecture Section 7.2).
-    let token = common::generate_token();
-
-    // 5. Print handshake info to stdout (and flush).
+    // 5. Print handshake info to stdout (and flush). This travels back to the
+    //    host inside the SSH channel. AGENT_CERT is what the host pins; it is
+    //    public, and the session secret is never echoed here.
     {
         let mut stdout = std::io::stdout().lock();
         writeln!(stdout, "AGENT_READY").map_err(Error::Io)?;
         writeln!(stdout, "PORT={port}").map_err(Error::Io)?;
-        writeln!(stdout, "TOKEN={token}").map_err(Error::Io)?;
+        writeln!(
+            stdout,
+            "AGENT_CERT={}",
+            common::session::to_hex(identity.cert_der())
+        )
+        .map_err(Error::Io)?;
         writeln!(stdout, "BRIDGE_PORT={bridge_port}").map_err(Error::Io)?;
         stdout.flush().map_err(Error::Io)?;
     }
 
     // Create a session-scoped tracing span so all subsequent logs are enriched
     // with the session_id (Architecture Section 7.2).
-    let session_span = tracing::info_span!("session", session_id = %token);
+    let session_span = tracing::info_span!("session", session_id = %session.session_id);
     let _session_guard = session_span.enter();
 
     info!(port, bridge_port, "agent listening, waiting for connection");
@@ -128,19 +152,12 @@ async fn run(log_rx: tokio::sync::mpsc::Receiver<protocol::AgentLogEvent>) -> Re
         }
     });
 
-    // 6. Accept one QUIC connection.
-    let incoming = endpoint
-        .accept()
-        .await
-        .ok_or_else(|| Error::QuicConnection("endpoint closed before accepting".into()))?;
-
-    let connection = incoming
-        .await
-        .map_err(|e| Error::QuicConnection(format!("failed to accept connection: {e}")))?;
+    // 6. Accept a mutually authenticated QUIC connection.
+    let connection = accept_authenticated(&endpoint).await?;
 
     info!(
         remote = %connection.remote_address(),
-        "accepted QUIC connection"
+        "accepted mutually authenticated QUIC connection"
     );
 
     // 7. Open a bidirectional stream (control stream).
@@ -152,22 +169,30 @@ async fn run(log_rx: tokio::sync::mpsc::Receiver<protocol::AgentLogEvent>) -> Re
 
     info!("control stream opened");
 
-    // 7b. Open a dedicated QUIC unidirectional stream for log forwarding
-    // (Architecture Section 7.1).
+    // 8. Send Handshake and require the host to prove it holds the session
+    //    secret before anything else happens on this connection. The peer is
+    //    already TLS-authenticated; this additionally binds the connection to
+    //    the SSH bootstrap that produced this agent.
+    let handshake = ControlMsg::Handshake {
+        protocol_version: PROTOCOL_VERSION,
+        session_id: session.session_id.clone(),
+    };
+    send_msg(&mut send, &handshake).await?;
+    info!("sent handshake, awaiting session authentication");
+
+    authenticate_host(&mut recv, &session.session_secret).await?;
+    info!("host authenticated for this session");
+
+    // 8b. Open a dedicated QUIC unidirectional stream for log forwarding
+    // (Architecture Section 7.1). Deliberately after authentication: agent logs
+    // describe the target's internals and must not leak to an unauthenticated
+    // peer.
     let log_send = connection
         .open_uni()
         .await
         .map_err(|e| Error::QuicStream(format!("failed to open log uni stream: {e}")))?;
     tokio::spawn(log_forward::drain_logs_to_quic(log_rx, log_send));
     info!("log forwarding stream opened");
-
-    // 8. Send Handshake message.
-    let handshake = ControlMsg::Handshake {
-        protocol_version: PROTOCOL_VERSION,
-        token,
-    };
-    send_msg(&mut send, &handshake).await?;
-    info!("sent handshake");
 
     // 9. Start the background port scan loop.
     // Pass the QUIC port so the scanner excludes our own UDP endpoint.
@@ -252,6 +277,134 @@ async fn run(log_rx: tokio::sync::mpsc::Receiver<protocol::AgentLogEvent>) -> Re
     endpoint.close(0u32.into(), b"done");
     info!("agent shutting down");
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Session bootstrap
+// ---------------------------------------------------------------------------
+
+/// Read the session config the host wrote to our stdin over the SSH channel.
+///
+/// Reads until the config terminator so the host may keep the channel open.
+/// A missing or malformed config is fatal: without the host's certificate we
+/// have no way to tell the host apart from an attacker, and serving anyone
+/// would expose every loopback service on this machine.
+async fn read_session_config() -> Result<AgentSessionConfig> {
+    let read = tokio::task::spawn_blocking(|| -> Result<String> {
+        use std::io::BufRead;
+
+        let stdin = std::io::stdin();
+        let mut handle = stdin.lock();
+        let mut text = String::new();
+
+        loop {
+            let mut line = String::new();
+            let bytes = handle.read_line(&mut line).map_err(Error::Io)?;
+            if bytes == 0 {
+                // EOF.
+                break;
+            }
+            let is_terminator = line.trim() == "END_SESSION";
+            text.push_str(&line);
+            if is_terminator {
+                break;
+            }
+        }
+
+        Ok(text)
+    });
+
+    let text = match tokio::time::timeout(CONFIG_READ_TIMEOUT, read).await {
+        Ok(join) => join.map_err(|e| Error::Security(format!("stdin reader failed: {e}")))??,
+        Err(_) => {
+            return Err(Error::Security(
+                "timed out waiting for the session config on stdin".into(),
+            ));
+        }
+    };
+
+    if text.trim().is_empty() {
+        return Err(Error::Security(
+            "no session config on stdin; this agent must be launched by the \
+             port-linker host over SSH, which supplies the pinned certificate \
+             it will be reached with"
+                .into(),
+        ));
+    }
+
+    AgentSessionConfig::parse(&text)
+}
+
+/// Accept the first QUIC connection that completes the mutual-TLS handshake.
+///
+/// Handshake failures are expected and harmless — they are exactly what a
+/// scanner or impersonator produces — so they are logged and skipped rather
+/// than killing the agent, which would let anyone knock the tunnel over.
+async fn accept_authenticated(endpoint: &Endpoint) -> Result<quinn::Connection> {
+    let deadline = tokio::time::Instant::now() + ACCEPT_WINDOW;
+
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(Error::QuicConnection(
+                "no authenticated connection within the accept window".into(),
+            ));
+        }
+
+        let incoming = match tokio::time::timeout(remaining, endpoint.accept()).await {
+            Ok(Some(incoming)) => incoming,
+            Ok(None) => {
+                return Err(Error::QuicConnection(
+                    "endpoint closed before accepting".into(),
+                ));
+            }
+            Err(_) => {
+                return Err(Error::QuicConnection(
+                    "no authenticated connection within the accept window".into(),
+                ));
+            }
+        };
+
+        let remote = incoming.remote_address();
+        match incoming.await {
+            Ok(connection) => return Ok(connection),
+            Err(e) => {
+                warn!(
+                    %remote,
+                    %e,
+                    "rejected connection that failed mutual TLS authentication"
+                );
+            }
+        }
+    }
+}
+
+/// Require the host's first control message to prove knowledge of the session
+/// secret delivered over SSH.
+async fn authenticate_host(recv: &mut quinn::RecvStream, expected_secret: &str) -> Result<()> {
+    let msg = match tokio::time::timeout(SESSION_AUTH_TIMEOUT, recv_msg(recv)).await {
+        Ok(result) => result?,
+        Err(_) => {
+            return Err(Error::Security(
+                "host did not authenticate within the timeout".into(),
+            ));
+        }
+    };
+
+    match msg {
+        ControlMsg::SessionAuth { session_secret } => {
+            if common::session::secrets_match(&session_secret, expected_secret) {
+                Ok(())
+            } else {
+                Err(Error::Security(
+                    "host presented an incorrect session secret".into(),
+                ))
+            }
+        }
+        other => Err(Error::Security(format!(
+            "expected SessionAuth as the first host message, got {other:?}"
+        ))),
+    }
 }
 
 /// Handle a TCP forwarding request on a new QUIC bidirectional stream.

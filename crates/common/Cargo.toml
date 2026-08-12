@@ -8,6 +8,12 @@ thiserror.workspace = true
 dirs.workspace = true
 protocol = { path = "../protocol" }
 tracing.workspace = true
+# Session security: ephemeral mutual-TLS identities pinned over SSH.
+rustls.workspace = true
+rustls-pki-types.workspace = true
+rcgen.workspace = true
+ring.workspace = true
+subtle.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true

@@ -188,6 +188,9 @@ impl BuildConfig {
         let out_dir = env::var("OUT_DIR").unwrap_or_default();
         let is_release = env::var("PROFILE").map(|p| p == "release").unwrap_or(false);
 
+        // Rebuild when the caller starts or stops supplying pre-built binaries.
+        println!("cargo:rerun-if-env-changed=PLK_PREBUILT_DIR");
+
         Self::new(package)
             .workspace_root(workspace_root)
             .out_dir(out_dir)
@@ -260,6 +263,7 @@ impl ToolchainInfo {
 
     fn check_nightly() -> bool {
         Command::new("rustup")
+            .env_remove("RUSTUP_TOOLCHAIN")
             .args(["run", "nightly", "rustc", "--version"])
             .output()
             .map(|o| o.status.success())
@@ -268,7 +272,8 @@ impl ToolchainInfo {
 
     fn check_rust_src() -> bool {
         Command::new("rustup")
-            .args(["+nightly", "component", "list", "--installed"])
+            .env_remove("RUSTUP_TOOLCHAIN")
+            .args(["component", "list", "--installed", "--toolchain", "nightly"])
             .output()
             .map(|o| {
                 String::from_utf8_lossy(&o.stdout)
@@ -375,6 +380,58 @@ pub fn watch_sources(paths: &[&str]) {
     }
 }
 
+/// Locate a caller-supplied binary for `target`, if one was provided.
+///
+/// `PLK_PREBUILT_DIR` names a directory holding binaries named by
+/// [`output_filename`], e.g. `agent-aarch64-apple-darwin`. Targets with no
+/// matching file fall through to being built locally, so a partially populated
+/// directory still works.
+///
+/// A relative path is resolved against the workspace root rather than the
+/// process's current directory. `cross` runs the build inside a container where
+/// the workspace is mounted at a different absolute path, so a relative path is
+/// the only form that means the same thing on both sides.
+fn find_prebuilt(config: &BuildConfig, target: &CrossTarget) -> Option<PathBuf> {
+    let dir = env::var("PLK_PREBUILT_DIR").ok()?;
+    if dir.is_empty() {
+        return None;
+    }
+
+    let dir = Path::new(&dir);
+    let dir = if dir.is_absolute() {
+        dir.to_path_buf()
+    } else {
+        config.workspace_root.join(dir)
+    };
+
+    let candidate = dir.join(output_filename(&config.package, &target.triple));
+    match fs::metadata(&candidate) {
+        Ok(meta) if meta.len() > 0 => Some(candidate),
+        _ => None,
+    }
+}
+
+/// Copy a pre-built binary into the output directory.
+fn adopt_prebuilt(source: &Path, dest: &Path, triple: &str) -> BuildResult {
+    if let Some(parent) = dest.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+
+    match fs::copy(source, dest) {
+        Ok(size) => {
+            eprintln!("cargo:warning=Using pre-built binary for {triple} ({size} bytes)");
+            BuildResult::Success {
+                path: dest.to_path_buf(),
+                size: size as usize,
+                compressed: false,
+            }
+        }
+        Err(e) => BuildResult::Failed {
+            reason: format!("failed to copy pre-built binary for {triple}: {e}"),
+        },
+    }
+}
+
 fn build_single_target(
     config: &BuildConfig,
     target: &CrossTarget,
@@ -386,19 +443,27 @@ fn build_single_target(
         .join(output_filename(&config.package, &target.triple));
     let binary_name = config.binary_name.as_deref().unwrap_or(&config.package);
 
+    // A binary supplied by the caller wins over building one here.
+    //
+    // No single machine can produce every target — a Linux host cannot build
+    // the Apple agent (no SDK, and `cross` publishes no Apple images) and a
+    // macOS host cannot build the Linux musl agents without Docker. CI
+    // therefore builds each agent on a runner that can, and hands the
+    // collected binaries to the CLI build through this directory.
+    if let Some(prebuilt) = find_prebuilt(config, target) {
+        return adopt_prebuilt(&prebuilt, &dest, &target.triple);
+    }
+
     // Determine if we should use nightly with build-std
     let use_build_std = config.is_release && toolchain.can_use_build_std();
 
     if config.is_release && !toolchain.can_use_build_std() {
-        eprintln!(
-            "cargo:warning=Nightly toolchain with rust-src not available for {}, \
-             agent binary will be an empty placeholder. Install nightly and rust-src \
-             for embedded agent support.",
+        panic!(
+            "Nightly toolchain with rust-src not available for {}. \
+             Release builds require nightly + rust-src for build-std support. \
+             Install with: rustup toolchain install nightly && rustup +nightly component add rust-src",
             target.triple
         );
-        return BuildResult::Failed {
-            reason: "Nightly toolchain with rust-src not available".to_string(),
-        };
     }
 
     // Try native cargo first
@@ -413,7 +478,7 @@ fn build_single_target(
                     target.triple, reason
                 );
 
-                match try_cross(config, target, build_target_dir, use_build_std) {
+                match try_cross(config, target, build_target_dir) {
                     Ok(profile) => (true, profile),
                     Err(reason) => {
                         eprintln!(
@@ -485,11 +550,6 @@ fn try_native_cargo(
 ) -> Result<String, String> {
     let mut args: Vec<String> = Vec::new();
 
-    // Use nightly if build-std is enabled
-    if use_build_std {
-        args.push("+nightly".to_string());
-    }
-
     args.push("build".to_string());
 
     // Determine profile
@@ -531,9 +591,25 @@ fn try_native_cargo(
         args.push(config.features.join(","));
     }
 
-    let mut cmd = Command::new("cargo");
+    // When build-std is enabled, use `rustup run nightly cargo` instead of
+    // `cargo +nightly`. The `+toolchain` syntax only works with the rustup
+    // proxy, but build scripts inherit the parent cargo's environment which
+    // sets RUSTUP_TOOLCHAIN and RUSTC, bypassing the proxy and forcing the
+    // stable compiler.
+    let mut cmd = if use_build_std {
+        let mut c = Command::new("rustup");
+        c.args(["run", "nightly", "cargo"]);
+        c
+    } else {
+        Command::new("cargo")
+    };
     cmd.current_dir(&config.workspace_root)
         .env("CARGO_TARGET_DIR", build_target_dir)
+        .env_remove("RUSTUP_TOOLCHAIN")
+        .env_remove("RUSTC")
+        .env_remove("RUSTC_WRAPPER")
+        .env_remove("RUSTC_WORKSPACE_WRAPPER")
+        .env_remove("RUSTDOC")
         .args(&args);
 
     if !config.rustflags.is_empty() {
@@ -553,26 +629,17 @@ fn try_cross(
     config: &BuildConfig,
     target: &CrossTarget,
     build_target_dir: &Path,
-    use_build_std: bool,
 ) -> Result<String, String> {
     let mut args = Vec::new();
 
-    // Use nightly if build-std is enabled
-    if use_build_std {
-        args.push("+nightly".to_string());
-    }
-
     args.push("build".to_string());
 
+    // cross manages its own Docker-based toolchain, so we don't pass -Z
+    // build-std flags. Just use --release or the custom profile directly.
     let profile_dir = if config.is_release {
-        if use_build_std {
-            if let Some(ref custom) = target.custom_profile {
-                args.extend(["--profile".to_string(), custom.clone()]);
-                custom.clone()
-            } else {
-                args.push("--release".to_string());
-                "release".to_string()
-            }
+        if let Some(ref custom) = target.custom_profile {
+            args.extend(["--profile".to_string(), custom.clone()]);
+            custom.clone()
         } else {
             args.push("--release".to_string());
             "release".to_string()
@@ -580,15 +647,6 @@ fn try_cross(
     } else {
         "debug".to_string()
     };
-
-    // Add build-std flags
-    if use_build_std {
-        args.extend(["-Z".to_string(), "build-std=std,panic_abort".to_string()]);
-        args.extend([
-            "-Z".to_string(),
-            "build-std-features=optimize_for_size".to_string(),
-        ]);
-    }
 
     args.extend([
         "-p".to_string(),
@@ -605,6 +663,11 @@ fn try_cross(
     let mut cmd = Command::new("cross");
     cmd.current_dir(&config.workspace_root)
         .env("CARGO_TARGET_DIR", build_target_dir)
+        .env_remove("RUSTUP_TOOLCHAIN")
+        .env_remove("RUSTC")
+        .env_remove("RUSTC_WRAPPER")
+        .env_remove("RUSTC_WORKSPACE_WRAPPER")
+        .env_remove("RUSTDOC")
         .args(&args);
 
     if !config.rustflags.is_empty() {
