@@ -8,7 +8,6 @@ mod ssh;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use bytes::Bytes;
 use clap::Parser;
 use quinn::crypto::rustls::QuicClientConfig;
 use tracing::{debug, error, info, warn};
@@ -17,9 +16,7 @@ use binding_manager::{BindingManager, ConflictPolicy};
 use common::{Error, Result};
 use protocol::{ControlMsg, PROTOCOL_VERSION};
 use ssh::{HostKeyPolicy, SshChain};
-
-/// Maximum allowed frame size (1 MB).
-const MAX_FRAME_SIZE: u32 = 1_048_576;
+use tunnel::{recv_framed as recv_msg, send_framed as send_msg};
 
 // ---------------------------------------------------------------------------
 // Transport strategy (ProxyJump support)
@@ -199,45 +196,6 @@ impl SessionSecurity {
     fn session_secret(&self) -> &str {
         &self.agent_config.session_secret
     }
-}
-
-// ---------------------------------------------------------------------------
-// Framed message helpers (4-byte big-endian length prefix)
-// ---------------------------------------------------------------------------
-
-/// Send a `ControlMsg` with a 4-byte big-endian length prefix.
-async fn send_msg(send: &mut quinn::SendStream, msg: &ControlMsg) -> Result<()> {
-    let payload: Bytes = protocol::encode(msg).map_err(|e| Error::Codec(e.to_string()))?;
-    let len = payload.len() as u32;
-    send.write_all(&len.to_be_bytes())
-        .await
-        .map_err(|e| Error::QuicStream(e.to_string()))?;
-    send.write_all(&payload)
-        .await
-        .map_err(|e| Error::QuicStream(e.to_string()))?;
-    Ok(())
-}
-
-/// Receive a length-prefixed `ControlMsg` from the stream.
-async fn recv_msg(recv: &mut quinn::RecvStream) -> Result<ControlMsg> {
-    let mut len_buf = [0u8; 4];
-    recv.read_exact(&mut len_buf)
-        .await
-        .map_err(|e| Error::QuicStream(e.to_string()))?;
-    let len = u32::from_be_bytes(len_buf);
-
-    if len > MAX_FRAME_SIZE {
-        return Err(Error::Protocol(format!(
-            "frame too large: {len} bytes (max {MAX_FRAME_SIZE})"
-        )));
-    }
-
-    let mut buf = vec![0u8; len as usize];
-    recv.read_exact(&mut buf)
-        .await
-        .map_err(|e| Error::QuicStream(e.to_string()))?;
-
-    protocol::decode::<ControlMsg>(&buf).map_err(|e| Error::Codec(e.to_string()))
 }
 
 // ---------------------------------------------------------------------------

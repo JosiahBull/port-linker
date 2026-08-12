@@ -13,6 +13,7 @@ common = { path = "../common" }
 agent-embed = { path = "../agent-embed" }
 relay-embed = { path = "../relay-embed" }
 quic-over-tcp = { path = "../quic-over-tcp" }
+tunnel = { path = "../tunnel" }
 tokio.workspace = true
 quinn.workspace = true
 rustls.workspace = true
