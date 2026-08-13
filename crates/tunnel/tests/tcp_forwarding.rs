@@ -20,8 +20,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use support::{
-    Loopback, TargetService, finish, pattern, read_exact, read_to_end, tcp_pair, unused_port,
-    within,
+    Loopback, TargetService, finish, pattern, read_exact, read_to_end, read_until_closed, tcp_pair,
+    unused_port, within,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tunnel::{STATUS_ERROR, STATUS_OK, forward_tcp_connection};
@@ -364,7 +364,7 @@ async fn service_that_closes_immediately_yields_no_data() {
         // The write may or may not succeed depending on timing; what matters is
         // that the client is not left waiting for a response forever.
         let _ = client.write_all(b"anything").await;
-        let received = read_to_end(&mut client).await;
+        let received = read_until_closed(&mut client).await;
         assert!(
             received.is_empty(),
             "a service that never wrote must produce no bytes, got {received:?}"
@@ -393,7 +393,7 @@ async fn connection_refused_closes_the_local_socket() {
     let forward = tokio::spawn(forward_tcp_connection(loopback.host(), accepted, port));
 
     within("refused connection", async {
-        let received = read_to_end(&mut client).await;
+        let received = read_until_closed(&mut client).await;
         assert!(
             received.is_empty(),
             "expected no data on a refused connection"
@@ -422,7 +422,7 @@ async fn refused_connection_after_client_already_sent_data() {
             .await
             .expect("write before failure is accepted locally");
 
-        let received = read_to_end(&mut client).await;
+        let received = read_until_closed(&mut client).await;
         assert!(
             received.is_empty(),
             "expected no response from a refused connection, got {received:?}"
@@ -487,7 +487,7 @@ async fn silent_agent_releases_the_client_when_the_session_drops() {
     loopback.close();
 
     within("silent agent", async {
-        let received = read_to_end(&mut client).await;
+        let received = read_until_closed(&mut client).await;
         assert!(received.is_empty(), "silent agent produced data");
         forward.await.expect("forwarder finished");
     })
@@ -517,7 +517,7 @@ async fn unrecognised_status_byte_is_treated_as_failure() {
     let forward = tokio::spawn(forward_tcp_connection(loopback.host(), accepted, 9999));
 
     within("unrecognised status", async {
-        let received = read_to_end(&mut client).await;
+        let received = read_until_closed(&mut client).await;
         assert!(
             received.is_empty(),
             "an unrecognised status byte must not be forwarded as data, got {received:?}"
@@ -548,7 +548,7 @@ async fn error_status_without_a_diagnostic_frame_is_survivable() {
     let forward = tokio::spawn(forward_tcp_connection(loopback.host(), accepted, 9999));
 
     within("truncated error frame", async {
-        let received = read_to_end(&mut client).await;
+        let received = read_until_closed(&mut client).await;
         assert!(received.is_empty(), "expected no data");
         forward.await.expect("forwarder finished");
     })

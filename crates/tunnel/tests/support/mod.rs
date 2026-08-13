@@ -367,7 +367,10 @@ pub async fn read_exact(socket: &mut TcpStream, len: usize) -> Vec<u8> {
     buf
 }
 
-/// Drain to EOF, asserting the peer closed rather than hung.
+/// Drain to EOF, asserting the peer closed cleanly rather than hung.
+///
+/// Use this where a clean FIN is the contract. On a failure path, prefer
+/// [`read_until_closed`]: a reset is a legitimate outcome there.
 pub async fn read_to_end(socket: &mut TcpStream) -> Vec<u8> {
     let mut buf = Vec::new();
     socket
@@ -375,6 +378,25 @@ pub async fn read_to_end(socket: &mut TcpStream) -> Vec<u8> {
         .await
         .expect("read to EOF from local socket");
     buf
+}
+
+/// Read until the connection ends, however it ends, and return what arrived.
+///
+/// On a failure path the point is that the client stops waiting and receives no
+/// application data — not which of the two ways TCP has of saying so. Closing a
+/// socket that still holds unread data in its receive buffer produces an RST
+/// rather than a FIN, so a client that had already sent a request sees
+/// `ECONNRESET` where one that sent nothing sees EOF. That varies by platform and
+/// by timing (macOS resets here where Linux gave EOF), and both mean the same
+/// thing to the caller, so both are accepted. A hang would still fail the test,
+/// via the enclosing [`within`].
+pub async fn read_until_closed(socket: &mut TcpStream) -> Vec<u8> {
+    let mut buf = Vec::new();
+    match socket.read_to_end(&mut buf).await {
+        Ok(_) => buf,
+        Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => buf,
+        Err(e) => panic!("unexpected error reading from local socket: {e}"),
+    }
 }
 
 /// A deterministic byte pattern that makes truncation, duplication, and
