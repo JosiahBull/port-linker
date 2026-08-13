@@ -15,7 +15,5 @@ protocol = { path = "../protocol" }
 common = { path = "../common" }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 quinn.workspace = true
-rustls.workspace = true
-rustls-pki-types.workspace = true
 clap.workspace = true
 tracing.workspace = true

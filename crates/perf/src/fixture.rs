@@ -40,13 +40,21 @@ const HANDSHAKE_ATTEMPTS: u32 = 2;
 pub struct AgentUnderTest {
     child: Child,
     port: u16,
+    /// The host identity the agent was told to expect, and the secret it will
+    /// demand on the control stream.
+    identity: common::session::Identity,
+    session_secret: String,
+    /// The certificate the agent published, which the client pins.
+    agent_cert: Vec<u8>,
+    /// Held open so the agent's stdin is not closed mid-benchmark.
+    _stdin: Option<std::process::ChildStdin>,
     /// The stdout reader, retained for the agent's lifetime.
     ///
     /// Dropping it closes the read end of the pipe, and the agent treats a failed
     /// stdout write as fatal — reasonably so, since stdout is how it reports its
-    /// existence to the host. Parsing stops at `PORT=`, which is the second of
-    /// four handshake lines, so without holding this the pipe closes while the
-    /// agent is still writing and it dies of EPIPE before the benchmark starts.
+    /// existence to the host. Parsing stops once the needed fields have arrived,
+    /// which is before the last handshake line, so without holding this the pipe
+    /// closes while the agent is still writing and it dies of EPIPE.
     _stdout: BufReader<std::process::ChildStdout>,
     /// Everything the agent wrote to stderr, drained by a background thread.
     ///
@@ -65,15 +73,45 @@ impl Drop for AgentUnderTest {
 }
 
 impl AgentUnderTest {
-    /// Spawn the agent and read the UDP port it is listening on.
+    /// Spawn the agent and perform the introduction the SSH channel normally does.
+    ///
+    /// The agent fails closed without a session config, so the benchmark plays the
+    /// host: it mints an identity and session secret, writes them to the agent's
+    /// stdin, and pins the certificate the agent publishes on stdout. This is
+    /// bootstrap only — the measured data path is unaffected by how the two ends
+    /// were introduced.
     pub fn spawn() -> Result<Self> {
         let binary = agent_binary()?;
 
+        let identity =
+            common::session::Identity::generate("port-linker-host").map_err(|e| e.to_string())?;
+        let session_id = common::session::generate_session_id().map_err(|e| e.to_string())?;
+        let session_secret =
+            common::session::generate_session_secret().map_err(|e| e.to_string())?;
+        let config = common::session::AgentSessionConfig {
+            session_id,
+            session_secret: session_secret.clone(),
+            client_cert_der: identity.cert_der().to_vec(),
+        };
+
         let mut child = Command::new(&binary)
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| format!("failed to spawn agent at {}: {e}", binary.display()))?;
+
+        {
+            use std::io::Write;
+            let stdin = child
+                .stdin
+                .as_mut()
+                .ok_or("failed to capture agent stdin")?;
+            stdin
+                .write_all(config.encode().as_bytes())
+                .map_err(|e| e.to_string())?;
+            stdin.flush().map_err(|e| e.to_string())?;
+        }
 
         let stdout = child
             .stdout
@@ -99,8 +137,9 @@ impl AgentUnderTest {
         let deadline = std::time::Instant::now() + AGENT_STARTUP_TIMEOUT;
         let mut reader = BufReader::new(stdout);
         let mut port = None;
+        let mut agent_cert = None;
 
-        while std::time::Instant::now() < deadline {
+        while std::time::Instant::now() < deadline && (port.is_none() || agent_cert.is_none()) {
             let mut line = String::new();
             // A zero-length read is EOF: the agent exited. Report that rather
             // than letting it fall through to the timeout message, which would
@@ -113,24 +152,33 @@ impl AgentUnderTest {
                 )
                 .into());
             }
-            if let Some(value) = line.trim().strip_prefix("PORT=") {
+            let line = line.trim();
+            if let Some(value) = line.strip_prefix("PORT=") {
                 port = Some(value.parse::<u16>().map_err(|e| e.to_string())?);
-                break;
+            } else if let Some(value) = line.strip_prefix("AGENT_CERT=") {
+                agent_cert = Some(common::session::from_hex(value).map_err(|e| e.to_string())?);
             }
         }
 
-        let Some(port) = port else {
+        let (Some(port), Some(agent_cert)) = (port, agent_cert) else {
             let _ = child.kill();
             return Err(format!(
-                "agent did not report a PORT within {AGENT_STARTUP_TIMEOUT:?}; stderr:\n{}",
+                "agent did not publish PORT and AGENT_CERT within \
+                 {AGENT_STARTUP_TIMEOUT:?}; stderr:\n{}",
                 snapshot(&stderr_log)
             )
             .into());
         };
 
+        let stdin = child.stdin.take();
+
         Ok(Self {
             child,
             port,
+            identity,
+            session_secret,
+            agent_cert,
+            _stdin: stdin,
             // Held, not dropped: see the field's documentation.
             _stdout: reader,
             stderr: stderr_log,
@@ -187,69 +235,15 @@ fn agent_binary() -> Result<PathBuf> {
 // QUIC client
 // ---------------------------------------------------------------------------
 
-/// Accepts the agent's self-signed certificate.
+/// Build the host-side QUIC config for this agent: present our identity, accept
+/// only the certificate the agent published.
 ///
-/// The shipped host pins the certificate it learned over SSH; there is no SSH
-/// bootstrap here, so verification is skipped. This affects only how the
-/// benchmark authenticates, not the data path it measures.
-#[derive(Debug)]
-struct SkipServerVerification(Arc<rustls::crypto::CryptoProvider>);
-
-impl rustls::client::danger::ServerCertVerifier for SkipServerVerification {
-    fn verify_server_cert(
-        &self,
-        _end_entity: &rustls_pki_types::CertificateDer<'_>,
-        _intermediates: &[rustls_pki_types::CertificateDer<'_>],
-        _server_name: &rustls_pki_types::ServerName<'_>,
-        _ocsp_response: &[u8],
-        _now: rustls_pki_types::UnixTime,
-    ) -> std::result::Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-        Ok(rustls::client::danger::ServerCertVerified::assertion())
-    }
-
-    fn verify_tls12_signature(
-        &self,
-        message: &[u8],
-        cert: &rustls_pki_types::CertificateDer<'_>,
-        dss: &rustls::DigitallySignedStruct,
-    ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls12_signature(
-            message,
-            cert,
-            dss,
-            &self.0.signature_verification_algorithms,
-        )
-    }
-
-    fn verify_tls13_signature(
-        &self,
-        message: &[u8],
-        cert: &rustls_pki_types::CertificateDer<'_>,
-        dss: &rustls::DigitallySignedStruct,
-    ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls13_signature(
-            message,
-            cert,
-            dss,
-            &self.0.signature_verification_algorithms,
-        )
-    }
-
-    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        self.0.signature_verification_algorithms.supported_schemes()
-    }
-}
-
-fn client_config() -> Result<quinn::ClientConfig> {
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let _ = rustls::crypto::CryptoProvider::install_default((*provider).clone());
-
-    let rustls_config = rustls::ClientConfig::builder_with_provider(provider.clone())
-        .with_protocol_versions(rustls::DEFAULT_VERSIONS)
-        .map_err(|e| e.to_string())?
-        .dangerous()
-        .with_custom_certificate_verifier(Arc::new(SkipServerVerification(provider)))
-        .with_no_client_auth();
+/// This is the same `common::session` mutual-TLS path the shipped host uses, so
+/// the benchmark measures the transport production actually runs — a pinned
+/// TLS 1.3 connection with client auth — rather than an unauthenticated one.
+fn client_config(agent: &AgentUnderTest) -> Result<quinn::ClientConfig> {
+    let rustls_config = common::session::client_tls_config(&agent.identity, &agent.agent_cert)
+        .map_err(|e| e.to_string())?;
 
     let quic = QuicClientConfig::try_from(rustls_config).map_err(|e| e.to_string())?;
     let mut config = quinn::ClientConfig::new(Arc::new(quic));
@@ -393,7 +387,7 @@ impl Tunnel {
         };
 
         let mut endpoint = Endpoint::client("0.0.0.0:0".parse::<SocketAddr>().unwrap())?;
-        endpoint.set_default_client_config(client_config()?);
+        endpoint.set_default_client_config(client_config(&agent)?);
 
         let connection = Self::handshake(&endpoint, target, rtt, &agent).await?;
 
@@ -404,13 +398,26 @@ impl Tunnel {
         // them here too, or the benchmark would be measuring a wedged agent.
         let mut drains = Vec::with_capacity(2);
 
-        let (control_send, mut control_recv) = connection
+        let (mut control_send, mut control_recv) = connection
             .accept_bi()
             .await
             .map_err(|e| format!("failed to accept control stream: {e}"))?;
         let _handshake = tunnel::recv_framed(&mut control_recv)
             .await
             .map_err(|e| format!("failed to read agent handshake: {e}"))?;
+
+        // mTLS has already proved who we are; the agent additionally requires the
+        // session secret it was given over stdin, which binds this connection to
+        // this bootstrap. Without it the agent tears the session down.
+        tunnel::send_framed(
+            &mut control_send,
+            &protocol::ControlMsg::SessionAuth {
+                session_secret: agent.session_secret.clone(),
+            },
+        )
+        .await
+        .map_err(|e| format!("failed to authenticate the session: {e}"))?;
+
         drains.push(tokio::spawn(async move {
             while tunnel::recv_framed(&mut control_recv).await.is_ok() {}
         }));
