@@ -109,43 +109,13 @@ jobs:
 
       # Not `--bins`: that only runs binary targets, which silently skipped every
       # lib unit test and the whole of tests/integration_test.rs.
+      #
+      # This also covers the data plane suite (`crates/tunnel/tests`) and the
+      # performance regression tests (`crates/perf/tests`), which is why they have
+      # no job of their own. The perf thresholds are expressed as multiples of the
+      # round-trip time the benchmark itself imposes, so they hold on a slow runner.
       - name: Run tests
         run: cargo test --workspace --all-features
-
-  test-data-plane:
-    name: Data Plane & Performance Tests
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
-    concurrency:
-      group: ci-test-data-plane-${{ github.repository }}-${{ github.ref }}-${{ matrix.os }}
-      cancel-in-progress: true
-    strategy:
-      fail-fast: false
-      matrix:
-        # Not Windows: the perf fixture spawns the Linux/macOS agent binary.
-        os: [ubuntu-latest, macos-latest]
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: stable
-
-      - uses: Swatinem/rust-cache@v2
-
-      # The latency benchmark drives the real agent as a subprocess.
-      - name: Build agent
-        run: cargo build -p agent
-
-      # Forwarding protocol edge cases: ordering, half-close, failure paths.
-      - name: Run data plane tests
-        run: cargo test -p tunnel
-
-      # Asserts connection setup costs no round trip, and that the benchmark can
-      # still see one when it is there. Thresholds are RTT-relative, so a loaded
-      # runner does not make this flaky.
-      - name: Run performance regression tests
-        run: cargo test -p perf
 
   doc:
     name: Documentation

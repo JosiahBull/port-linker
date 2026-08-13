@@ -212,7 +212,14 @@ fn agent_binary() -> Result<PathBuf> {
         .ok_or("cannot locate workspace root from CARGO_MANIFEST_DIR")?
         .to_path_buf();
 
-    let path = workspace_root.join("target/debug/port-linker-agent");
+    // Windows executables carry the `.exe` suffix; without it the path never
+    // resolves, and the fallback build below would not fix it either.
+    let binary_name = if cfg!(windows) {
+        "port-linker-agent.exe"
+    } else {
+        "port-linker-agent"
+    };
+    let path = workspace_root.join("target/debug").join(binary_name);
     if path.exists() {
         return Ok(path);
     }
