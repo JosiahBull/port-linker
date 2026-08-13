@@ -3214,6 +3214,37 @@ async fn test_udp_forwarding_large_datagram() {
 // Port Discovery Message Flow Tests (Linux-only)
 // ---------------------------------------------------------------------------
 
+/// Bind a TCP listener on a port the agent's scanner will actually report.
+///
+/// `run_scan_loop` deliberately drops privileged ports (< 1024, system services)
+/// and ephemeral ports (transient outbound sockets, not real services). Binding
+/// port 0 asks the OS for a port, and it answers from the ephemeral range — so
+/// such a listener is correctly never reported, and a test that expects a
+/// `PortAdded` for it can never pass. Pick a concrete port outside both ranges.
+///
+/// Returns the listener and its port. Ports in use are skipped, which is also how
+/// two of these tests running concurrently avoid each other.
+#[cfg(target_os = "linux")]
+async fn bind_reportable_listener() -> (tokio::net::TcpListener, u16) {
+    let (ephemeral_start, _) = common::ephemeral::ephemeral_range();
+
+    // Search downwards from just below the ephemeral range: high ports are far
+    // less likely to be claimed by a real service than low ones.
+    for port in (1024..ephemeral_start).rev() {
+        if common::ephemeral::is_ephemeral(port) {
+            continue;
+        }
+        if let Ok(listener) = tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
+            return (listener, port);
+        }
+    }
+
+    panic!(
+        "no free non-ephemeral port in 1024..{ephemeral_start} to bind a \
+         reportable listener on"
+    );
+}
+
 /// Test 75: PortAdded notification when a new listener appears.
 ///
 /// Spawns agent, connects QUIC, consumes handshake, then starts a TCP listener
@@ -3235,11 +3266,8 @@ async fn test_port_added_notification() {
     let (_control_send, mut control_recv) =
         complete_handshake(&connection, &agent.info).await.unwrap();
 
-    // Start a TCP listener on a dynamic port.
-    let test_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("failed to bind test listener");
-    let test_port = test_listener.local_addr().unwrap().port();
+    // Start a TCP listener on a port the scanner will report.
+    let (test_listener, test_port) = bind_reportable_listener().await;
 
     // Read control stream with timeout, expect PortAdded.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -3288,11 +3316,8 @@ async fn test_port_removed_notification() {
     let (_control_send, mut control_recv) =
         complete_handshake(&connection, &agent.info).await.unwrap();
 
-    // Start and then drop a TCP listener on a dynamic port.
-    let test_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("failed to bind test listener");
-    let test_port = test_listener.local_addr().unwrap().port();
+    // Start and then drop a TCP listener on a port the scanner will report.
+    let (test_listener, test_port) = bind_reportable_listener().await;
 
     // Wait for PortAdded first.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
