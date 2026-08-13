@@ -13,8 +13,6 @@
 //! * **Failure paths** — a client whose bytes were already in flight when the
 //!   agent failed to connect must observe the failure rather than hang. These are
 //!   the cases the optimisation newly makes reachable.
-//! * **Equivalence** — both setup modes must be indistinguishable in what they
-//!   deliver.
 
 mod support;
 
@@ -26,40 +24,34 @@ use support::{
     within,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tunnel::{STATUS_ERROR, STATUS_OK, StreamSetup, forward_tcp_connection_with};
-
-const BOTH_MODES: [StreamSetup; 2] = [StreamSetup::Optimistic, StreamSetup::WaitForStatus];
+use tunnel::{STATUS_ERROR, STATUS_OK, forward_tcp_connection};
 
 // ---------------------------------------------------------------------------
 // Data integrity
 // ---------------------------------------------------------------------------
 
-/// The base case, in both modes: a request goes to the service and the response
-/// comes back.
+/// The base case: a request goes to the service and the response comes back.
 #[tokio::test(flavor = "multi_thread")]
 async fn request_and_response_round_trip() {
-    for setup in BOTH_MODES {
-        let loopback = Loopback::with_agent().await;
-        let service = TargetService::echo().await;
-        let (mut client, accepted) = tcp_pair().await;
+    let loopback = Loopback::with_agent().await;
+    let service = TargetService::echo().await;
+    let (mut client, accepted) = tcp_pair().await;
 
-        let forward = tokio::spawn(forward_tcp_connection_with(
-            loopback.host(),
-            accepted,
-            service.port(),
-            setup,
-        ));
+    let forward = tokio::spawn(forward_tcp_connection(
+        loopback.host(),
+        accepted,
+        service.port(),
+    ));
 
-        within(&format!("round trip ({setup:?})"), async {
-            client.write_all(b"hello").await.expect("write request");
-            let echoed = read_exact(&mut client, 5).await;
-            assert_eq!(&echoed, b"hello", "{setup:?}: response mismatch");
-        })
-        .await;
+    within("round trip", async {
+        client.write_all(b"hello").await.expect("write request");
+        let echoed = read_exact(&mut client, 5).await;
+        assert_eq!(&echoed, b"hello", "response mismatch");
+    })
+    .await;
 
-        drop(client);
-        finish(&format!("round trip teardown ({setup:?})"), forward).await;
-    }
+    drop(client);
+    finish("round trip teardown", forward).await;
 }
 
 /// Bulk data in both directions must be byte-exact. The forwarding path splits
@@ -68,42 +60,39 @@ async fn request_and_response_round_trip() {
 async fn bulk_transfer_is_byte_exact() {
     const SIZE: usize = 1 << 20; // 1 MiB, comfortably past the stream window
 
-    for setup in BOTH_MODES {
-        let loopback = Loopback::with_agent().await;
-        let service = TargetService::echo().await;
-        let (client, accepted) = tcp_pair().await;
+    let loopback = Loopback::with_agent().await;
+    let service = TargetService::echo().await;
+    let (client, accepted) = tcp_pair().await;
 
-        let forward = tokio::spawn(forward_tcp_connection_with(
-            loopback.host(),
-            accepted,
-            service.port(),
-            setup,
-        ));
+    let forward = tokio::spawn(forward_tcp_connection(
+        loopback.host(),
+        accepted,
+        service.port(),
+    ));
 
-        let payload = pattern(SIZE);
-        let (mut read_half, mut write_half) = client.into_split();
+    let payload = pattern(SIZE);
+    let (mut read_half, mut write_half) = client.into_split();
 
-        // Write and read concurrently: 1 MiB will not fit in the socket buffers,
-        // so writing all of it before reading any would deadlock.
-        let expected = payload.clone();
-        let reader = tokio::spawn(async move {
-            let mut received = vec![0u8; SIZE];
-            read_half
-                .read_exact(&mut received)
-                .await
-                .expect("read echoed payload");
-            assert_eq!(received, expected, "{setup:?}: echoed bytes differ");
-        });
+    // Write and read concurrently: 1 MiB will not fit in the socket buffers,
+    // so writing all of it before reading any would deadlock.
+    let expected = payload.clone();
+    let reader = tokio::spawn(async move {
+        let mut received = vec![0u8; SIZE];
+        read_half
+            .read_exact(&mut received)
+            .await
+            .expect("read echoed payload");
+        assert_eq!(received, expected, "echoed bytes differ");
+    });
 
-        within(&format!("bulk transfer ({setup:?})"), async {
-            write_half.write_all(&payload).await.expect("write payload");
-            write_half.shutdown().await.expect("shutdown write half");
-            reader.await.expect("reader task");
-        })
-        .await;
+    within("bulk transfer", async {
+        write_half.write_all(&payload).await.expect("write payload");
+        write_half.shutdown().await.expect("shutdown write half");
+        reader.await.expect("reader task");
+    })
+    .await;
 
-        finish(&format!("bulk transfer teardown ({setup:?})"), forward).await;
-    }
+    finish("bulk transfer teardown", forward).await;
 }
 
 /// Bytes written before and after the agent's status byte would have arrived must
@@ -118,11 +107,10 @@ async fn early_and_late_bytes_stay_in_order() {
     let service = TargetService::echo().await;
     let (mut client, accepted) = tcp_pair().await;
 
-    let forward = tokio::spawn(forward_tcp_connection_with(
+    let forward = tokio::spawn(forward_tcp_connection(
         loopback.host(),
         accepted,
         service.port(),
-        StreamSetup::Optimistic,
     ));
 
     within("ordered early and late bytes", async {
@@ -159,12 +147,7 @@ async fn concurrent_connections_stay_isolated() {
         let port = service.port();
         workers.push(tokio::spawn(async move {
             let (mut client, accepted) = tcp_pair().await;
-            let forward = tokio::spawn(forward_tcp_connection_with(
-                host,
-                accepted,
-                port,
-                StreamSetup::Optimistic,
-            ));
+            let forward = tokio::spawn(forward_tcp_connection(host, accepted, port));
 
             // A distinct payload per connection, so a mix-up is visible.
             let message = format!("connection-{index:04}");
@@ -205,27 +188,24 @@ async fn concurrent_connections_stay_isolated() {
 async fn service_banner_reaches_a_silent_client() {
     const BANNER: &[u8] = b"220 service ready\r\n";
 
-    for setup in BOTH_MODES {
-        let loopback = Loopback::with_agent().await;
-        let service = TargetService::banner_then_echo(BANNER).await;
-        let (mut client, accepted) = tcp_pair().await;
+    let loopback = Loopback::with_agent().await;
+    let service = TargetService::banner_then_echo(BANNER).await;
+    let (mut client, accepted) = tcp_pair().await;
 
-        let forward = tokio::spawn(forward_tcp_connection_with(
-            loopback.host(),
-            accepted,
-            service.port(),
-            setup,
-        ));
+    let forward = tokio::spawn(forward_tcp_connection(
+        loopback.host(),
+        accepted,
+        service.port(),
+    ));
 
-        within(&format!("banner delivery ({setup:?})"), async {
-            let banner = read_exact(&mut client, BANNER.len()).await;
-            assert_eq!(&banner, BANNER, "{setup:?}: banner mismatch");
-        })
-        .await;
+    within("banner delivery", async {
+        let banner = read_exact(&mut client, BANNER.len()).await;
+        assert_eq!(&banner, BANNER, "banner mismatch");
+    })
+    .await;
 
-        drop(client);
-        finish(&format!("banner teardown ({setup:?})"), forward).await;
-    }
+    drop(client);
+    finish("banner teardown", forward).await;
 }
 
 /// A greeting followed by a request/response exchange must not interleave: the
@@ -238,11 +218,10 @@ async fn banner_precedes_the_echoed_request() {
     let service = TargetService::banner_then_echo(BANNER).await;
     let (mut client, accepted) = tcp_pair().await;
 
-    let forward = tokio::spawn(forward_tcp_connection_with(
+    let forward = tokio::spawn(forward_tcp_connection(
         loopback.host(),
         accepted,
         service.port(),
-        StreamSetup::Optimistic,
     ));
 
     within("banner then echo", async {
@@ -279,35 +258,32 @@ async fn banner_precedes_the_echoed_request() {
 /// EOF, losing the reply. The shape of an HTTP/1.0 request.
 #[tokio::test(flavor = "multi_thread")]
 async fn half_closed_client_still_receives_the_response() {
-    for setup in BOTH_MODES {
-        let loopback = Loopback::with_agent().await;
-        let service = TargetService::echo().await;
-        let (client, accepted) = tcp_pair().await;
+    let loopback = Loopback::with_agent().await;
+    let service = TargetService::echo().await;
+    let (client, accepted) = tcp_pair().await;
 
-        let forward = tokio::spawn(forward_tcp_connection_with(
-            loopback.host(),
-            accepted,
-            service.port(),
-            setup,
-        ));
+    let forward = tokio::spawn(forward_tcp_connection(
+        loopback.host(),
+        accepted,
+        service.port(),
+    ));
 
-        let (mut read_half, mut write_half) = client.into_split();
+    let (mut read_half, mut write_half) = client.into_split();
 
-        within(&format!("half-close ({setup:?})"), async {
-            write_half.write_all(b"GET /\r\n").await.expect("write");
-            write_half.shutdown().await.expect("half-close");
+    within("half-close", async {
+        write_half.write_all(b"GET /\r\n").await.expect("write");
+        write_half.shutdown().await.expect("half-close");
 
-            let mut received = vec![0u8; 7];
-            read_half
-                .read_exact(&mut received)
-                .await
-                .expect("response after half-close");
-            assert_eq!(&received, b"GET /\r\n", "{setup:?}: response mismatch");
-        })
-        .await;
+        let mut received = vec![0u8; 7];
+        read_half
+            .read_exact(&mut received)
+            .await
+            .expect("response after half-close");
+        assert_eq!(&received, b"GET /\r\n", "response mismatch");
+    })
+    .await;
 
-        finish(&format!("half-close teardown ({setup:?})"), forward).await;
-    }
+    finish("half-close teardown", forward).await;
 }
 
 /// When the service closes its side, the client must see EOF rather than hang.
@@ -326,11 +302,10 @@ async fn service_close_is_propagated_to_the_client() {
     let service = TargetService::echo_once_then_close(request.len()).await;
     let (mut client, accepted) = tcp_pair().await;
 
-    let forward = tokio::spawn(forward_tcp_connection_with(
+    let forward = tokio::spawn(forward_tcp_connection(
         loopback.host(),
         accepted,
         service.port(),
-        StreamSetup::Optimistic,
     ));
 
     within("service close propagates", async {
@@ -353,25 +328,22 @@ async fn service_close_is_propagated_to_the_client() {
 /// has confirmed, so it sees EOF immediately.
 #[tokio::test(flavor = "multi_thread")]
 async fn client_that_sends_nothing_and_closes_is_clean() {
-    for setup in BOTH_MODES {
-        let loopback = Loopback::with_agent().await;
-        let service = TargetService::echo().await;
-        let (client, accepted) = tcp_pair().await;
+    let loopback = Loopback::with_agent().await;
+    let service = TargetService::echo().await;
+    let (client, accepted) = tcp_pair().await;
 
-        let forward = tokio::spawn(forward_tcp_connection_with(
-            loopback.host(),
-            accepted,
-            service.port(),
-            setup,
-        ));
+    let forward = tokio::spawn(forward_tcp_connection(
+        loopback.host(),
+        accepted,
+        service.port(),
+    ));
 
-        drop(client);
+    drop(client);
 
-        within(&format!("immediate close ({setup:?})"), async {
-            forward.await.expect("forwarder finished cleanly");
-        })
-        .await;
-    }
+    within("immediate close", async {
+        forward.await.expect("forwarder finished cleanly");
+    })
+    .await;
 }
 
 /// A service that closes on accept, without reading or writing, must leave the
@@ -382,11 +354,10 @@ async fn service_that_closes_immediately_yields_no_data() {
     let service = TargetService::immediate_close().await;
     let (mut client, accepted) = tcp_pair().await;
 
-    let forward = tokio::spawn(forward_tcp_connection_with(
+    let forward = tokio::spawn(forward_tcp_connection(
         loopback.host(),
         accepted,
         service.port(),
-        StreamSetup::Optimistic,
     ));
 
     within("immediate service close", async {
@@ -415,28 +386,21 @@ async fn service_that_closes_immediately_yields_no_data() {
 /// left open.
 #[tokio::test(flavor = "multi_thread")]
 async fn connection_refused_closes_the_local_socket() {
-    for setup in BOTH_MODES {
-        let loopback = Loopback::with_agent().await;
-        let port = unused_port().await;
-        let (mut client, accepted) = tcp_pair().await;
+    let loopback = Loopback::with_agent().await;
+    let port = unused_port().await;
+    let (mut client, accepted) = tcp_pair().await;
 
-        let forward = tokio::spawn(forward_tcp_connection_with(
-            loopback.host(),
-            accepted,
-            port,
-            setup,
-        ));
+    let forward = tokio::spawn(forward_tcp_connection(loopback.host(), accepted, port));
 
-        within(&format!("refused connection ({setup:?})"), async {
-            let received = read_to_end(&mut client).await;
-            assert!(
-                received.is_empty(),
-                "{setup:?}: expected no data on a refused connection"
-            );
-            forward.await.expect("forwarder finished");
-        })
-        .await;
-    }
+    within("refused connection", async {
+        let received = read_to_end(&mut client).await;
+        assert!(
+            received.is_empty(),
+            "expected no data on a refused connection"
+        );
+        forward.await.expect("forwarder finished");
+    })
+    .await;
 }
 
 /// The case the optimistic setup newly makes reachable: the client's bytes are
@@ -450,12 +414,7 @@ async fn refused_connection_after_client_already_sent_data() {
     let port = unused_port().await;
     let (mut client, accepted) = tcp_pair().await;
 
-    let forward = tokio::spawn(forward_tcp_connection_with(
-        loopback.host(),
-        accepted,
-        port,
-        StreamSetup::Optimistic,
-    ));
+    let forward = tokio::spawn(forward_tcp_connection(loopback.host(), accepted, port));
 
     within("refused after send", async {
         client
@@ -486,12 +445,7 @@ async fn large_pending_write_to_a_refused_port_does_not_deadlock() {
     let port = unused_port().await;
     let (client, accepted) = tcp_pair().await;
 
-    let forward = tokio::spawn(forward_tcp_connection_with(
-        loopback.host(),
-        accepted,
-        port,
-        StreamSetup::Optimistic,
-    ));
+    let forward = tokio::spawn(forward_tcp_connection(loopback.host(), accepted, port));
 
     let (mut read_half, mut write_half) = client.into_split();
     // The write is expected to fail partway once the connection is torn down;
@@ -526,12 +480,7 @@ async fn silent_agent_releases_the_client_when_the_session_drops() {
     .await;
     let (mut client, accepted) = tcp_pair().await;
 
-    let forward = tokio::spawn(forward_tcp_connection_with(
-        loopback.host(),
-        accepted,
-        9999,
-        StreamSetup::Optimistic,
-    ));
+    let forward = tokio::spawn(forward_tcp_connection(loopback.host(), accepted, 9999));
 
     // Give the stream time to reach the silent handler, then lose the session.
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -565,12 +514,7 @@ async fn unrecognised_status_byte_is_treated_as_failure() {
     .await;
     let (mut client, accepted) = tcp_pair().await;
 
-    let forward = tokio::spawn(forward_tcp_connection_with(
-        loopback.host(),
-        accepted,
-        9999,
-        StreamSetup::Optimistic,
-    ));
+    let forward = tokio::spawn(forward_tcp_connection(loopback.host(), accepted, 9999));
 
     within("unrecognised status", async {
         let received = read_to_end(&mut client).await;
@@ -601,12 +545,7 @@ async fn error_status_without_a_diagnostic_frame_is_survivable() {
     .await;
     let (mut client, accepted) = tcp_pair().await;
 
-    let forward = tokio::spawn(forward_tcp_connection_with(
-        loopback.host(),
-        accepted,
-        9999,
-        StreamSetup::Optimistic,
-    ));
+    let forward = tokio::spawn(forward_tcp_connection(loopback.host(), accepted, 9999));
 
     within("truncated error frame", async {
         let received = read_to_end(&mut client).await;
@@ -630,12 +569,7 @@ async fn stream_reset_by_the_agent_ends_the_forward() {
     .await;
     let (mut client, accepted) = tcp_pair().await;
 
-    let forward = tokio::spawn(forward_tcp_connection_with(
-        loopback.host(),
-        accepted,
-        9999,
-        StreamSetup::Optimistic,
-    ));
+    let forward = tokio::spawn(forward_tcp_connection(loopback.host(), accepted, 9999));
 
     within("agent reset", async {
         let mut sink = Vec::new();
@@ -655,11 +589,10 @@ async fn session_loss_mid_transfer_ends_the_forward() {
     let service = TargetService::sink().await;
     let (client, accepted) = tcp_pair().await;
 
-    let forward = tokio::spawn(forward_tcp_connection_with(
+    let forward = tokio::spawn(forward_tcp_connection(
         loopback.host(),
         accepted,
         service.port(),
-        StreamSetup::Optimistic,
     ));
 
     let (mut read_half, mut write_half) = client.into_split();
@@ -829,56 +762,4 @@ async fn agent_reports_a_diagnostic_on_connect_failure() {
         }
     })
     .await;
-}
-
-// ---------------------------------------------------------------------------
-// Equivalence
-// ---------------------------------------------------------------------------
-
-/// The two setup modes differ only in *when* the host starts reading the local
-/// socket. What arrives must be identical.
-#[tokio::test(flavor = "multi_thread")]
-async fn both_setup_modes_deliver_identical_bytes() {
-    const SIZE: usize = 256 * 1024;
-
-    let mut results = Vec::new();
-    for setup in BOTH_MODES {
-        let loopback = Loopback::with_agent().await;
-        let service = TargetService::echo().await;
-        let (client, accepted) = tcp_pair().await;
-
-        let forward = tokio::spawn(forward_tcp_connection_with(
-            loopback.host(),
-            accepted,
-            service.port(),
-            setup,
-        ));
-
-        let payload = pattern(SIZE);
-        let (mut read_half, mut write_half) = client.into_split();
-        let reader = tokio::spawn(async move {
-            let mut received = vec![0u8; SIZE];
-            read_half
-                .read_exact(&mut received)
-                .await
-                .expect("read echo");
-            received
-        });
-
-        let received = within(&format!("equivalence ({setup:?})"), async {
-            write_half.write_all(&payload).await.expect("write");
-            write_half.shutdown().await.expect("shutdown");
-            reader.await.expect("reader task")
-        })
-        .await;
-
-        assert_eq!(received, payload, "{setup:?}: payload mismatch");
-        results.push(received);
-        finish(&format!("equivalence teardown ({setup:?})"), forward).await;
-    }
-
-    assert_eq!(
-        results[0], results[1],
-        "the two setup modes delivered different bytes"
-    );
 }

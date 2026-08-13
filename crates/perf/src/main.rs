@@ -1,14 +1,17 @@
-//! Ad-hoc benchmark runner.
+//! Benchmark runner: reports what a forwarded TCP connection costs.
 //!
 //! ```text
 //! cargo run -p perf --release -- --rtt-ms 60 --iterations 20
 //! ```
+//!
+//! Run it before and after a change to the data plane to get a number to compare.
+//! The figures are stable to a fraction of a millisecond across runs at a given
+//! RTT, so a real regression is easy to see.
 
 use std::time::Duration;
 
 use clap::Parser;
-use perf::{Bench, Measurement, ms};
-use tunnel::StreamSetup;
+use perf::{Bench, ms};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -20,30 +23,9 @@ struct Args {
     #[arg(long, default_value_t = 60)]
     rtt_ms: u64,
 
-    /// Connections to sample per stream-setup mode.
+    /// Connections to sample.
     #[arg(long, default_value_t = 20)]
     iterations: usize,
-
-    /// Measure only this setup mode instead of comparing both.
-    #[arg(long, value_enum)]
-    only: Option<Mode>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
-enum Mode {
-    /// Stream application bytes behind the init frame (shipped behaviour).
-    Optimistic,
-    /// Wait for the agent's status byte first (pre-optimisation baseline).
-    WaitForStatus,
-}
-
-impl From<Mode> for StreamSetup {
-    fn from(mode: Mode) -> Self {
-        match mode {
-            Mode::Optimistic => StreamSetup::Optimistic,
-            Mode::WaitForStatus => StreamSetup::WaitForStatus,
-        }
-    }
 }
 
 #[tokio::main]
@@ -52,38 +34,25 @@ async fn main() -> perf::Result<()> {
     let rtt = Duration::from_millis(args.rtt_ms);
 
     println!(
-        "imposed RTT {:.0}ms, {} connections per mode\n",
+        "imposed RTT {:.0}ms, {} connections\n",
         ms(rtt),
         args.iterations
     );
 
     let bench = Bench::start(rtt).await?;
+    let measured = bench.run(args.iterations).await?;
 
-    let modes: Vec<StreamSetup> = match args.only {
-        Some(mode) => vec![mode.into()],
-        // Baseline first, so a reader sees the improvement rather than a
-        // regression.
-        None => vec![StreamSetup::WaitForStatus, StreamSetup::Optimistic],
-    };
+    println!("{measured}\n");
 
-    let mut results: Vec<Measurement> = Vec::new();
-    for setup in modes {
-        let measurement = bench.run(setup, args.iterations).await?;
-        println!("{measurement}\n");
-        results.push(measurement);
-    }
-
-    if let [baseline, optimistic] = results.as_slice() {
-        let saved = baseline
-            .first_request
-            .median()
-            .saturating_sub(optimistic.first_request.median());
-        println!(
-            "optimistic setup saves {:.2}ms per connection ({:.2} x RTT)",
-            ms(saved),
-            saved.as_secs_f64() / rtt.as_secs_f64().max(f64::MIN_POSITIVE)
-        );
-    }
+    // Setup overhead is the number to watch: the second request on an established
+    // connection costs one round trip and cannot be improved, so anything above
+    // it is what connection setup adds.
+    println!(
+        "connection setup adds {:.2}ms on top of the {:.0}ms round trip ({:.2} x RTT)",
+        ms(measured.setup_overhead()),
+        ms(rtt),
+        measured.setup_overhead_rtts()
+    );
 
     Ok(())
 }

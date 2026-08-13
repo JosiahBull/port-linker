@@ -7,7 +7,6 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::Instant;
-use tunnel::StreamSetup;
 
 use crate::Result;
 use crate::fixture::{EchoService, ForwardedPort, Tunnel};
@@ -70,10 +69,9 @@ async fn sample_connection(addr: SocketAddr) -> Result<ConnectionSample> {
     }
 }
 
-/// Aggregated result for one [`StreamSetup`].
+/// Aggregated result of one benchmark run.
 #[derive(Debug, Clone)]
 pub struct Measurement {
-    pub setup: StreamSetup,
     pub rtt: Duration,
     pub first_request: Stats,
     pub second_request: Stats,
@@ -100,7 +98,6 @@ impl Measurement {
 
 impl fmt::Display for Measurement {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "{:?}", self.setup)?;
         writeln!(f, "  connect + first request : {}", self.first_request)?;
         writeln!(f, "  second request          : {}", self.second_request)?;
         write!(
@@ -114,9 +111,10 @@ impl fmt::Display for Measurement {
 
 /// A benchmark run against one live tunnel.
 ///
-/// Both stream setups are measured over the *same* agent, shim, and QUIC
-/// connection, so an A/B comparison is not confounded by a different process, a
-/// different congestion window, or a differently loaded machine.
+/// Reusable: [`Bench::run`] can be called repeatedly against the same agent,
+/// shim, and QUIC connection, so two measurements are not confounded by a
+/// different process, a different congestion window, or a differently loaded
+/// machine.
 pub struct Bench {
     tunnel: Tunnel,
     echo: EchoService,
@@ -134,13 +132,12 @@ impl Bench {
         self.tunnel.rtt()
     }
 
-    /// Measure `iterations` connections, one at a time, for one setup mode.
+    /// Measure `iterations` connections, one at a time.
     ///
     /// Sequential by design: concurrent connections would overlap their round
     /// trips and hide exactly the per-connection cost being measured.
-    pub async fn run(&self, setup: StreamSetup, iterations: usize) -> Result<Measurement> {
-        let forwarded =
-            ForwardedPort::spawn(self.tunnel.connection(), self.echo.port(), setup).await?;
+    pub async fn run(&self, iterations: usize) -> Result<Measurement> {
+        let forwarded = ForwardedPort::spawn(self.tunnel.connection(), self.echo.port()).await?;
         let addr = forwarded.addr();
 
         for _ in 0..WARMUP_CONNECTIONS {
@@ -156,7 +153,6 @@ impl Bench {
         }
 
         Ok(Measurement {
-            setup,
             rtt: self.tunnel.rtt(),
             first_request: Stats::new(first),
             second_request: Stats::new(second),

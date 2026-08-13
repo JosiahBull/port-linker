@@ -13,16 +13,19 @@
 //! ```
 //!
 //! The host does not wait for the status byte before it starts forwarding
-//! application bytes ([`StreamSetup::Optimistic`]). Opening a QUIC stream is a
-//! local operation, so the init frame and the client's first request travel in
-//! the same flight, and the status byte — which costs a full round trip to come
-//! back — never delays application data. The agent needs no buffer for those
-//! early bytes: [`recv_framed`] consumes exactly the init frame, and QUIC flow
-//! control holds whatever follows until the copy loop starts.
+//! application bytes. Opening a QUIC stream is a local operation, so the init
+//! frame and the client's first request travel in the same flight, and the status
+//! byte — which costs a full round trip to come back — never delays application
+//! data. That is worth one round trip per connection, which at a 60 ms RTT halves
+//! the time from a client's `connect()` to its first response byte.
 //!
-//! The byte sequence on the wire is identical either way; only the host's
-//! *waiting* changes. An agent that predates this change is unaffected, because
-//! its framed read cannot over-read into the application bytes behind it.
+//! The agent needs no buffer for those early bytes: [`recv_framed`] consumes
+//! exactly the init frame, and QUIC flow control holds whatever follows until the
+//! copy loop starts.
+//!
+//! The byte sequence on the wire is the same as if the host had waited; only the
+//! waiting is gone. An agent that predates this is unaffected, because its framed
+//! read cannot over-read into the application bytes behind it.
 
 use std::net::SocketAddr;
 
@@ -48,48 +51,6 @@ pub const STATUS_ERROR: u8 = 0x01;
 /// and therefore will never read the bytes the host optimistically sent.
 pub const STOP_CONNECT_FAILED: u32 = 1;
 
-/// How the host drives the start of a forwarding stream.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum StreamSetup {
-    /// Stream application bytes immediately behind the init frame, and read the
-    /// agent's status byte off the critical path. Saves one round trip per
-    /// connection.
-    #[default]
-    Optimistic,
-    /// Read nothing from the local socket until the agent's status byte has
-    /// arrived.
-    ///
-    /// This is the pre-optimisation behaviour, kept as the A/B baseline for the
-    /// latency benchmark in `crates/perf` — the perf regression test asserts
-    /// that this mode *is* a round trip slower, which is what proves the
-    /// benchmark is measuring connection setup at all.
-    WaitForStatus,
-}
-
-/// The host's local-socket-to-QUIC pump, which may or may not have been started
-/// before the agent confirmed the connection.
-enum Upstream {
-    Running(JoinHandle<std::io::Result<u64>>),
-    Pending(OwnedReadHalf, quinn::SendStream),
-}
-
-impl Upstream {
-    /// Start the pump if it is not already running.
-    fn start(self) -> JoinHandle<std::io::Result<u64>> {
-        match self {
-            Self::Running(handle) => handle,
-            Self::Pending(read, send) => spawn_pump(read, send),
-        }
-    }
-
-    /// Stop the pump and release the local socket's read half.
-    fn cancel(self) {
-        if let Self::Running(handle) = self {
-            handle.abort();
-        }
-    }
-}
-
 fn spawn_pump(
     mut tcp_read: OwnedReadHalf,
     mut quic_send: quinn::SendStream,
@@ -105,20 +66,10 @@ fn spawn_pump(
 
 /// Forward a local TCP connection to `port` on the target, over `connection`.
 ///
-/// Uses [`StreamSetup::Optimistic`]. Returns when both directions have
-/// completed or the stream has failed; errors are logged, not propagated,
-/// because each connection is independent of the session.
+/// Returns when both directions have completed or the stream has failed; errors
+/// are logged, not propagated, because each connection is independent of the
+/// session.
 pub async fn forward_tcp_connection(connection: Connection, tcp_stream: TcpStream, port: u16) {
-    forward_tcp_connection_with(connection, tcp_stream, port, StreamSetup::default()).await;
-}
-
-/// [`forward_tcp_connection`] with an explicit [`StreamSetup`].
-pub async fn forward_tcp_connection_with(
-    connection: Connection,
-    tcp_stream: TcpStream,
-    port: u16,
-    setup: StreamSetup,
-) {
     // Opening the stream is local: QUIC creates it implicitly with the first
     // STREAM frame, so this costs no round trip as long as stream credit is
     // available (both ends allow 4096 concurrent bidi streams).
@@ -137,17 +88,16 @@ pub async fn forward_tcp_connection_with(
 
     let (tcp_read, mut tcp_write) = tcp_stream.into_split();
 
-    let upstream = match setup {
-        StreamSetup::Optimistic => Upstream::Running(spawn_pump(tcp_read, quic_send)),
-        StreamSetup::WaitForStatus => Upstream::Pending(tcp_read, quic_send),
-    };
+    // Start draining the local socket into the stream now, so the client's first
+    // request rides in the same flight as the init frame above.
+    let upstream = spawn_pump(tcp_read, quic_send);
 
-    // Under Optimistic setup the client's bytes are already in flight by the
-    // time this resolves, so the round trip is spent, not waited on.
+    // The client's bytes are already in flight by the time this resolves, so the
+    // round trip it costs is spent rather than waited on.
     let mut status = [0u8; 1];
     if let Err(e) = quic_recv.read_exact(&mut status).await {
         debug!(port, %e, "agent closed stream before status byte");
-        upstream.cancel();
+        upstream.abort();
         return;
     }
 
@@ -167,7 +117,7 @@ pub async fn forward_tcp_connection_with(
         // was never delivered anywhere, because the agent never reached the
         // service. Cancelling releases the read half and closing the write half
         // lets the client observe the failure instead of waiting for a response.
-        upstream.cancel();
+        upstream.abort();
         let _ = tcp_write.shutdown().await;
         return;
     }
@@ -177,7 +127,6 @@ pub async fn forward_tcp_connection_with(
     // `join!` rather than `select!`: the two directions close independently, so
     // a client that half-closes after sending its request still receives the
     // response.
-    let upstream = upstream.start();
     let downstream = async {
         let copied = tokio::io::copy(&mut quic_recv, &mut tcp_write).await;
         // Shut the local write half down as soon as the remote side is done,
@@ -291,11 +240,6 @@ pub async fn serve_tcp_stream(mut quic_send: quinn::SendStream, mut quic_recv: q
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn optimistic_is_the_default_setup() {
-        assert_eq!(StreamSetup::default(), StreamSetup::Optimistic);
-    }
 
     #[test]
     fn status_bytes_are_distinct() {

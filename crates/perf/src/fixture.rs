@@ -12,7 +12,7 @@ use quinn::crypto::rustls::QuicClientConfig;
 use quinn::{Connection, Endpoint};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
-use tunnel::{StreamSetup, forward_tcp_connection_with};
+use tunnel::forward_tcp_connection;
 
 use crate::Result;
 use crate::shim::LatencyShim;
@@ -313,8 +313,8 @@ impl EchoService {
 /// A local listener that forwards each accepted connection over the tunnel.
 ///
 /// This mirrors `BindingManager::bind_tcp` in the CLI: accept, disable Nagle,
-/// spawn a forwarding task. It calls the same [`forward_tcp_connection_with`]
-/// the shipped host does, so the measurement covers the real host-side code.
+/// spawn a forwarding task. It calls the same [`forward_tcp_connection`] the
+/// shipped host does, so the measurement covers the real host-side code.
 pub struct ForwardedPort {
     addr: SocketAddr,
     task: JoinHandle<()>,
@@ -327,21 +327,16 @@ impl Drop for ForwardedPort {
 }
 
 impl ForwardedPort {
-    pub async fn spawn(
-        connection: Connection,
-        remote_port: u16,
-        setup: StreamSetup,
-    ) -> Result<Self> {
+    pub async fn spawn(connection: Connection, remote_port: u16) -> Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let addr = listener.local_addr()?;
         let task = tokio::spawn(async move {
             while let Ok((socket, _)) = listener.accept().await {
                 let _ = socket.set_nodelay(true);
-                tokio::spawn(forward_tcp_connection_with(
+                tokio::spawn(forward_tcp_connection(
                     connection.clone(),
                     socket,
                     remote_port,
-                    setup,
                 ));
             }
         });

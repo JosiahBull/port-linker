@@ -392,8 +392,8 @@ unbounded await would wedge CI instead of naming the culprit.
 
 Coverage is grouped by what it defends: data integrity and ordering of the
 optimistically-sent early bytes, server-speaks-first protocols, half-close in both
-directions, failure paths reachable only because bytes are now in flight before the
-Agent confirms, and byte-for-byte equivalence between the two setup modes.
+directions, and failure paths reachable only because bytes are in flight before the
+Agent confirms.
 
 ### 8.3 Performance Regression Tests (`crates/perf`)
 
@@ -411,13 +411,15 @@ Two properties keep the assertions trustworthy:
     speed. A threshold in milliseconds would really be a statement about the CI
     runner.
 *   **The suite asserts in both directions.** A benchmark that silently measured
-    nothing would pass any upper bound, so `StreamSetup::WaitForStatus` is retained
-    as the pre-optimisation baseline and the suite asserts that it *is* a round trip
-    slower. If the harness stops imposing latency or stops measuring setup, that
-    assertion fails and the rest is known to be untrustworthy.
+    nothing would pass any upper bound, so one test asserts the opposite: that a
+    request on an *already established* connection costs about one full imposed RTT.
+    That can only hold if the shim is really delaying datagrams and the measurement
+    is really going through the tunnel. `LatencyShim`'s own unit tests check the
+    shim independently.
 
 `cargo run -p perf -- --rtt-ms 60 --iterations 20` runs the same scenario ad hoc and
-prints an A/B table. New scenarios reuse `fixture::{Tunnel, EchoService,
+prints the numbers, which is the way to get a before/after figure for a future
+optimisation. New scenarios reuse `fixture::{Tunnel, EchoService,
 ForwardedPort}` and report through `stats::Stats`.
 
 ### 8.4 Integration & E2E Scenarios

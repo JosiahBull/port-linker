@@ -14,6 +14,5 @@ pub mod tcp;
 
 pub use framing::{MAX_FRAME_SIZE, recv_framed, send_framed};
 pub use tcp::{
-    STATUS_ERROR, STATUS_OK, STOP_CONNECT_FAILED, StreamSetup, forward_tcp_connection,
-    forward_tcp_connection_with, serve_tcp_stream,
+    STATUS_ERROR, STATUS_OK, STOP_CONNECT_FAILED, forward_tcp_connection, serve_tcp_stream,
 };

@@ -19,6 +19,18 @@
 //! the already-established connection, which is the round trip alone; the
 //! difference between the two isolates setup cost and cancels machine speed out.
 //!
+//! # Getting a number
+//!
+//! ```text
+//! cargo run -p perf -- --rtt-ms 60 --iterations 20
+//! ```
+//!
+//! Run that before and after a change to the data plane and compare. At a given
+//! RTT the medians are stable to a fraction of a millisecond, so a real
+//! regression stands out. `tests/perf_regression.rs` runs the same scenario with
+//! bounds attached, so CI fails if connection setup starts costing a round trip
+//! again.
+//!
 //! # Adding a scenario
 //!
 //! [`fixture`] provides the reusable pieces — [`fixture::AgentUnderTest`],
