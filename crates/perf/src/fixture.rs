@@ -5,7 +5,7 @@ use std::io::{BufRead, BufReader};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use quinn::crypto::rustls::QuicClientConfig;
@@ -40,6 +40,21 @@ const HANDSHAKE_ATTEMPTS: u32 = 2;
 pub struct AgentUnderTest {
     child: Child,
     port: u16,
+    /// The stdout reader, retained for the agent's lifetime.
+    ///
+    /// Dropping it closes the read end of the pipe, and the agent treats a failed
+    /// stdout write as fatal — reasonably so, since stdout is how it reports its
+    /// existence to the host. Parsing stops at `PORT=`, which is the second of
+    /// four handshake lines, so without holding this the pipe closes while the
+    /// agent is still writing and it dies of EPIPE before the benchmark starts.
+    _stdout: BufReader<std::process::ChildStdout>,
+    /// Everything the agent wrote to stderr, drained by a background thread.
+    ///
+    /// Draining rather than discarding: an unread pipe eventually fills and
+    /// blocks the agent, and the agent's own error message is the only useful
+    /// diagnostic when a benchmark fails because the agent died rather than
+    /// because the code under test got slower.
+    stderr: Arc<Mutex<String>>,
 }
 
 impl Drop for AgentUnderTest {
@@ -56,10 +71,7 @@ impl AgentUnderTest {
 
         let mut child = Command::new(&binary)
             .stdout(Stdio::piped())
-            // The agent forwards its logs over QUIC once connected, but writes
-            // early ones here. Discard them: nothing reads this pipe, and a full
-            // pipe buffer would block the agent mid-benchmark.
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| format!("failed to spawn agent at {}: {e}", binary.display()))?;
 
@@ -68,14 +80,38 @@ impl AgentUnderTest {
             .take()
             .ok_or("failed to capture agent stdout")?;
 
+        let stderr_log = Arc::new(Mutex::new(String::new()));
+        if let Some(stderr) = child.stderr.take() {
+            let sink = Arc::clone(&stderr_log);
+            std::thread::spawn(move || {
+                for line in BufReader::new(stderr)
+                    .lines()
+                    .map_while(std::result::Result::ok)
+                {
+                    if let Ok(mut sink) = sink.lock() {
+                        sink.push_str(&line);
+                        sink.push('\n');
+                    }
+                }
+            });
+        }
+
         let deadline = std::time::Instant::now() + AGENT_STARTUP_TIMEOUT;
         let mut reader = BufReader::new(stdout);
         let mut port = None;
 
         while std::time::Instant::now() < deadline {
             let mut line = String::new();
+            // A zero-length read is EOF: the agent exited. Report that rather
+            // than letting it fall through to the timeout message, which would
+            // describe the wrong failure.
             if reader.read_line(&mut line).map_err(|e| e.to_string())? == 0 {
-                break;
+                let _ = child.kill();
+                return Err(format!(
+                    "agent exited during startup; stderr:\n{}",
+                    snapshot(&stderr_log)
+                )
+                .into());
             }
             if let Some(value) = line.trim().strip_prefix("PORT=") {
                 port = Some(value.parse::<u16>().map_err(|e| e.to_string())?);
@@ -83,14 +119,37 @@ impl AgentUnderTest {
             }
         }
 
-        let port = port.ok_or("agent did not report a PORT before the startup timeout")?;
-        Ok(Self { child, port })
+        let Some(port) = port else {
+            let _ = child.kill();
+            return Err(format!(
+                "agent did not report a PORT within {AGENT_STARTUP_TIMEOUT:?}; stderr:\n{}",
+                snapshot(&stderr_log)
+            )
+            .into());
+        };
+
+        Ok(Self {
+            child,
+            port,
+            // Held, not dropped: see the field's documentation.
+            _stdout: reader,
+            stderr: stderr_log,
+        })
     }
 
     /// The agent's QUIC address.
     pub fn addr(&self) -> SocketAddr {
         ([127, 0, 0, 1], self.port).into()
     }
+
+    /// What the agent has logged to stderr so far, for failure messages.
+    pub fn stderr(&self) -> String {
+        snapshot(&self.stderr)
+    }
+}
+
+fn snapshot(log: &Arc<Mutex<String>>) -> String {
+    log.lock().map(|text| text.clone()).unwrap_or_default()
 }
 
 /// Locate the agent binary, building it if this is a fresh checkout.
@@ -336,7 +395,7 @@ impl Tunnel {
         let mut endpoint = Endpoint::client("0.0.0.0:0".parse::<SocketAddr>().unwrap())?;
         endpoint.set_default_client_config(client_config()?);
 
-        let connection = Self::handshake(&endpoint, target, rtt).await?;
+        let connection = Self::handshake(&endpoint, target, rtt, &agent).await?;
 
         // The agent opens the control stream and sends its handshake, then keeps
         // pushing port events down it. It also opens a unidirectional stream for
@@ -391,6 +450,7 @@ impl Tunnel {
         endpoint: &Endpoint,
         target: SocketAddr,
         rtt: Duration,
+        agent: &AgentUnderTest,
     ) -> Result<Connection> {
         let mut last_error = String::new();
 
@@ -412,11 +472,14 @@ impl Tunnel {
             }
         }
 
+        // The agent's own log is the first thing to look at: the most likely
+        // reason datagrams are not flowing is that the agent is no longer
+        // running, and it says why here.
         Err(format!(
             "QUIC {last_error} after {HANDSHAKE_ATTEMPTS} attempts (imposed RTT \
-             {rtt:?}). The agent or the latency shim is not passing datagrams — \
-             check that the machine is not so oversubscribed that the shim's \
-             timers cannot run."
+             {rtt:?}). Either the agent is gone or the latency shim is not \
+             passing datagrams.\nagent stderr:\n{}",
+            agent.stderr()
         )
         .into())
     }
