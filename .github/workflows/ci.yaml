@@ -29,7 +29,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     concurrency:
-      group: ci-check-${{ github.repository }}-${{ github.ref }}
+      group: ci-check-${{ github.repository }}-${{ github.event_name }}-${{ github.ref }}
       cancel-in-progress: true
     steps:
       - uses: actions/checkout@v4
@@ -48,7 +48,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     concurrency:
-      group: ci-fmt-${{ github.repository }}-${{ github.ref }}
+      group: ci-fmt-${{ github.repository }}-${{ github.event_name }}-${{ github.ref }}
       cancel-in-progress: true
     steps:
       - uses: actions/checkout@v4
@@ -66,7 +66,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     concurrency:
-      group: ci-clippy-${{ github.repository }}-${{ github.ref }}
+      group: ci-clippy-${{ github.repository }}-${{ github.event_name }}-${{ github.ref }}
       cancel-in-progress: true
     steps:
       - uses: actions/checkout@v4
@@ -86,7 +86,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     concurrency:
-      group: ci-test-${{ github.repository }}-${{ github.ref }}-${{ matrix.os }}
+      group: ci-test-${{ github.repository }}-${{ github.event_name }}-${{ github.ref }}-${{ matrix.os }}
       cancel-in-progress: true
     strategy:
       fail-fast: false
@@ -122,7 +122,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     concurrency:
-      group: ci-doc-${{ github.repository }}-${{ github.ref }}
+      group: ci-doc-${{ github.repository }}-${{ github.event_name }}-${{ github.ref }}
       cancel-in-progress: true
     steps:
       - uses: actions/checkout@v4
@@ -143,7 +143,7 @@ jobs:
     timeout-minutes: 20
     needs: [check, clippy]
     concurrency:
-      group: ci-test-docker-${{ github.repository }}-${{ github.ref }}
+      group: ci-test-docker-${{ github.repository }}-${{ github.event_name }}-${{ github.ref }}
       cancel-in-progress: true
     steps:
       - uses: actions/checkout@v4
@@ -177,7 +177,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     concurrency:
-      group: ci-build-agents-${{ github.repository }}-${{ github.ref }}-${{ matrix.target }}
+      group: ci-build-agents-${{ github.repository }}-${{ github.event_name }}-${{ github.ref }}-${{ matrix.target }}
       cancel-in-progress: true
     strategy:
       fail-fast: false
@@ -260,7 +260,7 @@ jobs:
     timeout-minutes: 30
     needs: [build-agents]
     concurrency:
-      group: ci-build-${{ github.repository }}-${{ github.ref }}-${{ matrix.os }}
+      group: ci-build-${{ github.repository }}-${{ github.event_name }}-${{ github.ref }}-${{ matrix.os }}
       cancel-in-progress: true
     strategy:
       fail-fast: false
