@@ -112,17 +112,20 @@ async fn run(log_rx: tokio::sync::mpsc::Receiver<protocol::AgentLogEvent>) -> Re
     // 5. Print handshake info to stdout (and flush). This travels back to the
     //    host inside the SSH channel. AGENT_CERT is what the host pins; it is
     //    public, and the session secret is never echoed here.
+    //
+    //    Built as one string and written once. Rust's stdout is line-buffered, so
+    //    a `writeln!` per line is a write syscall per line, and the handshake is
+    //    then deliverable in pieces: a reader that stops as soon as it has the
+    //    fields it wants closes the pipe, and our next line fails with EPIPE —
+    //    fatal here, because stdout is how the host is told we exist. One write
+    //    also means a host can never observe a half-handshake.
     {
-        let mut stdout = std::io::stdout().lock();
-        writeln!(stdout, "AGENT_READY").map_err(Error::Io)?;
-        writeln!(stdout, "PORT={port}").map_err(Error::Io)?;
-        writeln!(
-            stdout,
-            "AGENT_CERT={}",
+        let handshake = format!(
+            "AGENT_READY\nPORT={port}\nAGENT_CERT={}\nBRIDGE_PORT={bridge_port}\n",
             common::session::to_hex(identity.cert_der())
-        )
-        .map_err(Error::Io)?;
-        writeln!(stdout, "BRIDGE_PORT={bridge_port}").map_err(Error::Io)?;
+        );
+        let mut stdout = std::io::stdout().lock();
+        stdout.write_all(handshake.as_bytes()).map_err(Error::Io)?;
         stdout.flush().map_err(Error::Io)?;
     }
 

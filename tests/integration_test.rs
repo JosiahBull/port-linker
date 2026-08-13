@@ -29,7 +29,7 @@
 use std::io::{BufRead, BufReader};
 use std::net::SocketAddr;
 use std::process::{Child, Command, Stdio};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -68,12 +68,34 @@ struct AgentProcess {
     info: AgentInfo,
     /// Held open so the agent's stdin is not closed mid-test.
     _stdin: Option<std::process::ChildStdin>,
+    /// The stdout reader, retained for the agent's lifetime.
+    ///
+    /// Dropping it closes the read end of the pipe, and the agent treats a failed
+    /// stdout write as fatal — reasonably so, since stdout is how it reports its
+    /// existence to the host. Parsing stops as soon as the needed fields have
+    /// arrived, so without holding this the pipe would close while the agent may
+    /// still be writing, and it would die of EPIPE mid-test.
+    _stdout: BufReader<std::process::ChildStdout>,
+    /// Everything the agent wrote to stderr, drained by a background thread.
+    ///
+    /// Two reasons to drain rather than ignore: an unread pipe eventually fills
+    /// and blocks the agent, and the agent's own error message is the only useful
+    /// diagnostic when a test fails because the agent died.
+    stderr: Arc<Mutex<String>>,
 }
 
 impl AgentProcess {
     /// Kill the agent process.
     fn kill(&mut self) -> std::io::Result<()> {
         self.child.kill()
+    }
+
+    /// What the agent has logged to stderr so far, for failure messages.
+    fn stderr(&self) -> String {
+        self.stderr
+            .lock()
+            .map(|captured| captured.clone())
+            .unwrap_or_default()
     }
 }
 
@@ -103,8 +125,16 @@ fn agent_binary_path() -> String {
         return path;
     }
 
+    // Windows executables carry the `.exe` suffix; without it the path never
+    // resolves and every agent-spawning test fails on that platform.
+    let bin_name = if cfg!(windows) {
+        "port-linker-agent.exe"
+    } else {
+        "port-linker-agent"
+    };
     let bin_path = workspace_root
-        .join("target/debug/port-linker-agent")
+        .join("target/debug")
+        .join(bin_name)
         .to_string_lossy()
         .to_string();
 
@@ -170,6 +200,24 @@ fn spawn_agent() -> Result<AgentProcess> {
         .take()
         .ok_or_else(|| Error::Protocol("failed to capture agent stdout".into()))?;
 
+    // Drain stderr on a background thread so a full pipe can never block the
+    // agent, and so a failure can report what the agent actually said.
+    let stderr_log = Arc::new(Mutex::new(String::new()));
+    if let Some(stderr) = child.stderr.take() {
+        let sink = Arc::clone(&stderr_log);
+        std::thread::spawn(move || {
+            for line in BufReader::new(stderr)
+                .lines()
+                .map_while(std::result::Result::ok)
+            {
+                if let Ok(mut sink) = sink.lock() {
+                    sink.push_str(&line);
+                    sink.push('\n');
+                }
+            }
+        });
+    }
+
     let mut reader = BufReader::new(stdout);
     let mut port_opt: Option<u16> = None;
     let mut cert_opt: Option<String> = None;
@@ -181,13 +229,23 @@ fn spawn_agent() -> Result<AgentProcess> {
     loop {
         if start.elapsed() > agent_startup_timeout {
             child.kill().ok();
-            return Err(Error::Protocol(
-                "agent did not emit AGENT_READY within timeout".into(),
-            ));
+            return Err(Error::Protocol(format!(
+                "agent did not emit AGENT_READY within timeout; stderr: {}",
+                stderr_log.lock().map(|s| s.clone()).unwrap_or_default()
+            )));
         }
 
         let mut line = String::new();
-        reader.read_line(&mut line).map_err(Error::Io)?;
+        // A zero-length read is EOF, not an empty line: the agent has exited.
+        // Treating it as an empty line spins the CPU until the timeout and hides
+        // the reason, so report it with whatever the agent logged.
+        if reader.read_line(&mut line).map_err(Error::Io)? == 0 {
+            let _ = child.kill();
+            return Err(Error::Protocol(format!(
+                "agent exited during startup; stderr: {}",
+                stderr_log.lock().map(|s| s.clone()).unwrap_or_default()
+            )));
+        }
 
         let line = line.trim();
         if line.is_empty() {
@@ -227,6 +285,9 @@ fn spawn_agent() -> Result<AgentProcess> {
             agent_cert,
         },
         _stdin: stdin,
+        // Held, not dropped: see the field's documentation.
+        _stdout: reader,
+        stderr: stderr_log,
     })
 }
 
@@ -689,7 +750,11 @@ async fn test_agent_no_connection_timeout() {
     // Check if agent is still running.
     match agent.child.try_wait() {
         Ok(Some(status)) => {
-            panic!("agent exited prematurely with status: {:?}", status);
+            panic!(
+                "agent exited prematurely with status: {:?}\nagent stderr:\n{}",
+                status,
+                agent.stderr()
+            );
         }
         Ok(None) => {
             // Agent is still running - good.
@@ -1351,8 +1416,9 @@ fn test_process_info_display() {
 ///
 /// This test spawns a TCP listener on a random port, then calls
 /// `common::process::find_listener(port)` to verify it returns valid
-/// ProcessInfo. On macOS, the test runner itself (or a child process)
-/// should be identifiable. On unsupported platforms, this may return None.
+/// ProcessInfo. Every platform with a `common::platform` implementation —
+/// macOS (`lsof`), Linux (`/proc`), Windows (IP Helper) — is expected to
+/// identify the listener; only the `stub` platform returns None.
 #[tokio::test]
 async fn test_find_listener_on_active_port() {
     // Bind a TCP listener on a random available port.
@@ -1370,23 +1436,22 @@ async fn test_find_listener_on_active_port() {
     // Try to find the listener.
     let result = common::process::find_listener(port, common::process::TransportProto::Tcp);
 
-    // On macOS and Linux, we should get a result.
-    // On other platforms, the function returns None (which is acceptable).
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     {
-        let info = result.expect("find_listener should return ProcessInfo on macOS/Linux");
+        let info =
+            result.expect("find_listener should identify the listener on a supported platform");
         assert!(info.pid > 0, "PID should be positive");
         assert!(!info.name.is_empty(), "process name should not be empty");
         // The process name should be related to the test runner (cargo, integration-tests, etc.)
         // We won't assert the exact name since it varies by environment.
     }
 
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
-        // On unsupported platforms, None is expected.
+        // The stub platform has no way to look up a listener.
         assert!(
             result.is_none(),
-            "find_listener should return None on unsupported platforms"
+            "find_listener should return None on the stub platform"
         );
     }
 
@@ -3149,6 +3214,37 @@ async fn test_udp_forwarding_large_datagram() {
 // Port Discovery Message Flow Tests (Linux-only)
 // ---------------------------------------------------------------------------
 
+/// Bind a TCP listener on a port the agent's scanner will actually report.
+///
+/// `run_scan_loop` deliberately drops privileged ports (< 1024, system services)
+/// and ephemeral ports (transient outbound sockets, not real services). Binding
+/// port 0 asks the OS for a port, and it answers from the ephemeral range — so
+/// such a listener is correctly never reported, and a test that expects a
+/// `PortAdded` for it can never pass. Pick a concrete port outside both ranges.
+///
+/// Returns the listener and its port. Ports in use are skipped, which is also how
+/// two of these tests running concurrently avoid each other.
+#[cfg(target_os = "linux")]
+async fn bind_reportable_listener() -> (tokio::net::TcpListener, u16) {
+    let (ephemeral_start, _) = common::ephemeral::ephemeral_range();
+
+    // Search downwards from just below the ephemeral range: high ports are far
+    // less likely to be claimed by a real service than low ones.
+    for port in (1024..ephemeral_start).rev() {
+        if common::ephemeral::is_ephemeral(port) {
+            continue;
+        }
+        if let Ok(listener) = tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
+            return (listener, port);
+        }
+    }
+
+    panic!(
+        "no free non-ephemeral port in 1024..{ephemeral_start} to bind a \
+         reportable listener on"
+    );
+}
+
 /// Test 75: PortAdded notification when a new listener appears.
 ///
 /// Spawns agent, connects QUIC, consumes handshake, then starts a TCP listener
@@ -3170,11 +3266,8 @@ async fn test_port_added_notification() {
     let (_control_send, mut control_recv) =
         complete_handshake(&connection, &agent.info).await.unwrap();
 
-    // Start a TCP listener on a dynamic port.
-    let test_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("failed to bind test listener");
-    let test_port = test_listener.local_addr().unwrap().port();
+    // Start a TCP listener on a port the scanner will report.
+    let (test_listener, test_port) = bind_reportable_listener().await;
 
     // Read control stream with timeout, expect PortAdded.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -3223,11 +3316,8 @@ async fn test_port_removed_notification() {
     let (_control_send, mut control_recv) =
         complete_handshake(&connection, &agent.info).await.unwrap();
 
-    // Start and then drop a TCP listener on a dynamic port.
-    let test_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("failed to bind test listener");
-    let test_port = test_listener.local_addr().unwrap().port();
+    // Start and then drop a TCP listener on a port the scanner will report.
+    let (test_listener, test_port) = bind_reportable_listener().await;
 
     // Wait for PortAdded first.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);

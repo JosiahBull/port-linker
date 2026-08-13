@@ -81,12 +81,12 @@ jobs:
       - name: Run clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
-  test-unit:
-    name: Unit Tests
+  test:
+    name: Tests
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     concurrency:
-      group: ci-test-unit-${{ github.repository }}-${{ github.ref }}-${{ matrix.os }}
+      group: ci-test-${{ github.repository }}-${{ github.ref }}-${{ matrix.os }}
       cancel-in-progress: true
     strategy:
       fail-fast: false
@@ -101,8 +101,16 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Run unit tests
-        run: cargo test --workspace --bins --all-features
+      # tests/integration_test.rs spawns the agent binary. `cargo test` does not
+      # build another package's binary just because a test wants it, so build it
+      # explicitly rather than let the test suite shell out to cargo mid-run.
+      - name: Build agent binary
+        run: cargo build -p agent
+
+      # Not `--bins`: that only runs binary targets, which silently skipped every
+      # lib unit test and the whole of tests/integration_test.rs.
+      - name: Run tests
+        run: cargo test --workspace --all-features
 
   doc:
     name: Documentation
