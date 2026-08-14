@@ -8,7 +8,8 @@ use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
 use common::process::{self, ProcessInfo, TransportProto};
-use protocol::{ControlMsg, Protocol};
+use protocol::Protocol;
+use tunnel::forward_tcp_connection;
 
 /// Default maximum number of active forwarded ports.
 const DEFAULT_FD_LIMIT: usize = 2000;
@@ -469,117 +470,4 @@ async fn retry_bind_udp(addr: SocketAddr, port: u16) -> Option<tokio::net::UdpSo
         "UDP bind failed after all retries"
     );
     None
-}
-
-// ---------------------------------------------------------------------------
-// TCP forwarding
-// ---------------------------------------------------------------------------
-
-/// Forward a single TCP connection through a QUIC bidirectional stream.
-///
-/// Protocol:
-/// 1. Host opens QUIC bi-stream, sends framed `TcpStreamInit { port }`
-/// 2. Agent reads init, connects to localhost:port
-/// 3. Agent sends 1-byte status: 0x00 = OK, 0x01 = error
-/// 4. On error, agent sends framed `TcpStreamError` then closes
-/// 5. On success, bidirectional raw byte copy begins
-async fn forward_tcp_connection(
-    connection: Connection,
-    tcp_stream: tokio::net::TcpStream,
-    port: u16,
-) {
-    // Open a new QUIC bidirectional stream for this TCP connection.
-    let (mut quic_send, mut quic_recv) = match connection.open_bi().await {
-        Ok(pair) => pair,
-        Err(e) => {
-            error!(port, %e, "failed to open QUIC stream for TCP forward");
-            return;
-        }
-    };
-
-    // Send TcpStreamInit to tell the agent which port to connect to.
-    let init_msg = ControlMsg::TcpStreamInit { port };
-    if let Err(e) = send_framed(&mut quic_send, &init_msg).await {
-        error!(port, %e, "failed to send TcpStreamInit");
-        return;
-    }
-
-    // Read 1-byte status from agent.
-    let mut status = [0u8; 1];
-    match quic_recv.read_exact(&mut status).await {
-        Ok(()) => {}
-        Err(e) => {
-            error!(port, %e, "agent closed stream before status byte");
-            return;
-        }
-    }
-
-    if status[0] != 0x00 {
-        // Error - read the framed error message.
-        match recv_framed(&mut quic_recv).await {
-            Ok(ControlMsg::TcpStreamError { error, .. }) => {
-                warn!(port, %error, "agent could not connect to remote port");
-            }
-            Ok(other) => {
-                warn!(port, ?other, "unexpected message after error status");
-            }
-            Err(e) => {
-                error!(port, %e, "failed to read error from agent");
-            }
-        }
-        return;
-    }
-
-    debug!(port, "TCP tunnel established, starting bidirectional copy");
-
-    // Split TCP stream and copy bidirectionally.
-    // Use join! to respect TCP half-close semantics (both directions complete independently).
-    let (mut tcp_read, mut tcp_write) = tcp_stream.into_split();
-
-    let host_to_agent = async {
-        let r = tokio::io::copy(&mut tcp_read, &mut quic_send).await;
-        let _ = quic_send.finish();
-        r
-    };
-    let agent_to_host = tokio::io::copy(&mut quic_recv, &mut tcp_write);
-
-    let (r1, r2) = tokio::join!(host_to_agent, agent_to_host);
-    if let Err(e) = r1 {
-        debug!(port, %e, "host->agent copy ended");
-    }
-    if let Err(e) = r2 {
-        debug!(port, %e, "agent->host copy ended");
-    }
-
-    debug!(port, "TCP tunnel closed");
-}
-
-// ---------------------------------------------------------------------------
-// Framed message helpers for per-stream messages
-// ---------------------------------------------------------------------------
-
-async fn send_framed(
-    send: &mut quinn::SendStream,
-    msg: &ControlMsg,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let payload = protocol::encode(msg)?;
-    let len = payload.len() as u32;
-    send.write_all(&len.to_be_bytes()).await?;
-    send.write_all(&payload).await?;
-    Ok(())
-}
-
-async fn recv_framed(
-    recv: &mut quinn::RecvStream,
-) -> Result<ControlMsg, Box<dyn std::error::Error + Send + Sync>> {
-    let mut len_buf = [0u8; 4];
-    recv.read_exact(&mut len_buf).await?;
-    let len = u32::from_be_bytes(len_buf);
-    if len > 1_048_576 {
-        return Err("frame too large".into());
-    }
-    let mut buf = vec![0u8; len as usize];
-    recv.read_exact(&mut buf).await?;
-    let msg = protocol::decode::<ControlMsg>(&buf)?;
-    Ok(msg)
 }

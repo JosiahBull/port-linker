@@ -19,9 +19,7 @@ use agent::scanner::DefaultScanner;
 use common::session::{AgentSessionConfig, Identity};
 use common::{Error, Result};
 use protocol::{ControlMsg, PROTOCOL_VERSION};
-
-/// Maximum allowed frame size: 1 MB.
-const MAX_FRAME_SIZE: u32 = 1_048_576;
+use tunnel::{recv_framed as recv_msg, send_framed as send_msg, serve_tcp_stream};
 
 /// How long to wait for the host to deliver the session config on stdin.
 const CONFIG_READ_TIMEOUT: Duration = Duration::from_secs(30);
@@ -252,7 +250,7 @@ async fn run(log_rx: tokio::sync::mpsc::Receiver<protocol::AgentLogEvent>) -> Re
             stream_result = connection.accept_bi() => {
                 match stream_result {
                     Ok((stream_send, stream_recv)) => {
-                        tokio::spawn(handle_tcp_stream(stream_send, stream_recv));
+                        tokio::spawn(serve_tcp_stream(stream_send, stream_recv));
                     }
                     Err(e) => {
                         info!(%e, "failed to accept bi-stream (connection closing?)");
@@ -410,87 +408,6 @@ async fn authenticate_host(recv: &mut quinn::RecvStream, expected_secret: &str) 
     }
 }
 
-/// Handle a TCP forwarding request on a new QUIC bidirectional stream.
-///
-/// Protocol:
-/// 1. Read framed `TcpStreamInit { port }` from host
-/// 2. Connect to `localhost:port`
-/// 3. Send 1-byte status: 0x00 = OK, 0x01 = error
-/// 4. On error: send framed `TcpStreamError`, close stream
-/// 5. On success: bidirectional raw byte copy
-async fn handle_tcp_stream(mut quic_send: quinn::SendStream, mut quic_recv: quinn::RecvStream) {
-    // Read the TcpStreamInit message.
-    let init = match recv_framed(&mut quic_recv).await {
-        Ok(msg) => msg,
-        Err(e) => {
-            warn!(%e, "failed to read TcpStreamInit from host");
-            return;
-        }
-    };
-
-    let port = match init {
-        ControlMsg::TcpStreamInit { port } => port,
-        other => {
-            warn!(?other, "expected TcpStreamInit, got something else");
-            return;
-        }
-    };
-
-    debug!(port, "received TcpStreamInit, connecting to localhost");
-
-    // Connect to the local service.
-    let addr: SocketAddr = ([127, 0, 0, 1], port).into();
-    let tcp_stream = match tokio::net::TcpStream::connect(addr).await {
-        Ok(s) => {
-            // Disable Nagle's algorithm for low-latency forwarding.
-            let _ = s.set_nodelay(true);
-            // Send success status.
-            if let Err(e) = quic_send.write_all(&[0x00]).await {
-                error!(port, %e, "failed to send OK status");
-                return;
-            }
-            s
-        }
-        Err(e) => {
-            // Send error status + TcpStreamError.
-            warn!(port, %e, "failed to connect to local service");
-            let _ = quic_send.write_all(&[0x01]).await;
-            let err_msg = ControlMsg::TcpStreamError {
-                port,
-                error: e.to_string(),
-            };
-            let _ = send_framed(&mut quic_send, &err_msg).await;
-            let _ = quic_send.finish();
-            return;
-        }
-    };
-
-    debug!(
-        port,
-        "connected to local service, starting bidirectional copy"
-    );
-
-    // Bidirectional copy - use join to respect TCP half-close semantics.
-    let (mut tcp_read, mut tcp_write) = tcp_stream.into_split();
-
-    let agent_to_host = async {
-        let r = tokio::io::copy(&mut tcp_read, &mut quic_send).await;
-        let _ = quic_send.finish();
-        r
-    };
-    let host_to_agent = tokio::io::copy(&mut quic_recv, &mut tcp_write);
-
-    let (r1, r2) = tokio::join!(agent_to_host, host_to_agent);
-    if let Err(e) = r1 {
-        debug!(port, %e, "agent->host copy ended");
-    }
-    if let Err(e) = r2 {
-        debug!(port, %e, "host->agent copy ended");
-    }
-
-    debug!(port, "TCP stream forwarding complete");
-}
-
 /// Handle a single incoming UDP datagram, forwarding it to the local service.
 /// Uses a shared socket cache to avoid creating a new socket per datagram.
 async fn handle_udp_datagram(datagram: Bytes, cache: Arc<RwLock<HashMap<u16, Arc<UdpSocket>>>>) {
@@ -637,78 +554,4 @@ async fn run_tcp_bridge(tcp_stream: tokio::net::TcpStream, quic_port: u16) {
     }
 
     debug!("TCP bridge session ended");
-}
-
-// ---------------------------------------------------------------------------
-// Framed message helpers
-// ---------------------------------------------------------------------------
-
-/// Send a length-prefixed, rkyv-encoded control message on a QUIC stream.
-async fn send_msg(send: &mut quinn::SendStream, msg: &ControlMsg) -> Result<()> {
-    let payload: Bytes =
-        protocol::encode(msg).map_err(|e| Error::Codec(format!("encode error: {e}")))?;
-
-    let len = payload.len() as u32;
-    send.write_all(&len.to_be_bytes())
-        .await
-        .map_err(|e| Error::QuicStream(format!("failed to write frame length: {e}")))?;
-
-    send.write_all(&payload)
-        .await
-        .map_err(|e| Error::QuicStream(format!("failed to write frame payload: {e}")))?;
-
-    Ok(())
-}
-
-/// Receive a length-prefixed, rkyv-encoded control message from a QUIC stream.
-async fn recv_msg(recv: &mut quinn::RecvStream) -> Result<ControlMsg> {
-    let mut len_buf = [0u8; 4];
-    recv.read_exact(&mut len_buf)
-        .await
-        .map_err(|e| Error::QuicStream(format!("failed to read frame length: {e}")))?;
-
-    let len = u32::from_be_bytes(len_buf);
-    if len > MAX_FRAME_SIZE {
-        return Err(Error::Protocol(format!(
-            "frame too large: {len} bytes (max {MAX_FRAME_SIZE})"
-        )));
-    }
-
-    let mut payload = vec![0u8; len as usize];
-    recv.read_exact(&mut payload)
-        .await
-        .map_err(|e| Error::QuicStream(format!("failed to read frame payload: {e}")))?;
-
-    let msg: ControlMsg =
-        protocol::decode(&payload).map_err(|e| Error::Codec(format!("decode error: {e}")))?;
-
-    Ok(msg)
-}
-
-/// Send a framed message (used on per-stream TCP forwarding channels).
-async fn send_framed(
-    send: &mut quinn::SendStream,
-    msg: &ControlMsg,
-) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let payload = protocol::encode(msg)?;
-    let len = payload.len() as u32;
-    send.write_all(&len.to_be_bytes()).await?;
-    send.write_all(&payload).await?;
-    Ok(())
-}
-
-/// Receive a framed message (used on per-stream TCP forwarding channels).
-async fn recv_framed(
-    recv: &mut quinn::RecvStream,
-) -> std::result::Result<ControlMsg, Box<dyn std::error::Error + Send + Sync>> {
-    let mut len_buf = [0u8; 4];
-    recv.read_exact(&mut len_buf).await?;
-    let len = u32::from_be_bytes(len_buf);
-    if len > MAX_FRAME_SIZE {
-        return Err("frame too large".into());
-    }
-    let mut buf = vec![0u8; len as usize];
-    recv.read_exact(&mut buf).await?;
-    let msg = protocol::decode::<ControlMsg>(&buf)?;
-    Ok(msg)
 }

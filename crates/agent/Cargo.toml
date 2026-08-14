@@ -10,6 +10,7 @@ path = "src/main.rs"
 [dependencies]
 protocol = { path = "../protocol" }
 common = { path = "../common" }
+tunnel = { path = "../tunnel" }
 tokio = { workspace = true, default-features = false, features = ["rt", "macros", "net", "sync", "io-util", "time"] }
 quinn.workspace = true
 rustls.workspace = true

@@ -1,0 +1,20 @@
+[package]
+name = "tunnel"
+version.workspace = true
+edition.workspace = true
+description = "port-linker data plane: framing and per-connection TCP forwarding over QUIC"
+publish = false
+
+[dependencies]
+protocol = { path = "../protocol" }
+common = { path = "../common" }
+tokio = { workspace = true, default-features = false, features = ["rt", "net", "sync", "io-util", "time"] }
+quinn.workspace = true
+bytes.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+rustls.workspace = true
+rustls-pki-types.workspace = true
+rcgen.workspace = true
