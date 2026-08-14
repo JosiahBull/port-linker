@@ -81,6 +81,56 @@ fn restart_backoff_secs(consecutive_failures: u32) -> u64 {
         .min(MAX_RESTART_DELAY_SECS)
 }
 
+/// Tracks consecutive restart failures and derives the delay before the next
+/// attempt.
+///
+/// The counter is private so every rule that clears it lives on this type
+/// rather than being open-coded in the restart loop.
+#[derive(Debug)]
+struct RestartBackoff {
+    consecutive_failures: u32,
+}
+
+impl RestartBackoff {
+    const fn new() -> Self {
+        Self {
+            consecutive_failures: 0,
+        }
+    }
+
+    /// 1-based number of the attempt about to be made (for logging).
+    const fn next_attempt(&self) -> u32 {
+        self.consecutive_failures.saturating_add(1)
+    }
+
+    /// Consecutive failures recorded so far (for logging).
+    const fn failures(&self) -> u32 {
+        self.consecutive_failures
+    }
+
+    /// Record a failed SSH bootstrap. Returns the delay before retrying.
+    fn note_bootstrap_failure(&mut self) -> u64 {
+        self.note_failure()
+    }
+
+    /// Record a lost session. Returns the delay before retrying.
+    ///
+    /// A session that stayed up for longer than the capped delay clears the
+    /// accumulated penalty, so a dropped long-running connection reconnects
+    /// promptly instead of waiting out the cap.
+    fn note_session_loss(&mut self, session_lasted: std::time::Duration) -> u64 {
+        if session_lasted >= std::time::Duration::from_secs(MAX_RESTART_DELAY_SECS) {
+            self.consecutive_failures = 0;
+        }
+        self.note_failure()
+    }
+
+    fn note_failure(&mut self) -> u64 {
+        self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+        restart_backoff_secs(self.consecutive_failures)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // CLI arguments
 // ---------------------------------------------------------------------------
@@ -322,12 +372,12 @@ fn write_private_file(path: &std::path::Path, contents: &str) -> Result<()> {
 /// at [`MAX_RESTART_DELAY_SECS`].
 async fn run_with_phoenix_restart(args: &Args) -> Result<()> {
     let remote = args.remote.as_ref().unwrap();
-    let mut consecutive_failures: u32 = 0;
+    let mut backoff = RestartBackoff::new();
 
     loop {
         info!(
             remote = %remote,
-            attempt = consecutive_failures.saturating_add(1),
+            attempt = backoff.next_attempt(),
             "bootstrapping agent via SSH"
         );
 
@@ -353,11 +403,10 @@ async fn run_with_phoenix_restart(args: &Args) -> Result<()> {
         } = match bootstrap_result {
             Ok(result) => result,
             Err(e) => {
-                consecutive_failures = consecutive_failures.saturating_add(1);
-                let delay = restart_backoff_secs(consecutive_failures);
+                let delay = backoff.note_bootstrap_failure();
                 error!(
                     %e,
-                    attempt = consecutive_failures,
+                    attempt = backoff.failures(),
                     delay,
                     "SSH bootstrap failed; retrying with backoff"
                 );
@@ -366,9 +415,11 @@ async fn run_with_phoenix_restart(args: &Args) -> Result<()> {
             }
         };
 
-        // Bootstrap succeeded — reset the failure counter so that previous
-        // transient failures don't inflate the backoff.
-        consecutive_failures = 0;
+        // Note: a successful bootstrap deliberately does not clear the failure
+        // count. An agent that is reachable over SSH but dies on startup would
+        // otherwise reset the penalty on every pass and be retried at the
+        // initial delay forever. The penalty is cleared by a session that stays
+        // up longer than the cap — see `RestartBackoff::note_session_loss`.
 
         // Step 2: Run the session.
         let session_start = std::time::Instant::now();
@@ -393,17 +444,10 @@ async fn run_with_phoenix_restart(args: &Args) -> Result<()> {
                 return Ok(());
             }
             Err(e) => {
-                // Reset backoff if the session was stable for longer than the
-                // max delay — a dropped long-running session should reconnect
-                // quickly, not at the capped interval.
-                if session_lasted >= std::time::Duration::from_secs(MAX_RESTART_DELAY_SECS) {
-                    consecutive_failures = 0;
-                }
-                consecutive_failures = consecutive_failures.saturating_add(1);
-                let delay = restart_backoff_secs(consecutive_failures);
+                let delay = backoff.note_session_loss(session_lasted);
                 warn!(
                     %e,
-                    attempt = consecutive_failures,
+                    attempt = backoff.failures(),
                     delay,
                     "session lost, retrying with backoff"
                 );
@@ -1143,4 +1187,106 @@ async fn run_single_session(
 
     // Phoenix mode: return error to trigger restart.
     Err(session_error)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::time::Duration;
+
+    /// A session short enough that it should not clear the backoff penalty.
+    const BRIEF: Duration = Duration::from_secs(1);
+
+    /// A session long enough to count as "stable" and clear the penalty.
+    const STABLE: Duration = Duration::from_secs(MAX_RESTART_DELAY_SECS);
+
+    #[test]
+    fn backoff_doubles_then_saturates_at_the_cap() {
+        assert_eq!(restart_backoff_secs(1), 3);
+        assert_eq!(restart_backoff_secs(2), 6);
+        assert_eq!(restart_backoff_secs(3), 12);
+        assert_eq!(restart_backoff_secs(7), 192);
+        // 3 * 2^7 = 384, capped at 300.
+        assert_eq!(restart_backoff_secs(8), MAX_RESTART_DELAY_SECS);
+        assert_eq!(restart_backoff_secs(20), MAX_RESTART_DELAY_SECS);
+        // Extreme values must saturate rather than overflow or panic.
+        assert_eq!(restart_backoff_secs(u32::MAX), MAX_RESTART_DELAY_SECS);
+        // Defensive: the unreachable zero-failure case must still be sane.
+        assert_eq!(restart_backoff_secs(0), INITIAL_RESTART_DELAY_SECS);
+    }
+
+    #[test]
+    fn repeated_bootstrap_failures_back_off() {
+        let mut backoff = RestartBackoff::new();
+        let delays: Vec<u64> = (0..5).map(|_| backoff.note_bootstrap_failure()).collect();
+        assert_eq!(delays, [3, 6, 12, 24, 48]);
+    }
+
+    /// Regression: an agent that is reachable over SSH but dies as soon as it
+    /// starts must not be retried at a flat interval forever. Each cycle here
+    /// is one full pass of the restart loop — bootstrap succeeds, then the
+    /// session drops almost immediately.
+    #[test]
+    fn repeated_session_losses_back_off() {
+        let mut backoff = RestartBackoff::new();
+
+        let delays: Vec<u64> = (0..5)
+            .map(|_| {
+                // One pass of the restart loop: bootstrap succeeds, then the
+                // session drops almost immediately. A successful bootstrap has
+                // no effect on the backoff, so the cycle is just the loss.
+                backoff.note_session_loss(BRIEF)
+            })
+            .collect();
+
+        assert_eq!(
+            delays,
+            [3, 6, 12, 24, 48],
+            "a crash-looping agent must be retried with a growing delay, \
+             not hammered at the initial interval"
+        );
+    }
+
+    #[test]
+    fn a_stable_session_clears_the_penalty() {
+        let mut backoff = RestartBackoff::new();
+
+        // Rack up a penalty on brief sessions.
+        for _ in 0..4 {
+            backoff.note_session_loss(BRIEF);
+        }
+        assert_eq!(backoff.failures(), 4);
+
+        // A session that outlived the cap should reconnect promptly.
+        assert_eq!(
+            backoff.note_session_loss(STABLE),
+            INITIAL_RESTART_DELAY_SECS
+        );
+        assert_eq!(backoff.failures(), 1);
+    }
+
+    /// The penalty carries across the bootstrap/session boundary: a remote that
+    /// alternates between refusing SSH and dropping the session immediately is
+    /// still failing, so the delay must keep growing.
+    #[test]
+    fn penalty_carries_across_bootstrap_and_session_failures() {
+        let mut backoff = RestartBackoff::new();
+
+        assert_eq!(backoff.note_bootstrap_failure(), 3);
+        assert_eq!(backoff.note_session_loss(BRIEF), 6);
+        assert_eq!(backoff.note_bootstrap_failure(), 12);
+        assert_eq!(backoff.note_session_loss(BRIEF), 24);
+    }
+
+    #[test]
+    fn attempt_counters_track_the_failure_count() {
+        let mut backoff = RestartBackoff::new();
+        assert_eq!(backoff.next_attempt(), 1);
+        assert_eq!(backoff.failures(), 0);
+
+        backoff.note_bootstrap_failure();
+        assert_eq!(backoff.failures(), 1);
+        assert_eq!(backoff.next_attempt(), 2);
+    }
 }
