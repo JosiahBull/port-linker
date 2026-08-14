@@ -1206,6 +1206,9 @@ mod tests {
         assert_eq!(restart_backoff_secs(1), 3);
         assert_eq!(restart_backoff_secs(2), 6);
         assert_eq!(restart_backoff_secs(3), 12);
+        assert_eq!(restart_backoff_secs(4), 24);
+        assert_eq!(restart_backoff_secs(5), 48);
+        assert_eq!(restart_backoff_secs(6), 96);
         assert_eq!(restart_backoff_secs(7), 192);
         // 3 * 2^7 = 384, capped at 300.
         assert_eq!(restart_backoff_secs(8), MAX_RESTART_DELAY_SECS);
@@ -1214,6 +1217,20 @@ mod tests {
         assert_eq!(restart_backoff_secs(u32::MAX), MAX_RESTART_DELAY_SECS);
         // Defensive: the unreachable zero-failure case must still be sane.
         assert_eq!(restart_backoff_secs(0), INITIAL_RESTART_DELAY_SECS);
+    }
+
+    /// Pins the tuning constants. These reference the real constants, so
+    /// editing one in this file actually trips the test.
+    #[test]
+    fn restart_constants_are_sane() {
+        // Short enough that a transient blip recovers promptly.
+        const { assert!(INITIAL_RESTART_DELAY_SECS > 0) };
+        const { assert!(INITIAL_RESTART_DELAY_SECS < 60) };
+        assert_eq!(INITIAL_RESTART_DELAY_SECS, 3);
+
+        // The cap bounds the backoff at a sane retry interval.
+        const { assert!(MAX_RESTART_DELAY_SECS >= INITIAL_RESTART_DELAY_SECS) };
+        assert_eq!(MAX_RESTART_DELAY_SECS, 300);
     }
 
     #[test]

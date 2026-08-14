@@ -2617,67 +2617,6 @@ fn test_agent_log_event_debug() {
     );
 }
 
-/// Test 60: Phoenix restart constants validation.
-///
-/// Validates that the Phoenix Agent exponential-backoff restart constants
-/// are within reasonable ranges. Retries continue indefinitely, so we only
-/// check the initial and capped delays.
-#[test]
-fn test_phoenix_restart_constants() {
-    // These constants are defined in cli/src/main.rs.
-    const INITIAL_RESTART_DELAY_SECS: u64 = 3;
-    const MAX_RESTART_DELAY_SECS: u64 = 300;
-
-    // Initial delay should be > 0 and short enough for prompt recovery.
-    const { assert!(INITIAL_RESTART_DELAY_SECS > 0) };
-    const { assert!(INITIAL_RESTART_DELAY_SECS < 60) };
-    assert_eq!(
-        INITIAL_RESTART_DELAY_SECS, 3,
-        "expected initial delay is 3 seconds"
-    );
-
-    // Max delay caps the backoff so retries continue at a sane interval.
-    const { assert!(MAX_RESTART_DELAY_SECS >= INITIAL_RESTART_DELAY_SECS) };
-    assert_eq!(
-        MAX_RESTART_DELAY_SECS, 300,
-        "expected max delay is 5 minutes (300 seconds)"
-    );
-}
-
-/// Test 60b: Exponential backoff progression.
-///
-/// Mirrors `restart_backoff_secs` from cli/src/main.rs to confirm the
-/// sequence doubles from the initial delay and saturates at the cap.
-#[test]
-fn test_phoenix_restart_backoff_progression() {
-    const INITIAL_RESTART_DELAY_SECS: u64 = 3;
-    const MAX_RESTART_DELAY_SECS: u64 = 300;
-
-    fn backoff(consecutive_failures: u32) -> u64 {
-        let exp = consecutive_failures.saturating_sub(1).min(20);
-        let multiplier = 1u64.checked_shl(exp).unwrap_or(u64::MAX);
-        INITIAL_RESTART_DELAY_SECS
-            .checked_mul(multiplier)
-            .unwrap_or(MAX_RESTART_DELAY_SECS)
-            .min(MAX_RESTART_DELAY_SECS)
-    }
-
-    assert_eq!(backoff(1), 3);
-    assert_eq!(backoff(2), 6);
-    assert_eq!(backoff(3), 12);
-    assert_eq!(backoff(4), 24);
-    assert_eq!(backoff(5), 48);
-    assert_eq!(backoff(6), 96);
-    assert_eq!(backoff(7), 192);
-    // 3 * 2^7 = 384, capped at 300.
-    assert_eq!(backoff(8), MAX_RESTART_DELAY_SECS);
-    assert_eq!(backoff(20), MAX_RESTART_DELAY_SECS);
-    // Extreme values must saturate, not panic or overflow.
-    assert_eq!(backoff(u32::MAX), MAX_RESTART_DELAY_SECS);
-    // Defensive: even the unreachable zero-failure case must be sane.
-    assert_eq!(backoff(0), INITIAL_RESTART_DELAY_SECS);
-}
-
 /// Test 61: MAX_LOG_FRAME constant validation.
 ///
 /// Validates that the MAX_LOG_FRAME constant is set to a reasonable value
