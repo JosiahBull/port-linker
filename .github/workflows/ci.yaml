@@ -262,9 +262,10 @@ jobs:
   build:
     name: Build
     runs-on: ${{ matrix.os }}
-    # A cold Windows release build runs close to 30 minutes, so leave margin
-    # rather than cancelling a required check when the cache misses.
-    timeout-minutes: 45
+    # A warm build is 3-4 minutes; a cold one on Windows ran past 45 and was
+    # cancelled (PR #9, which changed every workspace version and so missed the
+    # cache). Any Cargo.lock change builds cold, so leave real headroom.
+    timeout-minutes: 60
     needs: [build-agents]
     concurrency:
       group: ci-build-${{ github.repository }}-${{ github.event_name }}-${{ github.ref }}-${{ matrix.os }}
@@ -314,7 +315,12 @@ jobs:
         env:
           # Workspace-relative so it resolves identically inside cross containers.
           PLK_PREBUILT_DIR: prebuilt
-        run: cargo build --workspace --release
+        # `-p cli`, not `--workspace`: this job exists to prove the shipped binary
+        # links, and the steps below only ever touch target/release/port-linker.
+        # `--workspace` additionally fat-LTO-links the agent, relay and perf
+        # binaries, none of which ship from here — four full LTO links instead of
+        # one, which is most of why a cold Windows run blew the timeout.
+        run: cargo build -p cli --release --locked
 
       - name: Compress binary with UPX (Linux)
         if: matrix.os == 'ubuntu-latest'
