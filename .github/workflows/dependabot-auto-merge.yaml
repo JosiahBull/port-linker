@@ -1,0 +1,48 @@
+name: Dependabot auto-merge
+
+# Turn on GitHub's auto-merge for Dependabot pull requests. Auto-merge waits for
+# the required status checks that branch protection enforces on main, so a bump
+# lands only once Gate is green — this is a queue, not a rubber stamp.
+#
+# It matters that the checks are actually required. On a repository with none,
+# "auto-merge" means "merge now", and a batch of bumps can land in seconds
+# without ever being gated. See CI.md for the required-check list.
+#
+# This workflow never checks out the pull request and never runs its code, so the
+# write-scoped token below is never exposed to the contents of the bump.
+on: pull_request
+
+permissions:
+  contents: read
+
+jobs:
+  auto-merge:
+    name: Enable auto-merge
+    if: github.actor == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      # A Dependabot-triggered run gets a read-only token by default; enabling
+      # auto-merge needs both of these.
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Fetch update metadata
+        id: metadata
+        uses: dependabot/fetch-metadata@v2
+
+      # Cargo majors are already excluded in dependabot.yml, but the
+      # github-actions ecosystem is not filtered as tightly, and this is the
+      # backstop that keeps the policy in one place even if that changes.
+      - name: Enable auto-merge for minor and patch updates
+        if: |
+          steps.metadata.outputs.update-type == 'version-update:semver-minor' ||
+          steps.metadata.outputs.update-type == 'version-update:semver-patch'
+        run: gh pr merge --auto --squash "$PR_URL"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Leave majors to a human
+        if: steps.metadata.outputs.update-type == 'version-update:semver-major'
+        run: echo "major update — review and merge by hand"
