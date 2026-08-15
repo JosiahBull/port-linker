@@ -144,7 +144,12 @@ jobs:
         env:
           # Workspace-relative so it resolves identically inside cross containers.
           PLK_PREBUILT_DIR: prebuilt
-        run: ${{ matrix.command }} build --release --target ${{ matrix.target }}
+        # `-p cli`: the archive below ships only the port-linker binary, but the
+        # unscoped build also fat-LTO-links the agent, relay and perf binaries
+        # and discards them — four full LTO links per target, across eight
+        # targets. Same change as CI's build job, where a cold Windows run went
+        # from timing out at 45 minutes to under four.
+        run: ${{ matrix.command }} build -p cli --release --locked --target ${{ matrix.target }}
 
       - name: Compress binary with UPX (Linux x86_64)
         if: matrix.target == 'x86_64-unknown-linux-gnu'
