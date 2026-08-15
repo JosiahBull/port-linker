@@ -1,7 +1,12 @@
 name: CI
 
 on:
+  # Only main, so a branch with an open PR runs CI once rather than twice.
+  # Two runs of the same job on the same commit race for the shared Rust
+  # cache; the loser rebuilds from scratch, which on a Windows release build
+  # is slow enough to hit the job timeout and cancel a required check.
   push:
+    branches: [main]
     paths:
       - ".cargo/*.toml"
       - ".github/workflows/*.yaml"
@@ -257,7 +262,9 @@ jobs:
   build:
     name: Build
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    # A cold Windows release build runs close to 30 minutes, so leave margin
+    # rather than cancelling a required check when the cache misses.
+    timeout-minutes: 45
     needs: [build-agents]
     concurrency:
       group: ci-build-${{ github.repository }}-${{ github.event_name }}-${{ github.ref }}-${{ matrix.os }}
