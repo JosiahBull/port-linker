@@ -22,6 +22,12 @@ env:
   RUST_BACKTRACE: short
   RUSTUP_MAX_RETRIES: 10
 
+# Never cancel in progress: a superseded run may already have signed and published
+# some assets, and killing it midway leaves a half-published release.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   # Every released CLI embeds an agent for every supported target, so the
   # agents are built first, each on a runner that can target it, and handed to
@@ -30,6 +36,7 @@ jobs:
   build-agents:
     name: Build Agent (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -101,6 +108,9 @@ jobs:
   build:
     name: Build (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
+    # A cold Windows release build runs past 45 minutes (fat LTO, codegen-units=1),
+    # and a release tag always builds cold.
+    timeout-minutes: 60
     needs: [build-agents]
     strategy:
       fail-fast: false
@@ -216,15 +226,20 @@ jobs:
     name: Create Release
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: write
       id-token: write # Required for cosign keyless signing
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download all artifacts
+      # Only the release tarballs. Without the pattern this also pulls down the five
+      # `prebuilt-*` agent artifacts, whose directories contain no tarball — and the
+      # asset step below then fails on them.
+      - name: Download release artifacts
         uses: actions/download-artifact@v4
         with:
+          pattern: port-linker-*
           path: artifacts
 
       - name: Install cosign
@@ -254,10 +269,17 @@ jobs:
       - name: Prepare release assets
         run: |
           mkdir -p release
-          for dir in artifacts/*/; do
-            cp "$dir"*.tar.gz release/
-          done
+          # `find` rather than a glob loop: an unmatched glob stays literal under
+          # `bash -e`, so a directory holding no tarball killed the whole step.
+          find artifacts -type f -name '*.tar.gz' -exec cp {} release/ \;
           ls -la release/
+          # Every target must have produced a tarball. Publishing a partial set is
+          # worse than failing: the release looks complete and silently is not.
+          count=$(find release -type f -name '*.tar.gz' | wc -l | tr -d ' ')
+          if [ "$count" -ne 8 ]; then
+            echo "::error::expected 8 release tarballs, found $count"
+            exit 1
+          fi
 
       - name: Generate checksums
         run: |
