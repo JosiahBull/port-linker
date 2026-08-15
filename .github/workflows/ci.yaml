@@ -350,3 +350,46 @@ jobs:
           name: port-linker-${{ matrix.os }}
           path: target/release/port-linker.exe
           if-no-files-found: error
+
+  # The single required status check on main.
+  #
+  # Branch protection matches required checks by exact job display name, so with
+  # one context per job the list drifts silently: add a job, or a leg to a
+  # matrix, and it is not required until someone remembers to add it by hand — a
+  # new gate that cannot fail a PR looks identical to one that can. Every job
+  # above is a `needs:` here instead, so the gate set is whatever this workflow
+  # runs, and restructuring below never touches branch protection again.
+  gate:
+    name: Gate
+    needs:
+      - check
+      - fmt
+      - clippy
+      - test
+      - doc
+      - test-docker
+      - build-agents
+      - build
+    # `always()`, so a job that fails still produces a Gate result rather than
+    # leaving the one required check permanently pending.
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: ci-gate-${{ github.repository }}-${{ github.event_name }}-${{ github.ref }}
+      cancel-in-progress: true
+    steps:
+      - name: Require every job to have succeeded
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "$RESULTS"
+          # `skipped` has to fail too. A job dropped by a stray `if:` or an
+          # unmet `needs:` would otherwise satisfy the only required check.
+          for result in $RESULTS; do
+            if [ "$result" != "success" ]; then
+              echo "::error::a required job reported '$result'"
+              exit 1
+            fi
+          done
+          echo "✓ every required job succeeded"
