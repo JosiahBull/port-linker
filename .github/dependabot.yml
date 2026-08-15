@@ -1,5 +1,5 @@
 # Dependency-update PRs. Each one is a normal pull request against main, so it
-# faces the same required check as any other (Gate — see CI.md), and
+# faces the same required check as any other (Gate), and
 # dependabot-auto-merge.yaml turns on GitHub auto-merge so a green minor or patch
 # bump lands without ceremony. Everything below bounds how much lands unattended,
 # and how often.
@@ -60,7 +60,7 @@ updates:
   # and its trailing version comment together.
   #
   # Note dtolnay/rust-toolchain@master is a branch ref, not a version, so
-  # Dependabot cannot and will not update it. See CI.md.
+  # Dependabot cannot and will not update it.
   - package-ecosystem: github-actions
     directory: "/"
     schedule:

@@ -65,6 +65,35 @@ wait-timeout = "0.2"
 # Build
 resvg = "0.47"
 
+# Lints every member inherits with `[lints] workspace = true`. Setting them here
+# rather than only as `-D warnings` in CI means a plain local `cargo clippy`
+# enforces the same bar, instead of the difference showing up as a surprise on a
+# pull request.
+#
+# These are the bug-shaped lints beyond clippy's default set. The noisier
+# pedantic groups are left off deliberately: `pedantic` alone reports 421 findings
+# here, and a lint nobody can act on is one people learn to ignore.
+[workspace.lints.clippy]
+# Holding a std Mutex guard across an .await parks the guard on the task and
+# deadlocks anything polled on the same thread. The whole data plane is async.
+await_holding_lock = "deny"
+await_holding_refcell_ref = "deny"
+# Unfinished code should not reach a release that is signed and published.
+todo = "deny"
+unimplemented = "deny"
+# Debugging leftovers.
+dbg_macro = "deny"
+# Skips the destructor: for anything owning a socket or a file descriptor that
+# is a leak, not an optimisation.
+mem_forget = "deny"
+# Comparing floats for equality is almost always a latent bug.
+float_cmp = "deny"
+lossy_float_literal = "deny"
+# An async fn with nothing to await is a function that costs a state machine and
+# makes its callers async for no reason.
+unused_async = "deny"
+inefficient_to_string = "deny"
+
 [profile.release]
 lto = true
 codegen-units = 1

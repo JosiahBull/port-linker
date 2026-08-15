@@ -4,7 +4,7 @@ on:
   # Reusable: release.yaml calls this workflow on a tag, so a release runs the
   # same gates a pull request does, from the same file. The edge points this way
   # deliberately — a shim ci.yaml calling a separate checks.yaml would report
-  # every job as `checks / <name>`, renaming all of them at once. See CI.md.
+  # every job as `checks / <name>`, renaming all of them at once.
   workflow_call:
   # Only main, so a branch with an open PR runs CI once rather than twice.
   # Two runs of the same job on the same commit race for the shared Rust
@@ -19,7 +19,6 @@ on:
       - ".githooks/**"
       - "Cargo.*"
       - "Cross.toml"
-      - "rustfmt.toml"
       - "scripts/**"
       - "**/src/**"
       - "**/tests/**"

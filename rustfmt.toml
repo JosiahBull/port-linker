@@ -1,9 +1,0 @@
-# Pinned explicitly rather than inherited from the package edition. rustfmt
-# derives its style edition from `edition` by default, so bumping the language
-# edition silently reformats the whole tree — the 2024 style edition sorts `use`
-# items by ASCII, for one, which moves lines in nearly every file. Naming it here
-# decouples the two: an edition bump stays a language change, and a reformat
-# stays a deliberate one.
-#
-# This matches the current edition, so it is a no-op today. That is the point.
-style_edition = "2024"

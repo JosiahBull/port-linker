@@ -17,3 +17,6 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 quinn.workspace = true
 clap.workspace = true
 tracing.workspace = true
+
+[lints]
+workspace = true

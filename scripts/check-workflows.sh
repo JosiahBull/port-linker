@@ -65,7 +65,7 @@ if command -v shellcheck >/dev/null 2>&1; then
     # quoting it would pass one argument containing spaces and break the
     # scenarios. Those scripts are also what the required Docker Integration Tests
     # job runs, so a blind sweep there risks a merge gate to satisfy a linter.
-    # Cleaning them up is worth its own change; see CI.md.
+    # Cleaning them up is worth its own change.
     shell_scripts=()
     while IFS= read -r script; do
         shell_scripts+=("$script")

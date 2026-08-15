@@ -9,3 +9,6 @@ edition.workspace = true
 agent-build = { path = "../agent-build" }
 flate2 = "1"
 sha2 = "0.10"
+
+[lints]
+workspace = true
