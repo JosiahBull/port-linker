@@ -418,9 +418,21 @@ jobs:
       # Replaces `bash <(curl .../actionlint/main/scripts/download-actionlint.bash)`,
       # which piped an unpinned script from a moving branch into bash, with curl
       # having no -f so an error page would have been executed too.
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: actionlint
+      #
+      # A pinned release tarball rather than taiki-e/install-action, which does
+      # not carry actionlint — it falls back to cargo-binstall, and actionlint is
+      # a Go program, not a crate. Bump ACTIONLINT_VERSION by hand; Dependabot
+      # does not track it either.
+      - name: Install actionlint
+        env:
+          ACTIONLINT_VERSION: 1.7.12
+        run: |
+          curl -fsSL \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" \
+            | tar -xz actionlint
+          sudo install -m 0755 actionlint /usr/local/bin/actionlint
+          rm actionlint
+          actionlint --version
 
       - name: Lint workflows and scripts
         run: bash scripts/check-workflows.sh
