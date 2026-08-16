@@ -1,4 +1,4 @@
-FROM alpine:3.19
+FROM alpine:3.24
 
 # Install SSH server, iptables for firewall testing, bash, socat for echo servers
 RUN apk add --no-cache \
