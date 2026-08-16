@@ -36,23 +36,55 @@ updates:
       # Majors are a human decision, taken with the migration attached.
       - dependency-name: "*"
         update-types: ["version-update:semver-major"]
-      # Dependabot classifies 0.57 -> 0.58 as a *minor* update, but under Cargo's
-      # semver a 0.x minor is a breaking change. These crates carry the wire
-      # protocol and the crypto that both ends of the tunnel agree on, and a
-      # released CLI has to interoperate with agents already deployed on remote
-      # machines. "It compiled and the tests passed" is not enough to merge one
-      # of these unattended.
-      - dependency-name: "russh"
+      # Every 0.x direct dependency, ignored for minor bumps.
+      #
+      # Dependabot classifies 0.10 -> 0.11 as *minor* because the major field is
+      # still 0. Under Cargo's semver that is a breaking change — for a 0.x crate
+      # the minor field is the compatibility boundary. Dependabot has no setting
+      # for this, so the rule is enforced by listing the crates it applies to.
+      #
+      # This costs very little: a 0.x crate ships patches most of the time, and
+      # those are still picked up (libc 0.2.180 -> 0.2.189 is a patch). It is the
+      # minor bumps, the breaking ones, that now wait for a human.
+      #
+      # scripts/check-dependabot.sh fails the build if a 0.x dependency is added
+      # to the workspace without being listed here.
+      #
+      # Why it matters here: sha2 0.10 -> 0.11 arrived in the first batch as a
+      # "minor", pulled digest and block-buffer with it, and stopped the whole
+      # workspace compiling against the crypto-common the rest of the graph
+      # resolves to.
+      - dependency-name: "dialoguer"
+        update-types: ["version-update:semver-minor"]
+      - dependency-name: "libc"
         update-types: ["version-update:semver-minor"]
       - dependency-name: "quinn"
         update-types: ["version-update:semver-minor"]
-      - dependency-name: "rustls"
+      - dependency-name: "rcgen"
+        update-types: ["version-update:semver-minor"]
+      - dependency-name: "resvg"
+        update-types: ["version-update:semver-minor"]
+      - dependency-name: "ring"
         update-types: ["version-update:semver-minor"]
       - dependency-name: "rkyv"
         update-types: ["version-update:semver-minor"]
-      - dependency-name: "rcgen"
+      - dependency-name: "russh"
         update-types: ["version-update:semver-minor"]
-      - dependency-name: "ring"
+      - dependency-name: "rustls"
+        update-types: ["version-update:semver-minor"]
+      - dependency-name: "sha2"
+        update-types: ["version-update:semver-minor"]
+      - dependency-name: "tracing"
+        update-types: ["version-update:semver-minor"]
+      - dependency-name: "tracing-appender"
+        update-types: ["version-update:semver-minor"]
+      - dependency-name: "tracing-core"
+        update-types: ["version-update:semver-minor"]
+      - dependency-name: "tracing-subscriber"
+        update-types: ["version-update:semver-minor"]
+      - dependency-name: "wait-timeout"
+        update-types: ["version-update:semver-minor"]
+      - dependency-name: "windows"
         update-types: ["version-update:semver-minor"]
 
   # The actions used by ci.yaml, release.yaml and dependabot-auto-merge.yaml,
