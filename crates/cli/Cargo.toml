@@ -29,3 +29,6 @@ dirs.workspace = true
 ring.workspace = true
 notify = { path = "../notify" }
 
+
+[lints]
+workspace = true

@@ -6,3 +6,6 @@ edition.workspace = true
 [dependencies]
 rkyv.workspace = true
 bytes.workspace = true
+
+[lints]
+workspace = true

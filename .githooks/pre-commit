@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+#
+# Mirrors the deterministic gates in .github/workflows/ci.yaml, cheapest first,
+# so most failures never reach a runner. Each line runs the same script the
+# corresponding CI job runs, so the hook and CI cannot drift on flags.
+#
+# Order is by cost. The two text-only checks take milliseconds. check-deps.sh
+# only resolves the dependency graph. clippy compiles the workspace, so test.sh
+# sits directly behind it and pays for little beyond linking and running.
+#
+# Deliberately absent: the docs build, the five cross-compiled agents, the three
+# release builds, the Docker scenarios, and cargo-udeps. Each needs a toolchain,
+# Docker or a nightly that a commit hook has no business assuming. Those stay
+# CI's job — this hook is the convenience, ci.yaml is the gate.
+#
+# Installed per clone by scripts/install-hooks.sh.
+# Bypass with: git commit --no-verify
+
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+
+run() {
+    echo "▶ $*"
+    "$@"
+}
+
+run bash scripts/check-versions.sh
+run bash scripts/check-fmt.sh
+run bash scripts/check-deps.sh
+run bash scripts/check-workflows.sh
+run bash scripts/check-clippy.sh
+run bash scripts/test.sh
+
+echo "✓ pre-commit checks passed"

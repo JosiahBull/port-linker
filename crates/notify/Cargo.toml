@@ -11,3 +11,6 @@ assets = { workspace = true }
 common = { path = "../common" }
 tracing.workspace = true
 thiserror.workspace = true
+
+[lints]
+workspace = true

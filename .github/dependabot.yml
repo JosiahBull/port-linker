@@ -1,0 +1,91 @@
+# Dependency-update PRs. Each one is a normal pull request against main, so it
+# faces the same required check as any other (Gate), and
+# dependabot-auto-merge.yaml turns on GitHub auto-merge so a green minor or patch
+# bump lands without ceremony. Everything below bounds how much lands unattended,
+# and how often.
+#
+# Filename: GitHub only reads `.github/dependabot.yml`. Every workflow in this
+# repo is named `.yaml`; this file cannot be.
+version: 2
+updates:
+  # The whole Cargo workspace: root Cargo.toml plus Cargo.lock. Every member
+  # inherits its version from [workspace.package], so "/" is the only directory
+  # there is to scan.
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+      # Saturday: a cargo bump changes Cargo.lock, which misses the Rust cache
+      # and builds cold on all three OSes plus five agent targets. Keep that
+      # burst away from working hours.
+      day: saturday
+    # Grouping usually makes this moot; it caps the worst-case burst. One PR is
+    # ~17 jobs, and the free-tier ceiling is ~20 concurrent (~5 macOS).
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore
+      include: scope
+    groups:
+      # One PR for all the low-risk bumps rather than one per crate: the cost of
+      # a single CI run instead of N of them.
+      cargo-minor-patch:
+        update-types:
+          - minor
+          - patch
+    ignore:
+      # Majors are a human decision, taken with the migration attached.
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+      # Dependabot classifies 0.57 -> 0.58 as a *minor* update, but under Cargo's
+      # semver a 0.x minor is a breaking change. These crates carry the wire
+      # protocol and the crypto that both ends of the tunnel agree on, and a
+      # released CLI has to interoperate with agents already deployed on remote
+      # machines. "It compiled and the tests passed" is not enough to merge one
+      # of these unattended.
+      - dependency-name: "russh"
+        update-types: ["version-update:semver-minor"]
+      - dependency-name: "quinn"
+        update-types: ["version-update:semver-minor"]
+      - dependency-name: "rustls"
+        update-types: ["version-update:semver-minor"]
+      - dependency-name: "rkyv"
+        update-types: ["version-update:semver-minor"]
+      - dependency-name: "rcgen"
+        update-types: ["version-update:semver-minor"]
+      - dependency-name: "ring"
+        update-types: ["version-update:semver-minor"]
+
+  # The actions used by ci.yaml, release.yaml and dependabot-auto-merge.yaml,
+  # including the SHA-pinned ones in the signing job — Dependabot updates the pin
+  # and its trailing version comment together.
+  #
+  # Note dtolnay/rust-toolchain@master is a branch ref, not a version, so
+  # Dependabot cannot and will not update it.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: saturday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: ci
+      include: scope
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+    ignore:
+      # An action major can pass every check and still change artifact layout or
+      # output names, which surfaces only at release time.
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+
+  # tests/docker/Dockerfile.sshnode pins a base image. Nothing else would ever
+  # report that it had aged.
+  - package-ecosystem: docker
+    directory: "/tests/docker"
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: ci
+      include: scope

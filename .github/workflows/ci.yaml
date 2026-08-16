@@ -1,6 +1,11 @@
 name: CI
 
 on:
+  # Reusable: release.yaml calls this workflow on a tag, so a release runs the
+  # same gates a pull request does, from the same file. The edge points this way
+  # deliberately — a shim ci.yaml calling a separate checks.yaml would report
+  # every job as `checks / <name>`, renaming all of them at once.
+  workflow_call:
   # Only main, so a branch with an open PR runs CI once rather than twice.
   # Two runs of the same job on the same commit race for the shared Rust
   # cache; the loser rebuilds from scratch, which on a Windows release build
@@ -11,9 +16,14 @@ on:
       - ".cargo/*.toml"
       - ".github/workflows/*.yaml"
       - ".github/workflows/*.yml"
+      - ".githooks/**"
       - "Cargo.*"
+      - "Cross.toml"
+      - "scripts/**"
       - "**/src/**"
       - "**/tests/**"
+  # No paths filter, deliberately: Gate is the only required check, so it has to
+  # report on every pull request or a docs-only change can never merge.
   pull_request:
     branches: [main]
 
@@ -27,6 +37,11 @@ env:
   RUSTUP_MAX_RETRIES: 10
   RUSTFLAGS: "-D warnings"
   RUSTDOCFLAGS: "-D warnings"
+
+# Default-deny. No job here needs more; release.yaml escalates only in the job
+# that publishes.
+permissions:
+  contents: read
 
 jobs:
   check:
@@ -64,7 +79,7 @@ jobs:
           components: rustfmt
 
       - name: Check formatting
-        run: cargo fmt --all -- --check
+        run: bash scripts/check-fmt.sh
 
   clippy:
     name: Clippy
@@ -84,7 +99,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Run clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        run: bash scripts/check-clippy.sh
 
   test:
     name: Tests
@@ -106,21 +121,11 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # tests/integration_test.rs spawns the agent binary. `cargo test` does not
-      # build another package's binary just because a test wants it, so build it
-      # explicitly rather than let the test suite shell out to cargo mid-run.
-      - name: Build agent binary
-        run: cargo build -p agent
-
-      # Not `--bins`: that only runs binary targets, which silently skipped every
-      # lib unit test and the whole of tests/integration_test.rs.
-      #
-      # This also covers the data plane suite (`crates/tunnel/tests`) and the
-      # performance regression tests (`crates/perf/tests`), which is why they have
-      # no job of their own. The perf thresholds are expressed as multiples of the
-      # round-trip time the benchmark itself imposes, so they hold on a slow runner.
+      # `bash scripts/...`, not `./scripts/...`: this job runs on Windows too,
+      # where a checkout need not preserve the executable bit.
       - name: Run tests
-        run: cargo test --workspace --all-features
+        shell: bash
+        run: bash scripts/test.sh
 
   doc:
     name: Documentation
@@ -140,7 +145,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Build documentation
-        run: cargo doc --workspace --all-features --no-deps
+        run: bash scripts/check-docs.sh
 
   test-docker:
     name: Docker Integration Tests
@@ -351,6 +356,86 @@ jobs:
           path: target/release/port-linker.exe
           if-no-files-found: error
 
+  versions:
+    name: Versions
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: ci-versions-${{ github.repository }}-${{ github.event_name }}-${{ github.ref }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pure text parsing, so no toolchain and no cache. On a tag — release.yaml
+      # calls this workflow, so GITHUB_REF_TYPE is `tag` here — it additionally
+      # asserts the tag matches [workspace.package] version, which is what makes
+      # it impossible to publish a signed vX from a tree that says vY.
+      - name: Check versions
+        run: bash scripts/check-versions.sh
+
+  deps:
+    name: Dependencies
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    concurrency:
+      group: ci-deps-${{ github.repository }}-${{ github.event_name }}-${{ github.ref }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-all-crates: true
+          cache-bin: true
+
+      # A published binary, rather than `cargo +nightly install --locked
+      # cargo-udeps`, which rebuilt it from source on every run.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-udeps
+
+      - name: Check for openssl in the runtime graph
+        run: bash scripts/check-deps.sh
+
+      - name: Check for unused dependencies
+        run: bash scripts/check-unused-deps.sh
+
+  workflows:
+    name: Workflows
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: ci-workflows-${{ github.repository }}-${{ github.event_name }}-${{ github.ref }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v4
+
+      # Replaces `bash <(curl .../actionlint/main/scripts/download-actionlint.bash)`,
+      # which piped an unpinned script from a moving branch into bash, with curl
+      # having no -f so an error page would have been executed too.
+      #
+      # A pinned release tarball rather than taiki-e/install-action, which does
+      # not carry actionlint — it falls back to cargo-binstall, and actionlint is
+      # a Go program, not a crate. Bump ACTIONLINT_VERSION by hand; Dependabot
+      # does not track it either.
+      - name: Install actionlint
+        env:
+          ACTIONLINT_VERSION: 1.7.12
+        run: |
+          curl -fsSL \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" \
+            | tar -xz actionlint
+          sudo install -m 0755 actionlint /usr/local/bin/actionlint
+          rm actionlint
+          actionlint --version
+
+      - name: Lint workflows and scripts
+        run: bash scripts/check-workflows.sh
+
   # The single required status check on main.
   #
   # Branch protection matches required checks by exact job display name, so with
@@ -370,6 +455,9 @@ jobs:
       - test-docker
       - build-agents
       - build
+      - versions
+      - deps
+      - workflows
     # `always()`, so a job that fails still produces a Gate result rather than
     # leaving the one required check permanently pending.
     if: always()

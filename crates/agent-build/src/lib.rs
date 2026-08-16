@@ -246,6 +246,18 @@ pub struct ToolchainInfo {
 }
 
 impl ToolchainInfo {
+    /// Nothing available, for when detection is skipped because no target needs
+    /// to be built. Every field is false, so any code path that would compile
+    /// rather than adopt a prebuilt binary still refuses loudly.
+    pub const fn none() -> Self {
+        Self {
+            has_nightly: false,
+            has_rust_src: false,
+            has_cross: false,
+            has_upx: false,
+        }
+    }
+
     /// Detect available toolchains and tools.
     pub fn detect() -> Self {
         Self {
@@ -326,7 +338,26 @@ pub fn build_for_targets(config: &BuildConfig) -> HashMap<String, BuildResult> {
             .collect();
     }
 
-    let toolchain = ToolchainInfo::detect();
+    // Detecting the toolchain shells out to `rustup run nightly …`, which on a
+    // machine with only stable installed asks rustup to *install* nightly — a
+    // network download, inside a build script, with no timeout. During the
+    // v0.5.0 release that call hung and took the whole job to its 60 minute
+    // limit; the other seven targets finished in four to eight minutes.
+    //
+    // When every target already has a binary in PLK_PREBUILT_DIR, each one
+    // returns from `find_prebuilt` before it ever looks at the toolchain, so the
+    // probe is pure risk. That is exactly the release path, where all five
+    // agents arrive as CI artifacts.
+    let toolchain = if config
+        .targets
+        .iter()
+        .all(|target| find_prebuilt(config, target).is_some())
+    {
+        println!("cargo:warning=all targets prebuilt; skipping toolchain detection");
+        ToolchainInfo::none()
+    } else {
+        ToolchainInfo::detect()
+    };
 
     let base_target_dir = config.workspace_root.join("target").join("cross-build");
 

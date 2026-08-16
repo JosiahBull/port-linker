@@ -8,3 +8,6 @@ quinn.workspace = true
 tokio.workspace = true
 bytes.workspace = true
 tracing.workspace = true
+
+[lints]
+workspace = true
