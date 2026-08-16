@@ -8,7 +8,8 @@
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
-/// The directory under `~/.local/state/` where logs are stored.
+/// This tool's directory inside the user's state directory. Holds the log file
+/// and the update-check consent record.
 const LOG_DIR_NAME: &str = "port-linker";
 
 /// The base filename for the rolling log file.
@@ -19,7 +20,7 @@ const LOG_FILE_NAME: &str = "debug.log";
 /// Returns a [`WorkerGuard`] that **must** be held for the lifetime of the
 /// program — dropping it flushes and closes the log file writer.
 pub fn init_logging() -> WorkerGuard {
-    let log_dir = log_directory();
+    let log_dir = state_directory();
 
     // Ensure the log directory exists.
     if let Err(e) = std::fs::create_dir_all(&log_dir) {
@@ -75,19 +76,23 @@ pub fn init_logging() -> WorkerGuard {
     guard
 }
 
-/// Resolve the log directory path.
+/// Resolve the directory holding this tool's per-user state.
 ///
-/// Uses the XDG state directory (`~/.local/state/port-linker/`) on Linux and
-/// the equivalent on macOS (`~/Library/Application Support/port-linker/logs/`
-/// via `dirs::state_dir()`). Falls back to `~/.local/state/port-linker/` if
-/// the platform helper returns `None`.
-fn log_directory() -> std::path::PathBuf {
+/// `dirs::state_dir()` implements only the XDG specification, so it returns a
+/// path on Linux (`~/.local/state`) and `None` on both macOS and Windows. The
+/// fallback is therefore the normal case on two of the three platforms CI
+/// tests, not an edge case: everywhere but Linux this resolves to
+/// `~/.local/state/port-linker/`.
+///
+/// Shared with [`crate::update_check`], which keeps its consent record here.
+/// A caller that cannot find a home directory either gets the current
+/// directory, which keeps logging working from a daemon with no `$HOME`.
+pub fn state_directory() -> std::path::PathBuf {
     use common::platform::{CurrentPlatform, Platform};
 
     if let Some(state) = CurrentPlatform::state_dir() {
         return state.join(LOG_DIR_NAME);
     }
-    // Fallback: build the path manually.
     if let Some(home) = CurrentPlatform::home_dir() {
         return home.join(".local").join("state").join(LOG_DIR_NAME);
     }
@@ -163,33 +168,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn log_directory_is_not_empty() {
-        let dir = log_directory();
+    fn state_directory_is_not_empty() {
+        let dir = state_directory();
         assert!(
             dir.components().count() > 0,
-            "log directory should have at least one component"
+            "state directory should have at least one component"
         );
     }
 
     #[test]
-    fn log_directory_ends_with_port_linker() {
-        let dir = log_directory();
+    fn state_directory_ends_with_port_linker() {
+        let dir = state_directory();
         assert!(
             dir.ends_with(LOG_DIR_NAME),
-            "log directory should end with '{LOG_DIR_NAME}': {}",
+            "state directory should end with '{LOG_DIR_NAME}': {}",
             dir.display()
         );
     }
 
     #[test]
-    fn log_directory_is_absolute_or_fallback() {
-        let dir = log_directory();
+    fn state_directory_is_absolute_or_fallback() {
+        let dir = state_directory();
         let path_str = dir.to_string_lossy();
 
         // Should be either absolute or the current directory fallback.
         assert!(
             dir.is_absolute() || path_str == ".",
-            "log directory should be absolute or current dir fallback: {}",
+            "state directory should be absolute or current dir fallback: {}",
             dir.display()
         );
     }

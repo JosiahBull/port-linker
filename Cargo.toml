@@ -6,7 +6,7 @@ members = ["crates/*", "tests"]
 version = "0.6.0"
 edition = "2024"
 description = "A CLI tool that connects to remote systems via SSH and automatically forwards discovered ports to localhost"
-repository = "https://github.com/JosiahParry/port-linker"
+repository = "https://github.com/JosiahBull/port-linker"
 license = "MIT"
 
 [workspace.dependencies]
@@ -14,13 +14,29 @@ license = "MIT"
 tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread", "macros", "net", "sync", "io-util", "time"] }
 
 # CLI
-clap = { version = "4", features = ["derive"] }
+# `env` backs --update-check's PLK_UPDATE_CHECK fallback, so flag-over-env
+# precedence is clap's rather than something this crate reimplements. Only `cli`
+# and `perf` depend on clap; the agent does not, so this costs it nothing.
+clap = { version = "4", features = ["derive", "env"] }
 
 # SSH
 russh = "0.62"
 
 # System
 dirs = "6"
+
+# Update check
+#
+# The only outbound HTTP this workspace makes: one HEAD to a public GitHub URL,
+# from the CLI alone. `default-features = false` drops ureq's `gzip` default,
+# which pulls flate2 to decompress a body this never reads. The `rustls` feature
+# resolves to rustls + the ring provider + webpki-roots, so it reuses the TLS
+# stack quinn already builds and keeps `scripts/check-deps.sh` happy — ureq's
+# native-tls backend is a separate opt-in and stays off.
+#
+# Kept on one line each: scripts/check-dependabot.sh matches per line.
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+semver = "1"
 
 # Notifications
 notify-rust = "4"
@@ -61,6 +77,15 @@ libc = "0.2"
 
 # Testing
 wait-timeout = "0.2"
+# Stubs the GitHub release endpoint for the update-check tests, so CI exercises
+# the real ureq request path against a local listener instead of reaching the
+# network. `default-features = false` drops its on-disk snapshot storage, which
+# stubbing does not use.
+#
+# Pinned to a revision because the crate is not on crates.io yet, despite its
+# README badge. Swap this for a plain version requirement once it is published —
+# a git dependency is invisible to dependabot and to check-dependabot.sh.
+partly-proxy-lib = { git = "https://github.com/thepartly/partly-proxy", rev = "0d9c7450ea9a9af59acaffd4519c07a1ef8bf08a", default-features = false }
 
 # Build
 resvg = "0.47"

@@ -2,6 +2,8 @@
 name = "cli"
 version.workspace = true
 edition.workspace = true
+# Read at compile time by `update_check`, which builds the release URLs from it.
+repository.workspace = true
 
 [[bin]]
 name = "port-linker"
@@ -27,8 +29,12 @@ dialoguer.workspace = true
 russh.workspace = true
 dirs.workspace = true
 ring.workspace = true
+ureq.workspace = true
+semver.workspace = true
 notify = { path = "../notify" }
 
+[dev-dependencies]
+partly-proxy-lib.workspace = true
 
 [lints]
 workspace = true

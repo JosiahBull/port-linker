@@ -4,6 +4,7 @@ mod logging;
 mod notifications;
 mod remote_platform;
 mod ssh;
+mod update_check;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -17,6 +18,7 @@ use common::{Error, Result};
 use protocol::{ControlMsg, PROTOCOL_VERSION};
 use ssh::{HostKeyPolicy, SshChain};
 use tunnel::{recv_framed as recv_msg, send_framed as send_msg};
+use update_check::UpdateCheck;
 
 // ---------------------------------------------------------------------------
 // Transport strategy (ProxyJump support)
@@ -136,7 +138,7 @@ impl RestartBackoff {
 // ---------------------------------------------------------------------------
 
 #[derive(Parser, Debug)]
-#[command(name = "port-linker", about = "Host-side CLI for port-linker")]
+#[command(name = "port-linker", about = "Host-side CLI for port-linker", version)]
 struct Args {
     /// Remote host to connect to via SSH (e.g. "user@host" or "host").
     /// The agent will be deployed and started automatically.
@@ -198,6 +200,15 @@ struct Args {
     /// Path to a custom relay binary to transfer to jump hosts
     #[arg(long)]
     relay_binary: Option<std::path::PathBuf>,
+
+    /// Whether to check GitHub for a newer release: ask, enabled, or disabled.
+    ///
+    /// Only ever prints a notice — nothing is downloaded and no binary is
+    /// replaced. `ask` requests consent once, on a terminal, and records the
+    /// answer in `update-check.state` beside the log file; delete that file to
+    /// be asked again. A run with no terminal never asks and never checks.
+    #[arg(long, value_enum, env = "PLK_UPDATE_CHECK", default_value_t = UpdateCheck::Ask)]
+    update_check: UpdateCheck,
 }
 
 // ---------------------------------------------------------------------------
@@ -267,6 +278,10 @@ async fn main() -> Result<()> {
     // ~/.local/state/port-linker/debug.log. Never printed to stdout
     // (reserved for TUI output).
     let _log_guard = logging::init_logging();
+
+    // Once per process, and deliberately not inside the reconnect loop below.
+    // Returns promptly: any network work is handed to a detached thread.
+    update_check::run(args.update_check);
 
     if args.remote.is_some() {
         // SSH bootstrap mode with Phoenix Agent auto-restart.
