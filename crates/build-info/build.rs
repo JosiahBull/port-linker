@@ -1,46 +1,19 @@
 //! Stamp the binary with what it was built from, for `--version`.
 //!
-//! Everything emitted here is read back by `src/build_info.rs`, so the two
-//! files are a pair: a field added below and not consumed there is dead weight
-//! in a published binary, and one dropped here degrades to `unknown` there
-//! rather than failing loudly. See the note on `option_env!` below for why it
-//! degrades instead of breaking the build.
+//! Everything emitted here is read back by `src/lib.rs`; a field emitted but
+//! not printed there is dead weight in a published binary.
 //!
-//! # Emitted selectively, not with `all_*`
+//! Fields are enumerated rather than taken from vergen's `all_*` constructors,
+//! which would also embed the last commit's author name, email and message and
+//! the resolved dependency list. The sysinfo feature is off for the same
+//! reason: it records the build machine's username and hostname.
 //!
-//! vergen's `all_git()` and `all_cargo()` are the obvious way to write this and
-//! the wrong one here. Between them they embed the last commit's author name,
-//! author email and full message, and the resolved dependency list, into a
-//! binary that is published and signed. None of it is displayed, so all of it
-//! would be payload nobody asked for — and an author email is a person's
-//! address sitting in a file strangers download.
-//!
-//! The sysinfo feature is off for the same reason, one step worse: it records
-//! the build machine's username and hostname, which for a contributor running
-//! `cargo install --path .` is their own.
-//!
-//! # Failures are not fatal, in two different ways
-//!
-//! `fail_on_error` is left off — vergen's default — but that alone is not
-//! enough, because vergen degrades along two separate paths and the reader has
-//! to handle both:
-//!
-//! * It ran and could not determine a value. The variable is emitted holding
-//!   the string `VERGEN_IDEMPOTENT_OUTPUT`. A shallow clone hits this: with
-//!   `actions/checkout` at its default depth of 1 there are no tags, so
-//!   `git describe` has nothing to describe against on a pull request.
-//! * It could not run the git instructions at all, because there is neither a
-//!   repository nor a usable `git`. Then the variables are **not emitted**, and
-//!   an `env!` reading one is a compile error rather than a fallback. This is
-//!   the case for `cargo install --path .` from an unpacked release tarball —
-//!   one of the two install paths the README documents — and for a `cross`
-//!   container where git is absent or refuses a repository owned by another
-//!   uid.
-//!
-//! `src/build_info.rs` therefore reads every one of these through
-//! `option_env!`, never `env!`, and maps both the sentinel and the absent
-//! variable to `unknown`. Verified by building with `GIT_DIR` pointed at a
-//! path that does not exist; `env!` fails that build outright.
+//! Failure degrades two ways. If vergen runs but cannot determine a value, the
+//! variable is emitted holding a sentinel (a shallow CI clone hits this). If it
+//! cannot run git at all — no repository, no usable `git`, as with
+//! `cargo install --path .` from an unpacked release tarball — the variable is
+//! **not emitted**, and `env!` would be a compile error. `src/lib.rs` therefore
+//! reads everything through `option_env!` and maps both cases to `unknown`.
 
 use std::error::Error;
 

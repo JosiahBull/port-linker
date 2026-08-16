@@ -138,8 +138,6 @@ impl RestartBackoff {
 // ---------------------------------------------------------------------------
 
 #[derive(Parser, Debug)]
-// `-V` gives the bare version for anything parsing it; `--version` gives the
-// full build stamp for a bug report. clap picks between them by flag length.
 #[command(
     name = "port-linker",
     about = "Host-side CLI for port-linker",

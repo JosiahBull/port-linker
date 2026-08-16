@@ -1,38 +1,20 @@
 //! What the binary was built from, for `--version`.
 //!
 //! The values are stamped in at compile time by this crate's `build.rs` (see
-//! there for why only some of what vergen offers is emitted, and why a build
-//! with no git repository still succeeds). This crate's job is to read them
-//! back and make them fit to print.
+//! there for what is emitted and why a build with no git repository still
+//! succeeds); this crate reads them back and makes them fit to print.
 //!
-//! # Why this is its own crate
+//! It is its own crate so the vergen build-dependency tree, and the build
+//! script that must re-run whenever `.git/HEAD` changes, sit behind one small
+//! leaf instead of in `cli`. That contains the machinery but does not save a
+//! rebuild: cargo still recompiles dependents when the stamp changes.
 //!
-//! The build script asks cargo to re-run it whenever `.git/HEAD` or the current
-//! ref changes — it has to, or the stamp would go stale the moment you commit.
-//! Keeping that here rather than in `cli` puts the whole vergen build-dependency
-//! tree behind one small leaf crate, leaves `cli`'s manifest with no build
-//! dependencies at all, and means a second binary wanting the same stamp gets
-//! it without a second build script.
-//!
-//! What it does **not** do is save a rebuild, and it is worth being plain about
-//! that because it is the obvious reason to expect from the layout. Cargo
-//! rebuilds the dependents of a crate whose build script re-ran, so a commit
-//! still recompiles `cli`; measured on this workspace, touching `.git/HEAD`
-//! recompiles `build-info` and `cli` either way. Any binary carrying a live git
-//! stamp pays that, and the alternative is a stamp that lies.
-//!
-//! # Two versions
-//!
-//! `-V` prints the crate version alone, which is what a script parsing it
-//! wants. `--version` prints [`long_version`], the full block, which is what
-//! someone pasting into a bug report wants. clap wires the split itself: it
-//! uses `version` for the short flag and `long_version` for the long one.
-//!
-//! Note the version in that first line is the **caller's**, passed to
-//! [`long_version`], not this crate's. They are the same number today because
-//! every member inherits `[workspace.package] version`, but reporting a
-//! helper crate's version as the tool's would be wrong the moment that stops
-//! being true.
+//! clap splits the two flags itself: `version` backs `-V` (the bare number,
+//! for anything parsing it) and `long_version` backs `--version` (the full
+//! block, for a bug report). The version heading the block is the
+//! **caller's**, passed to [`long_version`], not this crate's — the same
+//! number only for as long as every member inherits `[workspace.package]
+//! version`.
 
 use std::sync::OnceLock;
 

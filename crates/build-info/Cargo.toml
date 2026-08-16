@@ -3,9 +3,6 @@ name = "build-info"
 version.workspace = true
 edition.workspace = true
 
-# Nothing at runtime — the whole crate is a handful of `option_env!` reads over
-# what build.rs stamped in. Everything vergen needs is confined here, so `cli`
-# carries no build dependencies of its own.
 [build-dependencies]
 vergen-gitcl.workspace = true
 
