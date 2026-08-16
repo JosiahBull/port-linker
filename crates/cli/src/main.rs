@@ -170,8 +170,9 @@ struct Args {
     /// SSH host key verification policy.
     ///
     /// SSH is the root of trust for the whole tunnel — it is what introduces
-    /// the two ends to each other — so this defaults to strict.
-    #[arg(long, value_enum, default_value_t = HostKeyPolicy::Strict)]
+    /// the two ends to each other — so an unknown key defaults to asking,
+    /// and falls back to refusing when there is no terminal to ask on.
+    #[arg(long, value_enum, default_value_t = HostKeyPolicy::Ask)]
     ssh_host_key_verification: HostKeyPolicy,
 
     /// Path to a custom agent binary to transfer (bypasses embedded binaries and caching)

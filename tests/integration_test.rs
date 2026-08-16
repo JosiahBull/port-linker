@@ -1651,6 +1651,7 @@ fn test_host_key_policy_display() {
     // This test should be added as a unit test in the cli crate's ssh module.
 
     // Documenting expected behavior:
+    // - HostKeyPolicy::Ask => "ask"
     // - HostKeyPolicy::Strict => "strict"
     // - HostKeyPolicy::AcceptNew => "accept-new"
     // - HostKeyPolicy::AcceptAll => "accept-all"
