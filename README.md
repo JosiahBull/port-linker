@@ -72,10 +72,31 @@ port-linker uses your existing SSH configuration (`~/.ssh/config`) and attempts 
 4. Interactive password prompt (last resort)
 
 Host keys are checked against `~/.ssh/known_hosts`. The default policy is
-`strict`: an unknown or changed host key aborts the connection.
+`ask`: an unknown key is shown to you and recorded only if you accept it, the
+same as OpenSSH.
+
+```
+The authenticity of host 'example.com:22' can't be established.
+  ssh-ed25519 key fingerprint is SHA256:gJwusF8uXoNsWC5QQVW8JT4Hp0MYtNAc5iz/db0d0PQ
+Verify this fingerprint out of band before accepting. Continue connecting? [y/N]
+```
+
+A **changed** key is refused outright under every policy but `accept-all` — you
+are never offered a prompt that would overwrite an existing pin. If the host was
+legitimately rekeyed, remove its line from `~/.ssh/known_hosts` yourself.
+
+With no terminal to ask on — CI, a cron job, a backgrounded run — `ask` refuses
+rather than hanging, so scripted use needs an explicit policy:
+
+| Policy | Unknown key | Changed key |
+| --- | --- | --- |
+| `ask` (default) | Prompts; refuses if there is no terminal | Refused |
+| `strict` | Refused | Refused |
+| `accept-new` | Trusted on first use and recorded | Refused |
+| `accept-all` | Trusted, nothing verified | Trusted |
 
 ```bash
-# Trust a host you have not connected to before (trust-on-first-use)
+# Trust a host you have not connected to before, without a prompt (TOFU)
 port-linker --remote user@host --ssh-host-key-verification accept-new
 ```
 

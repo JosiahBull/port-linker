@@ -255,9 +255,15 @@ Consequences for the threat model:
 | Local user on the target | Cannot pre-plant a binary the host will run (SHA256 verified), and cannot read the session secret from `argv` (it arrives on stdin). |
 
 **SSH host keys are load-bearing.** Everything above roots in the SSH channel
-being genuine, so `--ssh-host-key-verification` defaults to `strict` and is
-enforced via `known_hosts`. `accept-new` is trust-on-first-use; `accept-all`
-disables the guarantee entirely and exists only for disposable test fixtures.
+being genuine, so `--ssh-host-key-verification` is enforced via `known_hosts`
+and defaults to `ask`: an unknown key is shown to the user, fingerprint and all,
+and recorded only on an explicit yes. Without a terminal to ask on it degrades
+to `strict` rather than blocking, which keeps unattended runs fail-closed. A
+*changed* key is refused before the user is consulted under every policy but
+`accept-all` — a prompt there would let a single keystroke overwrite a pin that
+is doing exactly the job it was set up for. `strict` never accepts an unknown
+key; `accept-new` is trust-on-first-use; `accept-all` disables the guarantee
+entirely and exists only for disposable test fixtures.
 
 ### 5.3 UDP Relay Authentication
 

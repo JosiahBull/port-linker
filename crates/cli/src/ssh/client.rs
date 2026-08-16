@@ -21,7 +21,12 @@ use super::config::{self, JumpHost, SshHostConfig};
 /// not who it claims to be, everything downstream is introduced by the attacker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum HostKeyPolicy {
-    /// Reject unknown or changed host keys. The default.
+    /// Show the fingerprint of an unknown key and ask the user. The default.
+    ///
+    /// Matches OpenSSH. A changed key is still refused outright, and with no
+    /// terminal to ask on this behaves as `strict` rather than hanging.
+    Ask,
+    /// Reject unknown or changed host keys.
     Strict,
     /// Accept unknown keys (adding them to known_hosts), reject changed keys.
     ///
@@ -36,6 +41,7 @@ pub enum HostKeyPolicy {
 impl std::fmt::Display for HostKeyPolicy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Ask => write!(f, "ask"),
             Self::Strict => write!(f, "strict"),
             Self::AcceptNew => write!(f, "accept-new"),
             Self::AcceptAll => write!(f, "accept-all"),
@@ -62,13 +68,100 @@ impl client::Handler for Handler {
         &mut self,
         server_public_key: &PublicKey,
     ) -> std::result::Result<bool, Self::Error> {
-        Ok(verify_host_key(
-            self.policy,
-            &self.host,
-            self.port,
-            server_public_key,
-            None,
-        ))
+        let policy = self.policy;
+        let host = self.host.clone();
+        let port = self.port;
+        let key = server_public_key.clone();
+
+        // `ask` blocks on terminal input, so the whole check runs off-runtime.
+        // Prompting on a worker thread would stall every other task sharing it
+        // for as long as the user takes to answer.
+        let trusted = tokio::task::spawn_blocking(move || {
+            verify_host_key(policy, &host, port, &key, None, prompt_to_trust_host_key)
+        })
+        .await
+        .unwrap_or_else(|e| {
+            error!(%e, "host key check panicked — refusing to connect");
+            false
+        });
+
+        Ok(trusted)
+    }
+}
+
+/// Asks the user whether to trust an unknown host key.
+///
+/// A function pointer rather than a closure so `verify_host_key` stays concrete
+/// and the tests can answer without a terminal.
+type ConfirmHostKey = fn(&str, u16, &PublicKey) -> bool;
+
+/// Show an unknown host key's fingerprint and ask whether to trust it.
+///
+/// Returns `false` without asking when there is no terminal to ask on: a CI job
+/// or a backgrounded run has to fail closed rather than block forever on an
+/// answer nobody can give.
+fn prompt_to_trust_host_key(host: &str, port: u16, server_public_key: &PublicKey) -> bool {
+    use std::io::IsTerminal;
+
+    let fingerprint = server_public_key.fingerprint(Default::default());
+
+    // dialoguer reads stdin and draws on stderr, so both have to be a terminal.
+    if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
+        error!(
+            host = %host,
+            %fingerprint,
+            "unknown SSH host key and no terminal to confirm it on — refusing to \
+             connect. Verify the fingerprint out of band and add it to \
+             ~/.ssh/known_hosts, or re-run with \
+             --ssh-host-key-verification=accept-new to trust it on first use."
+        );
+        // Tracing goes to the log file unless RUST_LOG is set, and the caller
+        // only surfaces "SSH connect failed". Without this the operator of an
+        // unattended run gets no fingerprint and no way to act on it.
+        eprintln!(
+            "The authenticity of host '{host}:{port}' can't be established, and \
+             there is no terminal to confirm it on.\n  \
+             {} key fingerprint is {fingerprint}\n\
+             Add it to ~/.ssh/known_hosts, or pass \
+             --ssh-host-key-verification=accept-new to trust it on first use.",
+            server_public_key.algorithm().as_str(),
+        );
+        return false;
+    }
+
+    let prompt = format!(
+        "The authenticity of host '{host}:{port}' can't be established.\n  \
+         {} key fingerprint is {fingerprint}\n\
+         Verify this fingerprint out of band before accepting. Continue connecting?",
+        server_public_key.algorithm().as_str(),
+    );
+
+    // Default to no, and treat a read error or Ctrl-C the same way.
+    dialoguer::Confirm::new()
+        .with_prompt(prompt)
+        .default(false)
+        .interact()
+        .unwrap_or(false)
+}
+
+/// Record a newly trusted key so later connections are pinned to it.
+///
+/// A failure here is not fatal — the connection is already trusted — but it
+/// does mean the next connection is another unauthenticated first contact.
+fn record_host_key(
+    host: &str,
+    port: u16,
+    server_public_key: &PublicKey,
+    known_hosts: Option<&std::path::Path>,
+) {
+    let learned = match known_hosts {
+        Some(path) => {
+            russh::keys::known_hosts::learn_known_hosts_path(host, port, server_public_key, path)
+        }
+        None => russh::keys::known_hosts::learn_known_hosts(host, port, server_public_key),
+    };
+    if let Err(e) = learned {
+        warn!(host = %host, %e, "failed to record host key in known_hosts");
     }
 }
 
@@ -77,13 +170,18 @@ impl client::Handler for Handler {
 /// Split out from the `Handler` callback so the decision — the root of trust for
 /// the entire tunnel — can be tested directly against a scratch `known_hosts`
 /// file. `known_hosts` overrides the standard `~/.ssh/known_hosts` location and
-/// is only ever `Some` in tests.
+/// is only ever `Some` in tests, as is a `confirm` other than
+/// [`prompt_to_trust_host_key`].
+///
+/// Blocking: `confirm` waits on the user under [`HostKeyPolicy::Ask`], so call
+/// this off the async runtime.
 fn verify_host_key(
     policy: HostKeyPolicy,
     host: &str,
     port: u16,
     server_public_key: &PublicKey,
     known_hosts: Option<&std::path::Path>,
+    confirm: ConfirmHostKey,
 ) -> bool {
     if policy == HostKeyPolicy::AcceptAll {
         warn!(
@@ -126,6 +224,23 @@ fn verify_host_key(
     }
 
     match policy {
+        HostKeyPolicy::Ask => {
+            if !confirm(host, port, server_public_key) {
+                error!(
+                    host = %host,
+                    fingerprint = %server_public_key.fingerprint(Default::default()),
+                    "unknown SSH host key was not confirmed — refusing to connect"
+                );
+                return false;
+            }
+            warn!(
+                host = %host,
+                fingerprint = %server_public_key.fingerprint(Default::default()),
+                "unknown SSH host key confirmed by the user, recording it"
+            );
+            record_host_key(host, port, server_public_key, known_hosts);
+            true
+        }
         HostKeyPolicy::Strict => {
             error!(
                 host = %host,
@@ -142,18 +257,7 @@ fn verify_host_key(
                 fingerprint = %server_public_key.fingerprint(Default::default()),
                 "unknown SSH host key, trusting it on first use and recording it"
             );
-            let learned = match known_hosts {
-                Some(path) => russh::keys::known_hosts::learn_known_hosts_path(
-                    host,
-                    port,
-                    server_public_key,
-                    path,
-                ),
-                None => russh::keys::known_hosts::learn_known_hosts(host, port, server_public_key),
-            };
-            if let Err(e) = learned {
-                warn!(host = %host, %e, "failed to record host key in known_hosts");
-            }
+            record_host_key(host, port, server_public_key, known_hosts);
             true
         }
         // Handled above.
@@ -967,9 +1071,25 @@ mod tests {
 
     #[test]
     fn test_host_key_policy_display() {
+        assert_eq!(HostKeyPolicy::Ask.to_string(), "ask");
         assert_eq!(HostKeyPolicy::Strict.to_string(), "strict");
         assert_eq!(HostKeyPolicy::AcceptNew.to_string(), "accept-new");
         assert_eq!(HostKeyPolicy::AcceptAll.to_string(), "accept-all");
+    }
+
+    /// `default_value_t` renders the default through `Display` and then parses
+    /// it back with the `ValueEnum` parser, so a `Display` string that is not
+    /// also a valid value makes the CLI panic on startup.
+    #[test]
+    fn display_round_trips_through_the_value_parser() {
+        use clap::ValueEnum;
+
+        for policy in HostKeyPolicy::value_variants() {
+            let rendered = policy.to_string();
+            let parsed = HostKeyPolicy::from_str(&rendered, true)
+                .unwrap_or_else(|_| panic!("'{rendered}' must parse back to a policy"));
+            assert_eq!(*policy, parsed);
+        }
     }
 
     #[test]
@@ -977,6 +1097,7 @@ mod tests {
         // Test that all variants are available for clap parsing.
         // This is validated by the ValueEnum derive, but we ensure it compiles.
         let _variants: &[HostKeyPolicy] = &[
+            HostKeyPolicy::Ask,
             HostKeyPolicy::Strict,
             HostKeyPolicy::AcceptNew,
             HostKeyPolicy::AcceptAll,
@@ -985,10 +1106,12 @@ mod tests {
 
     #[test]
     fn test_host_key_policy_equality() {
+        assert_eq!(HostKeyPolicy::Ask, HostKeyPolicy::Ask);
         assert_eq!(HostKeyPolicy::Strict, HostKeyPolicy::Strict);
         assert_eq!(HostKeyPolicy::AcceptNew, HostKeyPolicy::AcceptNew);
         assert_eq!(HostKeyPolicy::AcceptAll, HostKeyPolicy::AcceptAll);
 
+        assert_ne!(HostKeyPolicy::Ask, HostKeyPolicy::Strict);
         assert_ne!(HostKeyPolicy::Strict, HostKeyPolicy::AcceptNew);
         assert_ne!(HostKeyPolicy::AcceptNew, HostKeyPolicy::AcceptAll);
     }
@@ -1031,6 +1154,20 @@ mod tests {
     fn host_key(openssh: &str) -> PublicKey {
         openssh.parse().expect("valid openssh public key")
     }
+
+    /// Every policy other than `ask` — and `ask` itself for a key that is
+    /// already known or has changed — must decide without consulting the user.
+    /// Wiring this in turns an unexpected prompt into a test failure rather
+    /// than a CI job hanging on input nobody will type.
+    const NEVER_ASKED: ConfirmHostKey =
+        |_, _, _| panic!("this policy must not ask the user to confirm a host key");
+
+    /// A user who answers yes.
+    const CONFIRMED: ConfirmHostKey = |_, _, _| true;
+
+    /// A user who answers no, which is also what a read error and Ctrl-C
+    /// collapse to in the real prompt.
+    const DECLINED: ConfirmHostKey = |_, _, _| false;
 
     /// A scratch known_hosts path that is removed when the test ends.
     struct ScratchKnownHosts(std::path::PathBuf);
@@ -1075,6 +1212,7 @@ mod tests {
                 22,
                 &host_key(HOST_KEY_A),
                 Some(known.path()),
+                NEVER_ASKED,
             ),
             "strict must refuse a host it has never seen"
         );
@@ -1093,6 +1231,7 @@ mod tests {
                 22,
                 &key,
                 Some(known.path()),
+                NEVER_ASKED,
             ),
             "strict must accept the key recorded in known_hosts"
         );
@@ -1111,6 +1250,7 @@ mod tests {
                 22,
                 &host_key(HOST_KEY_B),
                 Some(known.path()),
+                NEVER_ASKED,
             ),
             "a changed host key must be refused"
         );
@@ -1130,6 +1270,7 @@ mod tests {
                 22,
                 &host_key(HOST_KEY_B),
                 Some(known.path()),
+                NEVER_ASKED,
             ),
             "accept-new must still refuse a changed host key"
         );
@@ -1147,6 +1288,7 @@ mod tests {
                 22,
                 &key,
                 Some(known.path()),
+                NEVER_ASKED,
             ),
             "accept-new should trust an unknown key on first use"
         );
@@ -1167,6 +1309,7 @@ mod tests {
                 22,
                 &host_key(HOST_KEY_B),
                 Some(known.path()),
+                NEVER_ASKED,
             ),
             "once learned, a different key must be refused"
         );
@@ -1185,6 +1328,7 @@ mod tests {
                 2222,
                 &key,
                 Some(known.path()),
+                NEVER_ASKED,
             ),
             "the key recorded for port 2222 should match"
         );
@@ -1195,8 +1339,94 @@ mod tests {
                 22,
                 &key,
                 Some(known.path()),
+                NEVER_ASKED,
             ),
             "a key recorded for port 2222 must not authorise port 22"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // ask (the default): confirm an unknown key with the user
+    // -----------------------------------------------------------------------
+
+    /// Saying yes has to *pin* the key, not just wave this one connection
+    /// through — otherwise every later connection is another first contact and
+    /// the user is asked to re-approve a key nothing ever compared against.
+    #[test]
+    fn ask_records_the_key_the_user_confirmed() {
+        let known = ScratchKnownHosts::new("ask-confirmed");
+        let key = host_key(HOST_KEY_A);
+
+        assert!(
+            verify_host_key(
+                HostKeyPolicy::Ask,
+                "example.com",
+                22,
+                &key,
+                Some(known.path()),
+                CONFIRMED,
+            ),
+            "ask should trust a key the user confirms"
+        );
+        assert!(
+            known.contents().contains("example.com"),
+            "ask must record the confirmed key: {:?}",
+            known.contents()
+        );
+
+        // Pinned now, so the next connection must not ask again.
+        assert!(verify_host_key(
+            HostKeyPolicy::Ask,
+            "example.com",
+            22,
+            &key,
+            Some(known.path()),
+            NEVER_ASKED,
+        ));
+    }
+
+    /// Declining must leave no trace. Recording a key the user refused would
+    /// silently trust it on the next connection.
+    #[test]
+    fn ask_rejects_and_records_nothing_when_the_user_declines() {
+        let known = ScratchKnownHosts::new("ask-declined");
+
+        assert!(
+            !verify_host_key(
+                HostKeyPolicy::Ask,
+                "example.com",
+                22,
+                &host_key(HOST_KEY_A),
+                Some(known.path()),
+                DECLINED,
+            ),
+            "ask must refuse a key the user declines"
+        );
+        assert!(
+            !known.contents().contains("example.com"),
+            "a declined key must not be recorded: {:?}",
+            known.contents()
+        );
+    }
+
+    /// A changed key is the impersonation case, not a first contact: `ask` must
+    /// refuse it outright rather than offer the user a prompt that would
+    /// overwrite the pin. `NEVER_ASKED` panics if the prompt is reached.
+    #[test]
+    fn ask_refuses_a_changed_host_key_without_asking() {
+        let known = ScratchKnownHosts::new("ask-changed");
+        known.record("example.com", 22, &host_key(HOST_KEY_A));
+
+        assert!(
+            !verify_host_key(
+                HostKeyPolicy::Ask,
+                "example.com",
+                22,
+                &host_key(HOST_KEY_B),
+                Some(known.path()),
+                NEVER_ASKED,
+            ),
+            "ask must refuse a changed host key without prompting"
         );
     }
 
@@ -1214,11 +1444,25 @@ mod tests {
             22,
             &impostor,
             Some(known.path()),
+            NEVER_ASKED,
         ));
 
-        for policy in [HostKeyPolicy::Strict, HostKeyPolicy::AcceptNew] {
+        // `ask` is included deliberately: a changed key is refused before the
+        // user is ever consulted, so even an always-yes user cannot reach it.
+        for policy in [
+            HostKeyPolicy::Ask,
+            HostKeyPolicy::Strict,
+            HostKeyPolicy::AcceptNew,
+        ] {
             assert!(
-                !verify_host_key(policy, "example.com", 22, &impostor, Some(known.path())),
+                !verify_host_key(
+                    policy,
+                    "example.com",
+                    22,
+                    &impostor,
+                    Some(known.path()),
+                    CONFIRMED,
+                ),
                 "{policy} must not accept an impostor's key"
             );
         }
