@@ -454,22 +454,38 @@ impl SshSession {
 
         debug!(count = identities.len(), "trying SSH agent identities");
 
-        for key in identities {
-            match self
-                .handle
-                .authenticate_publickey_with(user, key.clone(), None, &mut agent)
-                .await
-            {
+        for identity in identities {
+            // russh 0.62 reports agent identities as an enum rather than a bare
+            // public key, so a certificate keeps its CA signature and principals
+            // instead of being flattened to the key inside it. Authenticating
+            // with the flattened key would fail against a server that only
+            // trusts the CA, so each variant takes its own call.
+            let fingerprint = identity.public_key().fingerprint(Default::default());
+            let attempt = match &identity {
+                russh::keys::agent::AgentIdentity::PublicKey { key, .. } => {
+                    self.handle
+                        .authenticate_publickey_with(user, key.clone(), None, &mut agent)
+                        .await
+                }
+                russh::keys::agent::AgentIdentity::Certificate { certificate, .. } => {
+                    self.handle
+                        .authenticate_certificate_with(user, certificate.clone(), None, &mut agent)
+                        .await
+                }
+            };
+
+            match attempt {
                 Ok(result) if result.success() => {
                     info!(
                         user = %user,
-                        fingerprint = %key.fingerprint(Default::default()),
+                        %fingerprint,
+                        comment = %identity.comment(),
                         "SSH agent authentication successful"
                     );
                     return Ok(true);
                 }
-                Ok(_) => debug!("agent key not accepted, trying next"),
-                Err(e) => debug!(%e, "agent auth attempt failed, trying next"),
+                Ok(_) => debug!(%fingerprint, "agent key not accepted, trying next"),
+                Err(e) => debug!(%e, %fingerprint, "agent auth attempt failed, trying next"),
             }
         }
 
