@@ -1,5 +1,14 @@
 # Working notes for agents
 
+Contributor-facing setup lives in [CONTRIBUTING.md](CONTRIBUTING.md); this file
+is the agent-specific overlay on top of it.
+
+## Hooks
+
+`./scripts/install-hooks.sh` once per clone. `core.hooksPath` is per clone, so
+committing `.githooks/` does not install anything — a fresh worktree has no
+hooks until that runs.
+
 ## Do not merge
 
 Open the pull request, get CI green, say it is ready, and stop. Merging is the
