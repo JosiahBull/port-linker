@@ -152,11 +152,14 @@ case "$SCENARIO" in
         run_scenario "D-TCP (single hop TCP)" "$SCRIPT_DIR/scenarios/scenario_d_tcp.sh"
         run_scenario "E (direct/regression)" "$SCRIPT_DIR/scenarios/scenario_e.sh"
         run_scenario "F (data flow)" "$SCRIPT_DIR/scenarios/scenario_f_dataflow.sh"
+        run_scenario "G (ssh agent auth)" "$SCRIPT_DIR/scenarios/scenario_g_agent.sh"
         ;;
     ci)
         # CI-compatible subset: skip multi-hop scenarios that require UDP relay
-        # or TCP bridge fixes not yet on this branch.
+        # or TCP bridge fixes not yet on this branch. E and G are both single
+        # hop and differ only in how the client authenticates, so both run.
         run_scenario "E (direct/regression)" "$SCRIPT_DIR/scenarios/scenario_e.sh"
+        run_scenario "G (ssh agent auth)" "$SCRIPT_DIR/scenarios/scenario_g_agent.sh"
         ;;
     a) run_scenario "A" "$SCRIPT_DIR/scenarios/scenario_a.sh" ;;
     b) run_scenario "B" "$SCRIPT_DIR/scenarios/scenario_b.sh" ;;
@@ -165,9 +168,10 @@ case "$SCENARIO" in
     d-tcp|d_tcp) run_scenario "D-TCP" "$SCRIPT_DIR/scenarios/scenario_d_tcp.sh" ;;
     e) run_scenario "E" "$SCRIPT_DIR/scenarios/scenario_e.sh" ;;
     f) run_scenario "F" "$SCRIPT_DIR/scenarios/scenario_f_dataflow.sh" ;;
+    g) run_scenario "G" "$SCRIPT_DIR/scenarios/scenario_g_agent.sh" ;;
     *)
         echo "Unknown scenario: $SCENARIO"
-        echo "Usage: $0 {all|ci|a|b|c|d-udp|d-tcp|e|f}"
+        echo "Usage: $0 {all|ci|a|b|c|d-udp|d-tcp|e|f|g}"
         exit 1
         ;;
 esac
