@@ -138,7 +138,14 @@ impl RestartBackoff {
 // ---------------------------------------------------------------------------
 
 #[derive(Parser, Debug)]
-#[command(name = "port-linker", about = "Host-side CLI for port-linker", version)]
+// `-V` gives the bare version for anything parsing it; `--version` gives the
+// full build stamp for a bug report. clap picks between them by flag length.
+#[command(
+    name = "port-linker",
+    about = "Host-side CLI for port-linker",
+    version,
+    long_version = build_info::long_version(env!("CARGO_PKG_VERSION"))
+)]
 struct Args {
     /// Remote host to connect to via SSH (e.g. "user@host" or "host").
     /// The agent will be deployed and started automatically.

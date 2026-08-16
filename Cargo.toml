@@ -89,6 +89,28 @@ partly-proxy-lib = { git = "https://github.com/thepartly/partly-proxy", rev = "0
 
 # Build
 resvg = "0.47"
+# Stamps the CLI with what it was built from, for `--version`. Four decisions
+# are baked into this one line:
+#
+# `vergen-gitcl` alone, not alongside `vergen`. It re-exports the whole of
+# vergen and forwards the feature flags, and the two crates pin a shared
+# `vergen-lib` exactly — so depending on both invites a version skew that fails
+# to compile with a trait error naming neither of them.
+#
+# Held at 9. Version 10 raises its MSRV to rustc 1.96, and cargo reports vergen
+# as the only crate in this graph needing anything past 1.95, so taking 10 would
+# make build metadata of all things the reason someone on a slightly older
+# stable cannot `cargo install` this. 9.1 needs 1.88 and does the same job.
+#
+# `gitcl` rather than the libgit2 backend: no C toolchain, and nothing that
+# could pull openssl into the graph.
+#
+# No `si` feature. It records the build machine's username and hostname, which
+# for a repo publishing signed public binaries means shipping the identity of
+# whoever ran the build — a CI runner's, or a contributor's own when they
+# `cargo install --path .`. See crates/cli/build.rs for the same reasoning
+# applied to the git author fields.
+vergen-gitcl = { version = "9.1", features = ["build", "cargo", "rustc"] }
 
 # Lints every member inherits with `[lints] workspace = true`. Setting them here
 # rather than only as `-D warnings` in CI means a plain local `cargo clippy`

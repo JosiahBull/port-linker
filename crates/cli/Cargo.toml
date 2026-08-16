@@ -32,6 +32,7 @@ ring.workspace = true
 ureq.workspace = true
 semver.workspace = true
 notify = { path = "../notify" }
+build-info = { path = "../build-info" }
 
 [dev-dependencies]
 partly-proxy-lib.workspace = true
