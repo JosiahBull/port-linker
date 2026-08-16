@@ -27,6 +27,7 @@ run() {
 run bash scripts/check-versions.sh
 run bash scripts/check-fmt.sh
 run bash scripts/check-deps.sh
+run bash scripts/check-dependabot.sh
 run bash scripts/check-workflows.sh
 run bash scripts/check-clippy.sh
 run bash scripts/test.sh

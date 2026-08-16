@@ -401,6 +401,9 @@ jobs:
       - name: Check for openssl in the runtime graph
         run: bash scripts/check-deps.sh
 
+      - name: Check 0.x dependencies are held back from minor bumps
+        run: bash scripts/check-dependabot.sh
+
       - name: Check for unused dependencies
         run: bash scripts/check-unused-deps.sh
 
