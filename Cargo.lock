@@ -45,7 +45,7 @@ dependencies = [
 
 [[package]]
 name = "agent"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "bytes",
  "common",
@@ -63,11 +63,11 @@ dependencies = [
 
 [[package]]
 name = "agent-build"
-version = "0.5.0"
+version = "0.5.1"
 
 [[package]]
 name = "agent-embed"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "agent-build",
  "flate2",
@@ -207,7 +207,7 @@ dependencies = [
 
 [[package]]
 name = "assets"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "resvg",
 ]
@@ -664,7 +664,7 @@ checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
 name = "cli"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "agent-embed",
  "bytes",
@@ -727,7 +727,7 @@ dependencies = [
 
 [[package]]
 name = "common"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "dirs",
  "libc",
@@ -1695,7 +1695,7 @@ dependencies = [
 
 [[package]]
 name = "integration-tests"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "bytes",
  "common",
@@ -2043,7 +2043,7 @@ dependencies = [
 
 [[package]]
 name = "notify"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "assets",
  "common",
@@ -2334,7 +2334,7 @@ dependencies = [
 
 [[package]]
 name = "perf"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "clap",
  "common",
@@ -2537,7 +2537,7 @@ dependencies = [
 
 [[package]]
 name = "protocol"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "bytes",
  "rkyv",
@@ -2565,7 +2565,7 @@ dependencies = [
 
 [[package]]
 name = "quic-over-tcp"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "bytes",
  "quinn",
@@ -2777,7 +2777,7 @@ checksum = "a96887878f22d7bad8a3b6dc5b7440e0ada9a245242924394987b21cf2210a4c"
 
 [[package]]
 name = "relay-embed"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "agent-build",
  "flate2",
@@ -3848,7 +3848,7 @@ dependencies = [
 
 [[package]]
 name = "tunnel"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "bytes",
  "common",
@@ -3869,7 +3869,7 @@ checksum = "562d481066bde0658276a35467c4af00bdc6ee726305698a55b86e61d7ad82bb"
 
 [[package]]
 name = "udp-relay"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "subtle",
  "tokio",
