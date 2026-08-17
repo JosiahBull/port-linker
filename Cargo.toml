@@ -77,18 +77,11 @@ libc = "0.2"
 
 # Testing
 wait-timeout = "0.2"
-# Stubs the GitHub release endpoint for the update-check tests, so CI exercises
-# the real ureq request path against a local listener instead of reaching the
-# network. `default-features = false` drops its on-disk snapshot storage, which
-# stubbing does not use.
-#
-# Pinned to a revision because the crate is not on crates.io yet, despite its
-# README badge. Swap this for a plain version requirement once it is published —
-# a git dependency is invisible to dependabot and to check-dependabot.sh.
 partly-proxy-lib = { git = "https://github.com/thepartly/partly-proxy", rev = "0d9c7450ea9a9af59acaffd4519c07a1ef8bf08a", default-features = false }
 
 # Build
 resvg = "0.47"
+vergen-gitcl = { version = "9.1", features = ["build", "cargo", "rustc"] }
 
 # Lints every member inherits with `[lints] workspace = true`. Setting them here
 # rather than only as `-D warnings` in CI means a plain local `cargo clippy`
