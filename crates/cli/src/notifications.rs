@@ -64,8 +64,8 @@ impl NotificationAccumulator {
 
     /// Drain all pending events and send batched notifications.
     pub fn flush(&mut self) {
-        let added: Vec<PortInfo> = self.pending_added.drain(..).collect();
-        let removed: Vec<PortInfo> = self.pending_removed.drain(..).collect();
+        let added = std::mem::take(&mut self.pending_added);
+        let removed = std::mem::take(&mut self.pending_removed);
         self.deadline = None;
 
         self.notifier.notify_ports_forwarded(added);
